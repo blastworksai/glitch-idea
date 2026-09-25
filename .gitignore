@@ -31,3 +31,9 @@ htmlcov/
 .glitch-idea-install.json
 .glitch-idea-backups/
 .glitch-idea-stage-*/
+
+# --- Glitch publish boundary (added by workspace-git) ---
+.planning/
+STATE.md
+CLAUDE.md
+AGENTS.md
