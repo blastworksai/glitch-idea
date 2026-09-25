@@ -10,3 +10,8 @@ client_secret*.json
 .mcp.json
 *.mcp.json
 .mcp.local.json
+
+# --- Glitch publish boundary (added by workspace-git) ---
+ideas
+evidence
+config.json
