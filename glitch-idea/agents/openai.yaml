@@ -1,0 +1,4 @@
+interface:
+  display_name: "Glitch Idea"
+  short_description: "Shape new ideas and choose the next useful slice"
+  default_prompt: "Use $glitch-idea to capture this new idea and shape the next useful step."

@@ -1,0 +1,5 @@
+{
+  "store_path": "ideas",
+  "plan_validator_argv": null,
+  "validator_timeout_seconds": 30
+}
