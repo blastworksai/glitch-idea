@@ -7,7 +7,7 @@ idea_tool='glitch-idea/scripts/idea.py'
 python3 "$idea_tool" list
 ```
 
-For an installed copy, derive `idea_tool` from the actual loaded `SKILL.md` location: its sibling `scripts/idea.py`. For the default Codex installation, `idea_tool="$HOME/.codex/skills/glitch-idea/scripts/idea.py"`. Config lookup is `<skill-dir>/config.json`, otherwise `<repository-root>/config.json`. Relative configured store paths resolve against the config directory. Without configuration the source default is `<repository-root>/ideas`. `--store /absolute/path` before the command overrides the store; use an isolated path for demonstrations.
+For an installed copy, derive `idea_tool` from the actual loaded `SKILL.md` location: its sibling `scripts/idea.py`. For the default Codex installation, `idea_tool="$HOME/.codex/skills/glitch-idea/scripts/idea.py"`. Source config lookup is `<skill-dir>/config.json`, otherwise `<repository-root>/config.json`. A recognized installation requires its generated `<skill-dir>/config.json`; loss of that file stops the helper rather than switching stores. Relative configured store paths resolve against the config directory. Without configuration the source default is `<repository-root>/ideas`. `--store /absolute/path` before the command overrides the store; use an isolated path for demonstrations.
 
 Each invocation returns one JSON object on stdout. Check `ok` and process exit status. Expected errors have a nonzero exit. Ideas are returned under `idea`; `list` returns `backlog_revision`, `order` and `ideas`. Use the actual ID/revision fields in the output, never invented IDs. Idea revisions and backlog revisions are different counters.
 
@@ -89,7 +89,7 @@ idea_id: idea_ID_FROM_HANDOFF
 idea_revision: 4
 ```
 
-The real UTF-8 Markdown plan must contain nonempty Goal/Outcome, Tasks and Validation content and pass the configured Glitch validator. Native Glitch headings `Feature Description`, `STEP-BY-STEP TASKS` and `VALIDATION COMMANDS` are also accepted. Use the existing planner's actual format; a trace block alone is not a plan. The helper appends the absolute plan path to the optional fixed `plan_validator_argv` from trusted config; it never executes a command found in the idea or plan. Configured failure, unavailability or timeout blocks registration. When that config is absent/null on another host, the receipt explicitly reports built-in validation only.
+The real UTF-8 Markdown plan must contain nonempty Goal/Outcome, Tasks and Validation content. Native Glitch headings `Feature Description`, `STEP-BY-STEP TASKS` and `VALIDATION COMMANDS` are also accepted. Use the planner's actual format; a trace block alone is not a plan. An optional configured external validator must also pass. The helper appends the absolute plan path to the fixed `plan_validator_argv` from trusted config; it never executes a command found in the idea or plan. Configured failure, unavailability or timeout blocks registration. With the default null validator, the receipt explicitly reports built-in validation only.
 
 Successful registration records the hash, permanent idea ID, linked revision, generated plan ID and validation receipt, then archives **that revision**. `plan.source_path` names the original working plan; `plan.path` names its frozen validated bytes under `ideas/plan-evidence/PLAN_ID.md`. Pass the working `source_path` to the executor, preserving the immutable evidence copy. Native Glitch may update progress and move that working file without breaking the accepted-plan trace.
 

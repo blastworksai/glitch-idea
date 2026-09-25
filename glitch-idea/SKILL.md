@@ -1,11 +1,11 @@
 ---
 name: glitch-idea
-description: Use when capturing a new software idea, shaping its alternatives before planning, prioritising the personal idea backlog, or resuming an idea and its next slice by permanent ID. This personal trial handles new ideas only; existing ideadump and FORGE records are outside it.
+description: Use when capturing a new software idea, shaping its alternatives before planning, prioritising a local idea backlog, or resuming an idea and its next slice by permanent ID. Handles newly captured ideas and their saved lifecycle; existing backlogs are outside this skill.
 ---
 
 # Glitch idea
 
-Turn a thought into a saved, resumable decision about the next useful step. Detailed planning follows shaping. Attribute actions to the operator or agent actually performing them. GlitchC authored this skill; that is not an instruction to adopt its identity.
+Turn a thought into a saved, resumable decision about the next useful step. Detailed planning follows shaping. Attribute actions to the operator or agent actually performing them. Original skill author: GlitchC.
 
 ## Capture and resume
 

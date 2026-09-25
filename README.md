@@ -57,7 +57,7 @@ After real execution, explicitly register a receipt with the idea ID, plan ID, u
 
 `ideas/state.json` is the authority. It contains original wording, revisions, distinct assessments, proposals, accepted placement decisions, registered plans and execution attempts. Archive snapshots and frozen plan files are derived from committed state. `doctor` reports missing or changed artifacts; `repair-views` recreates missing derived files without overwriting differing ones. Do not edit the state file directly.
 
-Actual `config.json` files, idea stores, execution evidence, environments and caches are ignored by version control. This package makes no network requests and does not provide a backup or sync service; keep your own backup of the store and durable execution receipts.
+Actual `config.json` files, idea stores, execution evidence, environments and caches are ignored by version control. There is no built-in backup or network sync service; keep your own backup of the store and durable execution receipts.
 
 ## Tests
 
