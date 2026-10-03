@@ -37,3 +37,6 @@ htmlcov/
 STATE.md
 CLAUDE.md
 AGENTS.md
+
+# Local list of private terms the asset guard also refuses (never published).
+tests/private-terms.txt

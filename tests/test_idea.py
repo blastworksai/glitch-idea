@@ -1,4 +1,4 @@
-"""Behavior tests for GlitchC's local idea lifecycle; all stores are temporary."""
+"""CLI behavior against authoritative Markdown; temporary stores."""
 import concurrent.futures
 import json
 from pathlib import Path
@@ -9,6 +9,8 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'glitch-idea/scripts/idea.py'
+sys.path.insert(0,str(SCRIPT.parent))
+import idea_markdown as markdown
 
 
 class IdeaTests(unittest.TestCase):
@@ -37,6 +39,12 @@ class IdeaTests(unittest.TestCase):
         self.assertEqual(result.returncode == 0, ok, result.stderr)
         self.assertNotIn('Traceback', result.stderr)
         return data
+
+    def authority_bytes(self):
+        # Compare every persisted file, including immutable history and metadata,
+        # rather than proving only that the index display stayed unchanged.
+        return {path.relative_to(self.store).as_posix():path.read_bytes()
+                for path in self.store.rglob('*') if path.is_file()}
 
     def capture(self, text='A useful new idea'):
         return self.cli('capture', '--text-file', self.file(text, '.txt'), '--actor', 'operator')['idea']
@@ -77,16 +85,16 @@ class IdeaTests(unittest.TestCase):
         self.assertIsNone(shown['ratings'])
         self.assertEqual(self.cli('list')['order'], [idea['idea_id']])
         self.assertFalse(self.cli('handoff', idea['idea_id'], ok=False)['ok'])
-        before = (self.store/'state.json').read_bytes()
+        before = self.authority_bytes()
         self.cli('capture', '--text-file', self.file('  \n'), '--actor', 'operator', ok=False)
-        self.assertEqual((self.store/'state.json').read_bytes(), before)
+        self.assertEqual(self.authority_bytes(), before)
 
     def test_stale_revisions_and_scores_preserve_history_without_reordering(self):
         idea = self.capture()
         current = self.edit('shape', idea, self.shape_data())
-        before = (self.store/'state.json').read_bytes()
+        before = self.authority_bytes()
         self.cli('shape', idea['idea_id'], '--file', self.file(self.shape_data()), '--expected-revision', 1, '--actor', 'assistant', ok=False)
-        self.assertEqual((self.store/'state.json').read_bytes(), before)
+        self.assertEqual(self.authority_bytes(), before)
         for value in ('0','11','true','NaN','1.5'):
             self.cli('rate', idea['idea_id'], '--urgency', value, '--importance', 5, '--expected-revision', 2, '--actor', 'operator', ok=False)
         current = self.cli('rate', idea['idea_id'], '--urgency', 2, '--importance', 10, '--expected-revision', 2, '--actor', 'operator')['idea']
@@ -104,12 +112,12 @@ class IdeaTests(unittest.TestCase):
         data['inputs']['effort'] = None
         idea = self.edit('assess', idea, data)
         self.assertIsNone(idea['assessments'][-1]['score'])
-        before = (self.store/'state.json').read_bytes()
+        before = self.authority_bytes()
         for value in (0,-1,True,float('nan'),float('inf'),1e100,10**400):
             data = self.assessment()
             data['inputs']['effort'] = value
             self.cli('assess', idea['idea_id'], '--file', self.file(data), '--expected-revision', idea['revision'], '--actor', 'assistant', ok=False)
-        self.assertEqual((self.store/'state.json').read_bytes(), before)
+        self.assertEqual(self.authority_bytes(), before)
 
     def test_glitch_plan_headings_and_validator_timeout(self):
         idea = self.ready()
@@ -126,14 +134,28 @@ class IdeaTests(unittest.TestCase):
     def test_store_corruption_in_history_or_links_fails_closed(self):
         idea = self.ready()
         self.register(idea)
-        state_path = self.store/'state.json'
-        original = state_path.read_bytes()
-        for mutate in (lambda s:s['ideas'][idea['idea_id']]['origin'].update(text='Forged origin'),lambda s:s['ideas'][idea['idea_id']]['plans'][0].update(sha256='not-a-hash'),lambda s:s['ideas'][idea['idea_id']]['proposals'].append({'broken':True})):
-            state=json.loads(original)
-            mutate(state)
-            state_path.write_text(json.dumps(state))
+        detail = self.store/(idea['idea_id']+'.md')
+        original = detail.read_bytes()
+        document = markdown.parse_document(original)
+        for mutate in (lambda m:m['idea']['origin'].update(text='Forged origin'),
+                       lambda m:m['idea']['plans'][0].update(sha256='not-a-hash'),
+                       lambda m:m['idea']['proposals'].append({'broken':True})):
+            metadata=json.loads(json.dumps(document.metadata))
+            mutate(metadata)
+            edited=markdown.encode_document(metadata,document.body)
+            detail.write_bytes(edited)
             result=self.cli('doctor',ok=False)
-            self.assertEqual(result['error']['code'],'corrupt_store')
+            self.assertEqual(result['error']['code'],'invalid_input')
+            self.assertEqual(detail.read_bytes(),edited)
+        detail.write_bytes(original)
+        # A linked immutable snapshot cannot be rewritten even with valid YAML.
+        historical=self.store/'history'/idea['idea_id']/'r1.md'
+        evidence=historical.read_bytes();doc=markdown.parse_document(evidence)
+        doc.metadata['snapshot']['actor']='forged-history'
+        edited=markdown.encode_document(doc.metadata,doc.body)
+        historical.write_bytes(edited)
+        self.assertEqual(self.cli('doctor',ok=False)['error']['code'],'corrupt_store')
+        self.assertEqual(historical.read_bytes(),edited)
 
     def test_unknown_assessment_remains_explicit_in_qualitative_proposal(self):
         idea=self.capture()
@@ -167,11 +189,13 @@ class IdeaTests(unittest.TestCase):
 
     def test_corruption_is_reported_and_never_reset(self):
         self.capture()
-        for raw in ('{broken', '{}', '{"schema_version":999}', 'null'):
-            (self.store/'state.json').write_text(raw)
-            self.cli('doctor', ok=False)
+        index=self.store/'IDEAS.md'
+        for raw in (b'{broken',b'---\n{}\n---\n',b'---\nschema_version: 999\n---\n',b'---\nnull\n---\n'):
+            index.write_bytes(raw)
+            self.cli('doctor',ok=False)
             self.cli('capture','--text-file',self.file('new'),'--actor','operator',ok=False)
-            self.assertEqual((self.store/'state.json').read_text(),raw)
+            self.assertEqual(index.read_bytes(),raw)
+            self.assertFalse((self.store/'state.json').exists())
 
     def test_real_plan_archive_execution_and_next_slice(self):
         idea = self.ready()
@@ -224,7 +248,13 @@ class IdeaTests(unittest.TestCase):
         self.cli('doctor')
         frozen.unlink()
         self.cli('doctor',ok=False)
-        self.cli('repair-views')
+        # Accepted plan bytes are authority, unlike the derived archive view.
+        # Missing authority cannot be regenerated from a changed working plan.
+        result=self.cli('repair-views',ok=False)
+        self.assertEqual(result['error']['code'],'missing_artifact')
+        self.assertFalse(frozen.exists())
+        frozen.write_bytes(original)  # Explicitly restore the exact test evidence.
+        self.cli('doctor')
         self.assertEqual(frozen.read_bytes(),original)
         frozen.write_text('Tampered approved evidence')
         self.cli('repair-views',ok=False)
@@ -307,10 +337,10 @@ class IdeaTests(unittest.TestCase):
 
     def test_missing_authority_never_silently_resets_captured_ideas(self):
         self.capture()
-        (self.store/'state.json').unlink()
+        (self.store/'IDEAS.md').unlink()
         self.cli('doctor',ok=False)
         self.cli('capture','--text-file',self.file('Do not reset'),'--actor','operator',ok=False)
-        self.assertFalse((self.store/'state.json').exists())
+        self.assertFalse((self.store/'IDEAS.md').exists())
 
     def test_concurrent_stale_shape_writers_only_one_commits(self):
         idea=self.capture()
@@ -325,12 +355,12 @@ class IdeaTests(unittest.TestCase):
 
     def test_input_bounds_and_malformed_shape_leave_store_unchanged(self):
         idea=self.capture()
-        before=(self.store/'state.json').read_bytes()
+        before=self.authority_bytes()
         for raw in ('{"scope":"project"}', '{"outcome":1,"outcome":2}', '{not json}'):
             self.cli('shape',idea['idea_id'],'--file',self.file(raw),'--expected-revision',1,'--actor','assistant',ok=False)
         self.cli('capture','--text-file',self.file('x'*(1024*1024+1)),'--actor','operator',ok=False)
         self.cli('show','../../state',ok=False)
-        self.assertEqual((self.store/'state.json').read_bytes(),before)
+        self.assertEqual(self.authority_bytes(),before)
 
 
 if __name__ == '__main__':

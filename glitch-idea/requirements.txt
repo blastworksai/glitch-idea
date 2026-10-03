@@ -1,0 +1,2 @@
+# Runtime dependency; install only into the documented user-owned runtime.
+PyYAML==6.0.3
