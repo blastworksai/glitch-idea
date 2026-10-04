@@ -234,7 +234,7 @@ class RuntimeTests(unittest.TestCase):
         server = self.start()
         value = self.client.probe_owner()
         self.assertEqual(value['origin'], 'http://127.0.0.1:' + str(server.server_port) + '/')
-        self.assertEqual(set(value['identity']), {'ok', 'code', 'schema_version', 'service', 'store_sha256', 'instance_nonce', 'challenge'})
+        self.assertEqual(set(value['identity']), {'ok', 'code', 'schema_version', 'service', 'store_sha256', 'instance_nonce', 'challenge', 'proof'})
         credential = json.loads((self.owner.path / 'credentials.json').read_bytes())
         payload = dict(challenge='a' * 64, instance_nonce=credential['instance_nonce'], store_sha256=self.owner.store_sha256)
         authorization = 'Bearer ' + credential['owner_token']

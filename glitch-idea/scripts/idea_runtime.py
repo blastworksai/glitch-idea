@@ -8,6 +8,7 @@ implemented; Windows fails closed pending native owner-ACL qualification.
 from contextlib import contextmanager
 import copy
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -228,6 +229,12 @@ def _binding(value):
     idea_id = value['selected_idea_id']
     _check(idea_id is None or (type(idea_id) is str and IDEA.fullmatch(idea_id) is not None))
     return copy.deepcopy(value)
+
+
+def _proof(owner_token, challenge, instance_nonce, store_sha256):
+    # The owner proves it holds the secret without revealing it.
+    return hmac.new(owner_token.encode('ascii'), (challenge + instance_nonce + store_sha256).encode('ascii'),
+                    hashlib.sha256).hexdigest()
 
 
 def _identity(value, store_sha256, *, credential):
@@ -565,7 +572,24 @@ class Runtime:
             except FileNotFoundError:
                 raise RuntimeError('owner_unavailable') from None
             _check(discovery['instance_nonce'] == credential['instance_nonce'], 'owner_identity_mismatch')
+            # Stale files after an unclean exit must never lead the client to hand the
+            # token to whatever now listens on that port: a live owner holds the lock.
+            _check(_POSIX and self._owner_holds_lock(directory), 'owner_unavailable')
             return discovery, credential
+
+    @staticmethod
+    def _owner_holds_lock(directory):
+        try:
+            descriptor = os.open('service.lock', os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory)
+        except OSError:
+            return False
+        try:
+            try: fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except (BlockingIOError, PermissionError): return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(descriptor)
 
     def _call(self, operation, discovery, credential, deadline, binding=None, agent=None):
         challenge = secrets.token_hex(32)
@@ -632,7 +656,7 @@ class Runtime:
                        and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', value['code']) is not None
                        and value['code'] not in IDENTITY_REFUSALS, 'owner_identity_mismatch')
                 raise RuntimeError(value['code'] if value['code'] in OWNER_REFUSALS else 'owner_refused')
-            identity_keys = {'ok', 'code', 'schema_version', 'service', 'store_sha256', 'instance_nonce', 'challenge'}
+            identity_keys = {'ok', 'code', 'schema_version', 'service', 'store_sha256', 'instance_nonce', 'challenge', 'proof'}
             extra_keys = {'binding_id', 'session_id', 'selected_idea_id', 'pairing_code'} if binding is not None else set()
             if agent is not None:
                 extra_keys = {'binding_id', 'session_id', 'generation', 'token'}
@@ -641,6 +665,9 @@ class Runtime:
                    and value['code'] == ('stopping' if operation == 'stop' else 'ok')
                    and value['service'] == SERVICE and value['store_sha256'] == self.store_sha256
                    and value['instance_nonce'] == discovery['instance_nonce'] and value['challenge'] == challenge,
+                   'owner_identity_mismatch')
+            _check(type(value['proof']) is str and hmac.compare_digest(value['proof'].encode('ascii', 'replace'),
+                   _proof(credential['owner_token'], challenge, discovery['instance_nonce'], self.store_sha256).encode('ascii')),
                    'owner_identity_mismatch')
             if binding is not None:
                 _check(type(value['binding_id']) is str and BINDING.fullmatch(value['binding_id']) is not None
@@ -744,7 +771,9 @@ class Runtime:
             _check(payload['instance_nonce'] == self._credential['instance_nonce']
                    and payload['store_sha256'] == self.store_sha256, 'owner_identity_mismatch')
             return dict(ok=True, code='ok', schema_version=1, service=SERVICE, store_sha256=self.store_sha256,
-                        instance_nonce=self._credential['instance_nonce'], challenge=payload['challenge'])
+                        instance_nonce=self._credential['instance_nonce'], challenge=payload['challenge'],
+                        proof=_proof(self._credential['owner_token'], payload['challenge'],
+                                     self._credential['instance_nonce'], self.store_sha256))
 
     def control(self, operation, payload, authorization, request_stop=None):
         with self._mutex:
