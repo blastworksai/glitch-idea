@@ -56,6 +56,14 @@ class SettingsTests(unittest.TestCase):
         self.code('invalid_key', lambda: self.settings.save('api', 'https://board.example', 'short'))
         self.code('invalid_key', lambda: self.settings.save('api', 'https://board.example', 'has a space in it'))
 
+    def test_removing_the_key_is_allowed_in_api_mode(self):
+        self.settings.save('api', 'https://board.example', KEY)
+        public = self.settings.save('api', 'https://board.example', '')
+        self.assertEqual(public, dict(where='api', api=dict(base_url='https://board.example', key_set=False)))
+        self.code('api_not_configured', lambda: self.settings.client())
+        # no change with no stored key is still refused
+        self.code('api_needs_url_and_key', lambda: self.settings.save('api', 'https://board.example', None))
+
     def test_the_key_never_crosses_a_network_in_clear_text(self):
         for url in ('http://board.example', 'http://10.0.0.5:8080/x', 'ftp://board.example', 'https://user:pw@board.example',
                     'https://board.example/?token=x', 'https://board.example/#x', 'javascript:alert(1)', '', 'https://', 'https://b.example:99999'):

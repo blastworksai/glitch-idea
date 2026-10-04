@@ -195,6 +195,27 @@ test('Remove the saved key sends key empty string', async () => {
   });
 });
 
+test('a key being typed survives a redraw and is what Save sends; Save then clears it', async () => {
+  await mounted(settingsHandler({where: 'api', base_url: 'https://w.example', key_set: true}), async h => {
+    h.find('setup-key').type_(KEY);
+    h.remount();
+    assert.equal(h.find('setup-key').value, KEY, 'the typed key is restored after a re-render');
+    await h.find('setup-save').click(); await settle();
+    assert.equal(h.calls.at(-1).body.key, KEY);
+    assert.equal(h.find('setup-key').value, '');
+    h.remount();
+    assert.equal(h.find('setup-key').value, '', 'a saved key is not restored');
+    assert.ok(!h.text().includes(KEY));
+  });
+});
+
+test('Remove the saved key works while the API store is chosen', async () => {
+  await mounted(settingsHandler({where: 'api', base_url: 'https://w.example', key_set: true}), async h => {
+    await h.find('setup-remove-key').click(); await settle();
+    assert.deepEqual(h.calls.at(-1).body, {where: 'api', base_url: 'https://w.example', key: ''});
+  });
+});
+
 test('Test connection shows the service name, or a plain message per reason', async () => {
   await mounted(settingsHandler(), async h => {
     await h.find('setup-test').click(); await settle();

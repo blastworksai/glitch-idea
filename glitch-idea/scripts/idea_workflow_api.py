@@ -138,7 +138,7 @@ class WorkflowSettings:
             stored = key
         else:
             _fail('invalid_key')
-        if where == 'api' and (url is None or stored is None):
+        if where == 'api' and (url is None or (stored is None and key != '')):  # an explicit removal is allowed in API mode
             _fail('api_needs_url_and_key')
         raw = (json.dumps(dict(schema=SCHEMA, where=where, base_url=url, key=stored), sort_keys=True,
                           separators=(',', ':')) + '\n').encode('utf-8')

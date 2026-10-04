@@ -21,12 +21,12 @@ const TEST_REASONS = {
 };
 const STATUS_NATIVE = 'Ideas are saved in Glitch.';
 const STATUS_API = 'Connection settings saved. Saving ideas to your own workflow is not switched on yet; until it is, ideas are still saved in Glitch.';
-const VIEW = new WeakMap(); // page-local state per Flow; the key is never kept here
+const VIEW = new WeakMap(); // page-local state per Flow; a key being typed is held here in memory only, never stored or drawn outside its input
 
 export function render(ctx) {
   const {body, foot, flow, element, button, handle} = ctx;
   const api = ctx.api ?? flow.api;
-  const ui = VIEW.get(flow) ?? {loaded: false, loading: false, settings: null, choice: 'native', url: '', notice: '', test: '', busy: false};
+  const ui = VIEW.get(flow) ?? {loaded: false, loading: false, settings: null, choice: 'native', url: '', notice: '', test: '', busy: false, key: ''};
   VIEW.set(flow, ui);
   const redraw = () => { if (!flow.disposed) flow.onChange(); };
   const connected = () => (ctx.isConnected ? ctx.isConnected() : ctx.connected);
@@ -40,7 +40,7 @@ export function render(ctx) {
   };
   if (!ui.loaded && !ui.loading && connected()) { load(); }
 
-  const back = button('Return to current idea', () => { if (!flow.disposed) { flow.view = 'workflow'; flow.onChange(); } });
+  const back = button('Return to current idea', () => { ui.key = ''; if (!flow.disposed) { flow.view = 'workflow'; flow.onChange(); } });
   back.id = 'setup-return'; foot.append(back);
 
   const stored = ui.settings;
@@ -80,10 +80,10 @@ export function render(ctx) {
     urlField.append(urlLabel, urlInput);
     const keyField = element('div', '', 'field');
     const keyLabel = element('label', 'API key'); keyLabel.htmlFor = 'setup-key';
-    keyInput = element('input'); keyInput.id = 'setup-key'; keyInput.type = 'password'; keyInput.autocomplete = 'off'; keyInput.value = '';
+    keyInput = element('input'); keyInput.id = 'setup-key'; keyInput.type = 'password'; keyInput.autocomplete = 'off'; keyInput.value = ui.key; // a key being typed survives the redraws the page makes
     keyInput.setAttribute('autocomplete', 'off'); keyInput.readOnly = ui.busy;
     keyInput.placeholder = stored.api.key_set ? 'A key is saved — leave empty to keep it' : 'Paste the key your system minted for you';
-    keyInput.addEventListener('input', () => untested());
+    keyInput.addEventListener('input', () => { ui.key = keyInput.value; untested(); });
     keyField.append(keyLabel, keyInput);
     if (stored.api.key_set) {
       const remove = button('Remove the saved key', handle(() => save('')));
@@ -100,6 +100,7 @@ export function render(ctx) {
     let typed = null;
     if (key === undefined) { typed = keyInput?.value ? keyInput.value : null; } else typed = key;
     if (keyInput) keyInput.value = '';
+    ui.key = '';
     const url = key !== '' && ui.choice === 'api' ? (urlInput?.value ?? ui.url).trim() : stored.api.base_url;
     ui.busy = true; ui.notice = ''; ui.test = ''; redraw();
     try {
