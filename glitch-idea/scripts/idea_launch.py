@@ -322,7 +322,7 @@ class OwnerService:
                 return Response(body,after_send=callback)
             check(operation in ('binding-open','agent-credentials') and type(payload) is dict and
                   set(payload) == (OPEN_FIELDS if operation == 'binding-open' else CREDENTIAL_FIELDS),'invalid_control')
-            body = self.runtime.validate_owner({key:payload[key] for key in COMMON},request.header('Authorization'))
+            body = self.runtime.validate_owner({key:payload[key] for key in COMMON},request.header('Authorization'),operation,payload)
             body.update(self._open(payload) if operation == 'binding-open' else self._credentials(payload))
             return Response(body)
         except OwnerError as exc:

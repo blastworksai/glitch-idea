@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'glitch-idea/scripts'))
 import idea_runtime as module
-from idea_runtime import Runtime, RuntimeError
+from idea_runtime import Runtime, RuntimeError, _request_mac
 
 
 class ControlHandler(BaseHTTPRequestHandler):
@@ -33,7 +33,7 @@ class ControlHandler(BaseHTTPRequestHandler):
                 if set(payload) != {'challenge', 'instance_nonce', 'store_sha256', 'mode', 'binding_id', 'selected_idea_id'}:
                     raise RuntimeError('invalid_control')
                 common = {key: payload[key] for key in ('challenge', 'instance_nonce', 'store_sha256')}
-                result = fixture.owner.validate_owner(common, self.headers.get('Authorization'))
+                result = fixture.owner.validate_owner(common, self.headers.get('Authorization'), 'binding-open', payload)
                 if payload['mode'] == 'new':
                     record = fixture.record()
                     record['selected_idea_id'] = payload['selected_idea_id']
@@ -237,17 +237,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(set(value['identity']), {'ok', 'code', 'schema_version', 'service', 'store_sha256', 'instance_nonce', 'challenge', 'proof'})
         credential = json.loads((self.owner.path / 'credentials.json').read_bytes())
         payload = dict(challenge='a' * 64, instance_nonce=credential['instance_nonce'], store_sha256=self.owner.store_sha256)
-        authorization = 'Bearer ' + credential['owner_token']
-        self.assert_code('owner_unauthorized', lambda: self.owner.validate_owner(payload, 'wrong'))
-        self.assert_code('invalid_control', lambda: self.owner.validate_owner(dict(payload, actor='forged'), authorization))
-        self.assert_code('owner_identity_mismatch', lambda: self.owner.validate_owner(dict(payload, instance_nonce='0' * 64), authorization))
+        mac = lambda op, body: 'Idea-HMAC ' + _request_mac(credential['owner_token'], op, body['challenge'],
+                                                         json.dumps(body, separators=(',', ':')).encode())
+        authorization = mac('stop', payload)
+        self.assert_code('owner_unauthorized', lambda: self.owner.validate_owner(payload, 'wrong', 'stop'))
+        self.assert_code('owner_unauthorized', lambda: self.owner.validate_owner(payload, 'Bearer ' + credential['owner_token'], 'stop'))
+        self.assert_code('owner_unauthorized', lambda: self.owner.validate_owner(payload, authorization, 'probe'))
+        self.assert_code('owner_unauthorized', lambda: self.owner.validate_owner(
+            payload, authorization, 'stop', dict(payload, mode='new')))
+        self.assert_code('invalid_control', lambda: self.owner.validate_owner(dict(payload, actor='forged'), authorization, 'stop'))
+        bad = dict(payload, instance_nonce='0' * 64)
+        self.assert_code('owner_identity_mismatch', lambda: self.owner.validate_owner(bad, mac('stop', bad), 'stop'))
         result, callback = self.owner.control('stop', payload, authorization, self.stopped.set)
         self.assertFalse(self.stopped.is_set()); callback(); self.assertTrue(self.stopped.is_set()); self.stopped.clear()
-        self.assert_code('unknown_control', lambda: self.owner.control('shell', payload, authorization))
+        self.assert_code('unknown_control', lambda: self.owner.control('shell', payload, mac('shell', payload)))
         result = self.client.request_owned_stop()
         self.assertEqual(result['code'], 'stopping'); self.assertTrue(self.stopped.wait(1))
         self.assertEqual(self.calls[-2:], ['/control/v1/probe', '/control/v1/stop'])
         self.assertNotIn('owner_token', json.dumps(result)); self.assertNotIn(credential['owner_token'], json.dumps(value))
+
+    def test_owner_startup_retries_past_a_brief_shared_probe_lock(self):
+        import fcntl
+        self.owner.acquire_owner(); self.owner.close()
+        lock = os.open(self.owner.path / 'service.lock', os.O_RDWR)
+        fcntl.flock(lock, fcntl.LOCK_SH)
+        timer = threading.Timer(0.2, lambda: (fcntl.flock(lock, fcntl.LOCK_UN), os.close(lock)))
+        timer.start(); self.addCleanup(timer.join)
+        self.owner.acquire_owner()  # old code raised runtime_busy at once
+
+    def test_owner_startup_still_busy_while_exclusive_lock_is_held(self):
+        import fcntl
+        self.owner.acquire_owner(); self.owner.close()
+        lock = os.open(self.owner.path / 'service.lock', os.O_RDWR)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        self.addCleanup(os.close, lock)
+        started = time.monotonic()
+        self.assert_code('runtime_busy', self.owner.acquire_owner)
+        self.assertLess(time.monotonic() - started, 5)
 
     def test_owner_response_identity_and_framing_mismatch_never_stops(self):
         self.start()

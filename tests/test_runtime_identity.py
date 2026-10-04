@@ -8,7 +8,7 @@ import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'glitch-idea/scripts'))
-from idea_runtime import Runtime, RuntimeError
+from idea_runtime import Runtime, RuntimeError, _request_mac
 
 
 class FakeListener:
@@ -60,7 +60,17 @@ class IdentityTests(unittest.TestCase):
         fake = FakeListener(); self.addCleanup(fake.close)
         self.owner.publish_discovery(fake.port)
         self.assertEqual(self.code(self.client.probe_owner), 'owner_identity_mismatch')
-        self.assertIn(b'Authorization: Bearer', bytes(fake.received))  # lock was held, so it was reached
+        received = bytes(fake.received)
+        self.assertIn(b'Authorization: Idea-HMAC ', received)  # lock was held, so it was reached
+        token = json.loads((self.owner.path / 'credentials.json').read_bytes())['owner_token']
+        self.assertNotIn(token.encode(), received)  # the raw owner token never crosses the wire
+        self.assertNotIn(b'Bearer', received)
+        head, body = received.split(b'\r\n\r\n', 1)
+        mac = head.split(b'Idea-HMAC ', 1)[1].split(b'\r\n', 1)[0].decode()
+        challenge = json.loads(body)['challenge']
+        self.assertEqual(mac, _request_mac(token, 'probe', challenge, body))
+        self.assertNotEqual(mac, _request_mac(token, 'stop', challenge, body))
+        self.assertNotEqual(mac, _request_mac(token, 'probe', challenge, body + b' '))
 
     def test_stale_discovery_with_free_lock_sends_nothing(self):
         self.owner.acquire_owner()
@@ -79,7 +89,7 @@ class IdentityTests(unittest.TestCase):
             def log_message(self, *_): pass
             def do_POST(self):
                 payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                body = json.dumps(owner.validate_owner(payload, self.headers.get('Authorization'))).encode()
+                body = json.dumps(owner.validate_owner(payload, self.headers.get('Authorization'), 'probe')).encode()
                 self.send_response(200); self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
 

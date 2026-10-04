@@ -40,8 +40,12 @@ class LaunchTests(unittest.TestCase):
         return child
 
     def cleanup(self):
-        if any(child.poll() is None for child in self.children):
-            self.client.request_owned_stop(timeout=3)
+        # A losing concurrent starter retries the lock briefly and may become the next owner
+        # once the first one stops, so stop until every child has exited.
+        end=time.monotonic()+8
+        while any(child.poll() is None for child in self.children) and time.monotonic()<end:
+            try:self.client.request_owned_stop(timeout=3)
+            except Exception:time.sleep(.05)
         for child in self.children:child.wait(timeout=5)
 
     def ensure(self,**kwargs):

@@ -237,6 +237,16 @@ def _proof(owner_token, challenge, instance_nonce, store_sha256):
                     hashlib.sha256).hexdigest()
 
 
+def _request_mac(owner_token, operation, challenge, body):
+    """Request MAC; the raw owner token never crosses the wire.
+
+    Canonical string: operation + LF + challenge + LF + sha256-hex(body), where body is the
+    exact compact UTF-8 JSON request body. Header: ``Authorization: Idea-HMAC <hex>``.
+    """
+    canonical = operation + '\n' + challenge + '\n' + hashlib.sha256(body).hexdigest()
+    return hmac.new(owner_token.encode('ascii'), canonical.encode('ascii'), hashlib.sha256).hexdigest()
+
+
 def _identity(value, store_sha256, *, credential):
     keys = ('schema_version', 'service', 'store_sha256', 'instance_nonce')
     _exact(value, keys + (('owner_token',) if credential else ('pid', 'host', 'port')))
@@ -497,8 +507,13 @@ class Runtime:
                         descriptor = os.open('service.lock', os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
                                              dir_fd=directory)
                     _private_file(descriptor)
-                    try: fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    except BlockingIOError: raise RuntimeError('runtime_busy') from None
+                    # A client probe briefly holds a shared lock: retry for a short bounded window.
+                    window = time.monotonic() + 1.0
+                    while True:
+                        try: fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+                        except BlockingIOError:
+                            if time.monotonic() >= window: raise RuntimeError('runtime_busy') from None
+                            time.sleep(0.01)
                     self._recover_stages(directory, bindings)
                     self._scan(directory, bindings)
                     self._lock_fd = descriptor; descriptor = None
@@ -605,7 +620,7 @@ class Runtime:
         try:
             connection = socket.create_connection(('127.0.0.1', discovery['port']), timeout=remaining)
             request = ('POST /control/v1/' + operation + ' HTTP/1.0\r\nHost: 127.0.0.1:' + str(discovery['port']) +
-                       '\r\nAuthorization: Bearer ' + credential['owner_token'] +
+                       '\r\nAuthorization: Idea-HMAC ' + _request_mac(credential['owner_token'], operation, challenge, raw) +
                        '\r\nContent-Type: application/json\r\nContent-Length: ' + str(len(raw)) +
                        '\r\nConnection: close\r\n\r\n').encode('ascii') + raw
             connection.settimeout(max(0.001, deadline - time.monotonic()))
@@ -753,7 +768,7 @@ class Runtime:
                            agent=(binding_id, session_id, expected_generation))
         return _AgentChannel(discovery['port'], value)
 
-    def validate_owner(self, payload, authorization):
+    def validate_owner(self, payload, authorization, operation, signed=None):
         """Narrow private-channel validator; no raw secret or arbitrary operation.
 
         Later binding-open checks its fixed full envelope separately, then passes
@@ -761,13 +776,17 @@ class Runtime:
         """
         with self._mutex:
             self._owner()
-            _check(type(authorization) is str and authorization.isascii()
-                   and secrets.compare_digest(authorization, 'Bearer ' + self._credential['owner_token']),
-                   'owner_unauthorized')
             _check(type(payload) is dict and set(payload) == {'challenge', 'instance_nonce', 'store_sha256'},
                    'invalid_control')
             _check(all(type(payload[key]) is str and HEX.fullmatch(payload[key]) is not None for key in payload),
                    'invalid_control')
+            # `signed` is the full request object the MAC covers (a superset of `payload`).
+            body = json.dumps(payload if signed is None else signed, separators=(',', ':')).encode('utf-8')
+            _check(type(authorization) is str and authorization.isascii() and type(operation) is str
+                   and authorization.startswith('Idea-HMAC ')
+                   and hmac.compare_digest(authorization[10:].encode('ascii'),
+                       _request_mac(self._credential['owner_token'], operation, payload['challenge'], body).encode('ascii')),
+                   'owner_unauthorized')
             _check(payload['instance_nonce'] == self._credential['instance_nonce']
                    and payload['store_sha256'] == self.store_sha256, 'owner_identity_mismatch')
             return dict(ok=True, code='ok', schema_version=1, service=SERVICE, store_sha256=self.store_sha256,
@@ -778,7 +797,7 @@ class Runtime:
     def control(self, operation, payload, authorization, request_stop=None):
         with self._mutex:
             _check(operation in ('probe', 'stop'), 'unknown_control')
-            result = self.validate_owner(payload, authorization)
+            result = self.validate_owner(payload, authorization, operation)
             _check(operation != 'stop' or callable(request_stop), 'invalid_control')
             if operation == 'stop':
                 result['code'] = 'stopping'

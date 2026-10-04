@@ -30,11 +30,11 @@ class FixedHandler(BaseHTTPRequestHandler):
         f.calls.append((self.command, path.path, payload, dict(self.headers)))
         status = 200
         if path.path == '/control/v1/probe':
-            result = f.owner.validate_owner(payload, self.headers.get('Authorization'))
+            result = f.owner.validate_owner(payload, self.headers.get('Authorization'), 'probe')
         elif path.path == '/control/v1/agent-credentials':
             assert set(payload) == {'challenge','instance_nonce','store_sha256','binding_id','session_id','expected_generation'}
             result = f.owner.validate_owner({k: payload[k] for k in ('challenge','instance_nonce','store_sha256')},
-                                            self.headers.get('Authorization'))
+                                            self.headers.get('Authorization'), 'agent-credentials', payload)
             assert payload['binding_id'] == f.bid and payload['session_id'] == f.sid
             result.update(binding_id=f.bid, session_id=f.sid, generation=f.generation, token=f.token)
             changes = {'nonce': ('instance_nonce','f'*64), 'challenge': ('challenge','f'*64),
