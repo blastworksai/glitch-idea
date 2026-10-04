@@ -159,13 +159,16 @@ class ControlTests(unittest.TestCase):
 
     def test_drain_requires_supervisor_and_closed_admission(self):
         with self.assertRaises(RuntimeError):self.server.drain()
-        errors=[]
+        errors=[];finished=threading.Event()
         def after_send():
-            self.server.stop_admission()
-            try:self.server.drain()
-            except RuntimeError:errors.append(True)
+            try:
+                self.server.stop_admission()
+                try:self.server.drain()
+                except RuntimeError:errors.append(True)
+            finally:finished.set()
         self.callback=after_send
         self.assertEqual(self.request('/control/v1/stop')[0],200)
+        self.assertTrue(finished.wait(10))
         self.server.drain();self.assertEqual(errors,[True])
 
 if __name__=='__main__':unittest.main()
