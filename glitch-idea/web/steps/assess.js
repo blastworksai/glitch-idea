@@ -2,6 +2,11 @@
 import {validAssess, assessmentFields, assessmentScore, insertionNeighbors, conversationStatus, filledNote} from '../folds.js';
 
 const METHODS = [['wsjf', 'WSJF'], ['rice', 'RICE'], ['kano', 'Kano']];
+// The operator reads local time, never a raw UTC stamp (same rule as ideas.js).
+const localTime = value => {
+  const when = new Date(value);
+  return Number.isNaN(when.getTime()) ? value : when.toLocaleString(undefined, {dateStyle: 'medium', timeStyle: 'short'});
+};
 const INPUTS = {wsjf: [['value', 'Value'], ['time_criticality', 'Time criticality'], ['enablement', 'Enablement'], ['effort', 'Effort']],
   rice: [['reach', 'Reach'], ['impact', 'Impact'], ['confidence', 'RICE confidence (0–1)'], ['effort', 'Effort']]};
 const CATEGORIES = ['must-be', 'performance', 'delighter', 'indifferent', 'reverse', 'questionable'];
@@ -132,7 +137,7 @@ export function render({body, foot, flow, element, button, field, connected, edi
   const ratings = flow.state?.human_ratings;
   human.append(element('p', 'Urgency: ' + (ratings ? ratings.urgency + ' of 10' : 'Unknown')),
     element('p', 'Importance: ' + (ratings ? ratings.importance + ' of 10' : 'Unknown')));
-  if (ratings) human.append(element('p', 'Recorded by: ' + ratings.actor + (ratings.timestamp ? ' · ' + ratings.timestamp : '')));
+  if (ratings) human.append(element('p', 'Recorded by: ' + ratings.actor + (ratings.timestamp ? ' · ' + localTime(ratings.timestamp) : '')));
   human.append(element('p', 'Assessment inputs do not change your urgency or importance.', 'help')); body.append(human);
 
   const methodGroup = element('fieldset'); methodGroup.append(element('legend', 'Assessment method'));
@@ -218,7 +223,7 @@ export function render({body, foot, flow, element, button, field, connected, edi
   if (flow.state?.assessment_summary) { const {score: ignored, assessment_id, actor, timestamp, ...core} = flow.state.assessment_summary;
     const saved = element('section', '', 'notice'); saved.id = 'assess-saved-summary';
     saved.append(element('h2', 'Latest saved assessment'), element('p', summary(core)));
-    if (actor) saved.append(element('p', 'Recorded by: ' + actor + (timestamp ? ' · ' + timestamp : ''))); body.append(saved); }
+    if (actor) saved.append(element('p', 'Recorded by: ' + actor + (timestamp ? ' · ' + localTime(timestamp) : ''))); body.append(saved); }
 
   const backlog = flow.state?.backlog, available = flow.state?.backlog_status?.available === true;
   const order = element('section'); order.id = 'assess-backlog'; order.setAttribute('aria-label', 'Actual backlog order');

@@ -95,6 +95,13 @@ test('empty editor has no method/rating/position inventions and human priorities
   assert.equal(human.all().filter(n=>['input','textarea','button'].includes(n.tag)).length,0);
 });
 
+test('Recorded by shows local time, never the raw UTC stamp',()=>{
+  const saved=rating.timestamp;rating.timestamp='2026-10-03T20:19:39.044698+00:00';let h;try{h=harness();}finally{rating.timestamp=saved;}
+  const line=h.get('assess-human-ratings').all().find(n=>n.textContent?.startsWith('Recorded by: '));
+  assert.ok(line);assert.ok(!line.textContent.includes('T20:19:39'),line.textContent);assert.ok(!line.textContent.includes('+00:00'),line.textContent);
+  assert.ok(line.textContent.includes('2026'),line.textContent);
+});
+
 test('archived valid Assess refuses acceptance and keeps current draft, readonly priorities and evidence visible',async()=>{
   const h=harness();await h.use();h.get('assess-input-value').input('12');
   const fields=copy(h.flow.buffers.assess),writes=h.writes.length,backlog=copy(h.state.backlog),priorities=copy(h.state.human_ratings);
