@@ -213,7 +213,7 @@ class ActualCliTests(unittest.TestCase):
     def request(self,opened,operation,payload=None,cookie=None,csrf=None):
         port=int(opened['origin'].split(':')[-1].rstrip('/'))
         headers={'X-Idea-Binding':opened['binding_id']}
-        if cookie:headers['Cookie']=cookie
+        if cookie:headers['Cookie']=cookie;headers['X-Idea-Tab']=self.tab
         if payload is not None:
             headers.update({'Content-Type':'application/json','Origin':opened['origin'].rstrip('/')})
             if csrf:headers['X-CSRF-Token']=csrf
@@ -228,7 +228,7 @@ class ActualCliTests(unittest.TestCase):
     def test_actual_cli_open_pair_capture_resume_reuse_and_restart_same_receipt(self):
         opened=self.open();self.assertIn('pairing_code',opened)
         status,paired,cookie=self.request(opened,'pair',{'code':opened['pairing_code']})
-        self.assertEqual(status,200);cookie=cookie.split(';',1)[0];csrf=paired['csrf_token']
+        self.assertEqual(status,200);cookie=cookie.split(';',1)[0];csrf=paired['csrf_token'];self.tab=paired['tab_secret']
         payload=dict(request_id='capture-lost',raw_text='Exact words\r\n',workspace=dict(name='Explicit',path=str(self.workspace),confirmed=True))
         status,captured,_=self.request(opened,'capture',payload,cookie,csrf);self.assertEqual(status,200)
         resumed=self.open('--resume',opened['binding_id'])
@@ -241,7 +241,7 @@ class ActualCliTests(unittest.TestCase):
         restarted=self.open('--resume',opened['binding_id'])
         self.assertEqual(restarted['binding_id'],opened['binding_id']);self.assertEqual(restarted['session_id'],opened['session_id'])
         self.assertNotEqual(restarted['identity']['instance_nonce'],opened['identity']['instance_nonce'])
-        status,paired,cookie=self.request(restarted,'pair',{'code':restarted['pairing_code']});self.assertEqual(status,200)
+        status,paired,cookie=self.request(restarted,'pair',{'code':restarted['pairing_code']});self.assertEqual(status,200);self.tab=paired['tab_secret']
         status,replayed,_=self.request(restarted,'capture',payload,cookie.split(';',1)[0],paired['csrf_token'])
         self.assertEqual(status,200);self.assertEqual(replayed,captured)
         self.assertEqual(self.cli('list')['order'],[captured['idea_id']])

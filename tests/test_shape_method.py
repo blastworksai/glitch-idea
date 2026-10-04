@@ -117,7 +117,7 @@ class ShapeHttpTests(unittest.TestCase):
         self.assertEqual(rejected['code'],'stale_revision')
         self.assertIsNone(self.browser('state')['accepted']['shape'])
         self.assertEqual(self.wire('/api/v1/requests/shape-stale',headers={
-            'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie})[0],404)
+            'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie,'X-Idea-Tab':self.tab})[0],404)
         self.accept_fields('shape',dict(fields()['shape'],outcome='Fresh human answer'),'shape-fresh')
         self.assertEqual(self.browser('state')['accepted']['shape']['outcome'],'Fresh human answer')
 
@@ -211,7 +211,7 @@ class MethodHttpTests(unittest.TestCase):
         self.assertIsNone(refused['steps']['method']['evidence_id'])
         self.assertEqual((refused['revision'],refused['draft_version']),(before['revision'],before['draft_version']))
         self.assertEqual(self.wire('/api/v1/requests/incomplete-appetite',headers={
-            'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie})[0],404)
+            'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie,'X-Idea-Tab':self.tab})[0],404)
         self.assertEqual({str(path.relative_to(self.store)):path.read_bytes() for path in self.store.rglob('*.md')},evidence_before)
         appetite=dict(incomplete,investment={'cap':2,'unit':'hours','boundary':'One human chosen boundary'})
         self.accept_fields('method',appetite,'complete-appetite')

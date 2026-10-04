@@ -273,7 +273,7 @@ test('pairing sends exact code once then reads cookie-bound session for CSRF', a
   const calls = [];
   const api = new IdeaApi(async (url, options) => {
     calls.push({url, options});
-    return fakeResponse({ok: true, code: 'ok', binding_id: BINDING, session_id: SESSION, csrf_token: 'fixture-only'});
+    return fakeResponse({ok: true, code: 'ok', binding_id: BINDING, session_id: SESSION, csrf_token: 'fixture-only', tab_secret: 'fixture-tab'});
   });
   await api.pair('one-time-fixture');
   assert.deepEqual(calls.map(call => call.url), ['/api/v1/pair', '/api/v1/session']);

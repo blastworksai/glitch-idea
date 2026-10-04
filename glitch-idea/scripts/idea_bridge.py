@@ -490,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
         return result
 
     def _request(self):
-        for name in ('Host', 'Origin', 'Content-Type', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding', 'Expect', 'Authorization',
+        for name in ('Host', 'Origin', 'Content-Type', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding', 'X-Idea-Tab', 'Expect', 'Authorization',
                      'X-Idea-Agent-Binding', 'X-Idea-Agent-Generation'):
             check(len(self.headers.get_all(name, [])) <= 1, 'ambiguous_headers')
         check(self.headers.get('Host') == self.server.host, 'wrong_host', 403)
@@ -514,7 +514,7 @@ class Handler(BaseHTTPRequestHandler):
             # Presence alone is forbidden on private routes, even when the
             # browser selector itself is empty or malformed.
             check(all(self.headers.get(name) is None for name in
-                      ('Origin', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding')),
+                      ('Origin', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding', 'X-Idea-Tab')),
                   'agent_browser_headers_refused', 403)
         else:
             selector = self.headers.get('X-Idea-Binding')
@@ -627,7 +627,7 @@ class Handler(BaseHTTPRequestHandler):
         if operation == 'control':
             check('?' not in self.path, 'invalid_query')
             check(all(request.header(name) is None for name in
-                      ('Origin', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding')),
+                      ('Origin', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding', 'X-Idea-Tab')),
                   'control_browser_headers_refused', 403)
             check(self.server.control is not None, 'control_unavailable', 503)
             payload = self._body(kind)
@@ -750,7 +750,7 @@ class Handler(BaseHTTPRequestHandler):
         including header parsing. No wire value selects a callable.
         """
         check(all(request.header(name) is None for name in
-                  ('Origin', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding')),
+                  ('Origin', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding', 'X-Idea-Tab')),
               'agent_browser_headers_refused', 403)
         check(self.server.agent is not None, 'agent_unavailable', 503)
         authorize = getattr(self.server.policy, 'authorize_agent', None)

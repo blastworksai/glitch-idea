@@ -12,6 +12,11 @@ export class ApiError extends Error {
 const WRITES = new Set(['capture', 'draft', 'accept', 'navigate', 'transport', 'activity', 'propose',
   'visual-disposition', 'visual-set/accept', 'handoff']);
 const BINDING = /^binding_[0-9a-f]{32}$/;
+// Per-tab secret: sessionStorage only (origin+port scoped, per tab); never persisted beyond the tab.
+const TAB_KEY = 'glitch-idea-tab:';
+function defaultTabStorage() {
+  try { return globalThis.sessionStorage ?? null; } catch { return null; }
+}
 const SESSION = /^session_[0-9a-f]{32}$/;
 const UPLOAD = /^upload_[0-9a-f]{32}$/;
 const ASSET = /^asset_[0-9a-f]{32}$/;
@@ -186,7 +191,10 @@ async function attachmentBody(response, expected, maximum) {
 }
 
 export class IdeaApi {
-  constructor(fetcher = globalThis.fetch.bind(globalThis), timeout = 15000, bindingId = null, transferTimeout = 300000) {
+  constructor(fetcher = globalThis.fetch.bind(globalThis), timeout = 15000, bindingId = null, transferTimeout = 300000,
+              tabStorage = defaultTabStorage()) {
+    this.tabStorage = tabStorage;
+    this.tabSecret = null;
     // Byte transfers have a separate, representable timer budget.
     if (!Number.isSafeInteger(transferTimeout) || transferTimeout < 1 || transferTimeout > 2147483647) {
       throw new ApiError('invalid_timeout');
@@ -205,6 +213,33 @@ export class IdeaApi {
     if (typeof bindingId !== 'string' || !BINDING.test(bindingId)) throw new ApiError('invalid_binding');
     if (this.bindingId && this.bindingId !== bindingId) throw new ApiError('session_binding_mismatch', 403);
     this.bindingId = bindingId;
+    if (!this.tabSecret) this.tabSecret = this.loadTabSecret();
+  }
+
+  tabKey() { return TAB_KEY + this.bindingId; }
+
+  loadTabSecret() {
+    try {
+      const value = this.tabStorage ? this.tabStorage.getItem(this.tabKey()) : null;
+      return typeof value === 'string' && value ? value : null;
+    } catch { return null; }
+  }
+
+  storeTabSecret(value) {
+    this.tabSecret = value;
+    try { if (this.tabStorage) this.tabStorage.setItem(this.tabKey(), value); } catch { /* tab memory only */ }
+  }
+
+  clearTabSecret() {
+    this.tabSecret = null;
+    try { if (this.tabStorage && this.bindingId) this.tabStorage.removeItem(this.tabKey()); } catch { /* ignore */ }
+  }
+
+  // Every /api/v1 call carries the per-tab secret; the cookie alone never authorises.
+  authHeaders(headers) {
+    if (this.bindingId) headers['X-Idea-Binding'] = this.bindingId;
+    if (this.tabSecret) headers['X-Idea-Tab'] = this.tabSecret;
+    return headers;
   }
 
   acceptSession(data) {
@@ -234,8 +269,7 @@ export class IdeaApi {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
     try {
-      const headers = {Accept: 'application/json'};
-      if (this.bindingId) headers['X-Idea-Binding'] = this.bindingId;
+      const headers = this.authHeaders({Accept: 'application/json'});
       if (writing) headers['Content-Type'] = 'application/json';
       if (writing && !pairing) headers['X-CSRF-Token'] = this.csrf;
       const response = await this.fetcher('/api/v1/' + route, {
@@ -250,7 +284,7 @@ export class IdeaApi {
         throw new ApiError('invalid_response', response.status, {}, writing);
       }
       if (!response.ok || !data.ok) {
-        if (response.status === 401 && scope === this.requestScope) this.csrf = null;
+        if (response.status === 401 && scope === this.requestScope) { this.csrf = null; this.clearTabSecret(); }
         throw new ApiError(data.code, response.status, data,
           data.write_state === 'committed_uncertain' || data.committed === true);
       }
@@ -269,7 +303,10 @@ export class IdeaApi {
   async pair(code) {
     this.requestScope++;
     this.csrf = null;
-    this.acceptSession(await this.request('pair', {code}, true));
+    const paired = await this.request('pair', {code}, true);
+    this.acceptSession(paired);
+    if (typeof paired.tab_secret !== 'string' || !paired.tab_secret) throw new ApiError('invalid_session');
+    this.storeTabSecret(paired.tab_secret);
     return this.session();
   }
 
@@ -402,10 +439,10 @@ export class IdeaApi {
     try {
       response = await this.fetcher('/api/v1/attachments/' + assetId, {
         method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-        headers: {Accept: 'application/octet-stream', 'X-Idea-Binding': this.bindingId},
+        headers: this.authHeaders({Accept: 'application/octet-stream'}),
         signal: controller.signal,
       });
-      if (response.status === 401 && scope === this.requestScope) this.csrf = null;
+      if (response.status === 401 && scope === this.requestScope) { this.csrf = null; this.clearTabSecret(); }
       if (!response.headers || typeof response.headers.get !== 'function') throw new ApiError('invalid_response', response.status);
       const length = response.headers.get('Content-Length');
       const type = response.headers.get('Content-Type');
@@ -447,9 +484,9 @@ export class IdeaApi {
     try {
       response = await this.fetcher('/api/v1/ideas/' + ideaId + '/markdown', {
         method: 'GET', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-        headers: {Accept: 'text/plain', 'X-Idea-Binding': this.bindingId}, signal: controller.signal,
+        headers: this.authHeaders({Accept: 'text/plain'}), signal: controller.signal,
       });
-      if (response.status === 401 && scope === this.requestScope) this.csrf = null;
+      if (response.status === 401 && scope === this.requestScope) { this.csrf = null; this.clearTabSecret(); }
       if (!response.headers || typeof response.headers.get !== 'function') throw new ApiError('invalid_response', response.status);
       const length = response.headers.get('Content-Length'), type = response.headers.get('Content-Type');
       if (typeof length !== 'string' || !/^(0|[1-9][0-9]{0,9})$/.test(length)) throw new ApiError('invalid_response', response.status);
@@ -507,8 +544,8 @@ export class IdeaApi {
     try {
       const response = await this.fetcher('/api/v1/uploads/' + id + '/bytes', {
         method: 'PUT', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-        headers: {Accept: 'application/json', 'Content-Type': 'application/octet-stream',
-          'X-Idea-Binding': this.bindingId, 'X-CSRF-Token': this.csrf},
+        headers: this.authHeaders({Accept: 'application/json', 'Content-Type': 'application/octet-stream',
+          'X-CSRF-Token': this.csrf}),
         // Browser Fetch owns Content-Length; no caller-supplied URL/header/path.
         body: bytes, signal: controller.signal,
       });
@@ -519,7 +556,7 @@ export class IdeaApi {
         throw new ApiError('invalid_response', response.status, {}, true);
       }
       if (!response.ok || !data.ok) {
-        if (response.status === 401 && scope === this.requestScope) this.csrf = null;
+        if (response.status === 401 && scope === this.requestScope) { this.csrf = null; this.clearTabSecret(); }
         throw new ApiError(data.code, response.status, data,
           data.write_state === 'committed_uncertain' || data.committed === true);
       }

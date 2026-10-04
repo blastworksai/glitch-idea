@@ -53,7 +53,7 @@ class LaunchTests(unittest.TestCase):
     def request(self,opened,route,payload=None,*,cookie=None,csrf=None):
         port=int(opened['origin'].split(':')[-1].rstrip('/'))
         headers={'Host':'127.0.0.1:'+str(port),'X-Idea-Binding':opened['binding_id']}
-        if cookie:headers['Cookie']=cookie
+        if cookie:headers['Cookie']=cookie;headers['X-Idea-Tab']=self.tab
         if payload is not None:
             headers.update({'Origin':opened['origin'].rstrip('/'),'Content-Type':'application/json'})
             if csrf:headers['X-CSRF-Token']=csrf
@@ -69,6 +69,7 @@ class LaunchTests(unittest.TestCase):
         status,body,cookie=self.request(opened,'pair',{'code':opened['pairing_code']})
         self.assertEqual(status,200,body)
         self.assertEqual(body['session_id'],opened['session_id'])
+        self.tab=body['tab_secret']
         return cookie.split(';',1)[0],body['csrf_token']
 
     def test_actual_source_child_startup_reuse_and_owned_stop(self):

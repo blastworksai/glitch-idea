@@ -39,7 +39,7 @@ class TransportTests(unittest.TestCase):
         status, body, headers = self.http('/api/v1/pair', {'code': code},
             headers={'Origin': self.server.origin})
         self.assertEqual(status, 200)
-        self.cookie = headers['Set-Cookie'].split(';')[0]; self.csrf = body['csrf_token']
+        self.cookie = headers['Set-Cookie'].split(';')[0]; self.csrf = body['csrf_token']; self.tab = body['tab_secret']
 
     def factory(self, record):
         return Service(self.store, {}, TrustedContext(record['actor'], record['receipt_session_id'], record['selected_idea_id']))
@@ -58,7 +58,7 @@ class TransportTests(unittest.TestCase):
                 'X-Idea-Agent-Generation': value['generation']}
 
     def browser_headers(self, write=False):
-        headers = {'Cookie': self.cookie, 'X-Idea-Binding': self.bid}
+        headers = {'Cookie': self.cookie, 'X-Idea-Binding': self.bid, 'X-Idea-Tab': self.tab}
         if write: headers.update({'Origin': self.server.origin, 'X-CSRF-Token': self.csrf})
         return headers
 

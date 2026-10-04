@@ -485,7 +485,7 @@ class PackagedMiddleJourneyTests(unittest.TestCase):
         connection = http.client.HTTPConnection('127.0.0.1',self.owner.server.server_port,timeout=10)
         try:
             connection.request('PUT','/api/v1/uploads/'+upload['upload_id']+'/bytes',raw,
-                {'Cookie':self.cookie,'X-Idea-Binding':self.opened['binding_id'],'X-CSRF-Token':self.csrf,
+                {'Cookie':self.cookie,'X-Idea-Binding':self.opened['binding_id'],'X-CSRF-Token':self.csrf,'X-Idea-Tab':self.tab,
                  'Origin':self.owner.server.origin,'Content-Type':'application/octet-stream'})
             response = connection.getresponse(); result = json.loads(response.read())
             self.assertEqual(response.status,200,result)

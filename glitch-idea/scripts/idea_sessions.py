@@ -24,7 +24,7 @@ SESSION = re.compile(r'session_[0-9a-f]{32}')
 IDEA = re.compile(r'idea_[0-9a-f]{32}')
 HEX = re.compile(r'[0-9a-f]+')
 AGENT = re.compile(r'agent_[0-9a-f]{32}')
-AGENT_BROWSER_HEADERS = ('Cookie', 'Origin', 'X-CSRF-Token', 'X-Idea-Binding')
+AGENT_BROWSER_HEADERS = ('Cookie', 'Origin', 'X-CSRF-Token', 'X-Idea-Binding', 'X-Idea-Tab')
 
 
 @dataclass(frozen=True)
@@ -48,6 +48,7 @@ class _Entry:
     active: bool = False
     cookie: str | None = None
     csrf: str | None = None
+    tab_secret: str | None = None
     agent_token: str | None = None
     agent_generation: str | None = None
     pairing_code: str | None = None
@@ -118,7 +119,7 @@ class SessionPolicy(TrustedSessionPolicy):
         generation = entry.agent_generation
         with self._registry:
             entry.active = False
-            entry.cookie = entry.csrf = entry.agent_token = None
+            entry.cookie = entry.csrf = entry.tab_secret = entry.agent_token = None
             entry.transport = None
         if generation is not None and self.cancel is not None:
             try:
@@ -330,9 +331,13 @@ class SessionPolicy(TrustedSessionPolicy):
             name, equal, value = item.strip().partition('=')
             if name == self._cookie_name(entry) and equal:
                 values.append(value)
+        # Per-tab secret: cookies are not port-scoped, so the cookie alone never authorises.
+        tab = request.header('X-Idea-Tab')
         with self._registry:
             check(entry.active and len(values) == 1 and entry.cookie is not None
                   and values[0].isascii() and hmac.compare_digest(values[0], entry.cookie), 'browser_unauthorized', 401)
+            check(type(tab) is str and 0 < len(tab) <= 256 and tab.isascii() and entry.tab_secret is not None
+                  and hmac.compare_digest(tab, entry.tab_secret), 'browser_unauthorized', 401)
             if write:
                 csrf = request.header('X-CSRF-Token')
                 check(type(csrf) is str and csrf.isascii() and entry.csrf is not None and hmac.compare_digest(csrf,entry.csrf), 'wrong_csrf', 403)
@@ -375,16 +380,16 @@ class SessionPolicy(TrustedSessionPolicy):
             if replay:
                 self._invalidate(entry)
                 raise BridgeError('pairing_replay_session_invalidated',401)
-            cookie, csrf = self._secret(), self._secret()
+            cookie, csrf, tab = self._secret(), self._secret(), self._secret()
             with self._registry:
-                entry.cookie, entry.csrf = cookie, csrf
+                entry.cookie, entry.csrf, entry.tab_secret = cookie, csrf, tab
                 entry.active, entry.redeemed = True, True
             if self.agent_activity is not None:
                 # A human just paired: the agent opened for them must not idle out first.
                 self.agent_activity(entry.record['binding_id'], entry.agent_generation)
             secure = '; Secure' if request.origin.startswith('https://') else ''
             return Response(dict(ok=True,code='ok',binding_id=entry.record['binding_id'],
-                                 session_id=entry.record['receipt_session_id'],csrf_token=csrf),
+                                 session_id=entry.record['receipt_session_id'],csrf_token=csrf,tab_secret=tab),
                 headers={'Set-Cookie': self._cookie_name(entry)+'='+cookie+'; Path=/; HttpOnly; SameSite=Strict'+secure})
         finally:
             lock.release()

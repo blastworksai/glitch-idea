@@ -60,8 +60,8 @@ class AgentPolicyTests(unittest.TestCase):
         code=self.policy.issue_pairing(self.bid)
         response=self.policy.pair(self.request(),{'code':code})
         self.cookie=response.headers['Set-Cookie'].split(';')[0]
-        self.csrf=response.body['csrf_token']
-        self.browser=self.request({'X-Idea-Binding':self.bid,'Cookie':self.cookie,'X-CSRF-Token':self.csrf})
+        self.csrf=response.body['csrf_token'];self.tab=response.body['tab_secret']
+        self.browser=self.request({'X-Idea-Binding':self.bid,'Cookie':self.cookie,'X-CSRF-Token':self.csrf,'X-Idea-Tab':self.tab})
         self.binding=self.policy.authorize(self.browser,write=True)
         return code
 
@@ -184,7 +184,7 @@ class AgentPolicyTests(unittest.TestCase):
         policy=self.make_policy(agent_open=None,agent_state=None)
         bid=policy.open_binding('Operator',self.sid)
         code=policy.issue_pairing(bid);response=policy.pair(self.request(),{'code':code})
-        browser=self.request({'X-Idea-Binding':bid,'Cookie':response.headers['Set-Cookie'].split(';')[0]})
+        browser=self.request({'X-Idea-Binding':bid,'Cookie':response.headers['Set-Cookie'].split(';')[0],'X-Idea-Tab':response.body['tab_secret']})
         self.assertEqual(policy.session(policy.authorize(browser))['agent_status'],'disconnected')
 
     def test_status_callback_strict_schema_and_typed_redacted_errors(self):

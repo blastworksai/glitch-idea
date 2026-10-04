@@ -536,7 +536,7 @@ class OwnerHandoffBridgeTests(unittest.TestCase):
 
     def wire(self,path,payload=None,*,browser=None,method=None,extra=None):
         headers = {} if browser is None else dict(Cookie=browser['cookie'],
-            **{'X-Idea-Binding':browser['binding_id'],'X-CSRF-Token':browser['csrf']})
+            **{'X-Idea-Binding':browser['binding_id'],'X-CSRF-Token':browser['csrf'],'X-Idea-Tab':browser['tab']})
         if payload is not None:
             headers.update({'Content-Type':'application/json','Origin':self.owner.server.origin})
         headers.update(extra or {})
@@ -555,7 +555,7 @@ class OwnerHandoffBridgeTests(unittest.TestCase):
         status,result,headers = self.wire('/api/v1/pair',{'code':opened['pairing_code']},
                                         extra={'X-Idea-Binding':opened['binding_id']})
         self.assertEqual(status,200,result)
-        return dict(opened,cookie=headers['Set-Cookie'].split(';',1)[0],csrf=result['csrf_token'])
+        return dict(opened,cookie=headers['Set-Cookie'].split(';',1)[0],csrf=result['csrf_token'],tab=result['tab_secret'])
 
     def api(self,name,payload=None,browser=None):
         status,result,_ = self.wire('/api/v1/'+name,payload,browser=self.first if browser is None else browser)
@@ -568,6 +568,27 @@ class OwnerHandoffBridgeTests(unittest.TestCase):
 
     def payload(self,request='owner-handoff'):
         return publication_payload(self.owner.store,self.key,request)['payload']
+
+    def test_real_owner_refuses_a_browser_request_without_the_matching_tab_secret(self):
+        browser = self.first
+        self.assertEqual(self.wire('/api/v1/session',browser=browser)[0],200)
+        status,body,_ = self.wire('/api/v1/session',browser=dict(browser,tab='0'*64))
+        self.assertEqual((status,body['code']),(401,'browser_unauthorized'))
+        self.assertEqual(self.wire('/api/v1/state',browser=dict(browser,tab='0'*64))[0],401)
+        self.assertEqual(self.wire('/api/v1/activity',{},browser=dict(browser,tab='0'*64))[0],401)
+        self.assertNotIn(browser['tab'],json.dumps(body))
+        # The other binding's secret never opens this binding.
+        self.assertEqual(self.wire('/api/v1/session',browser=dict(browser,tab=self.second['tab']))[0],401)
+        # Duplicate tab headers are ambiguous and refused before authentication.
+        connection = http.client.HTTPConnection('127.0.0.1',self.owner.server.server_port,timeout=5)
+        try:
+            connection.putrequest('GET','/api/v1/session',skip_host=True); connection.putheader('Host',self.owner.server.host)
+            for name,value in (('Cookie',browser['cookie']),('X-Idea-Binding',browser['binding_id']),
+                               ('X-Idea-Tab',browser['tab']),('X-Idea-Tab',browser['tab'])):
+                connection.putheader(name,value)
+            connection.endheaders(); self.assertEqual(connection.getresponse().status,400)
+        finally:
+            connection.close()
 
     def test_owner_fixed_review_ideas_sources_and_security_headers(self):
         web = Path(__file__).resolve().parents[1]/'glitch-idea/web'

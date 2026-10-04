@@ -15,9 +15,14 @@ const {browserSelection, selectedIdea, selectedBinding, rememberSelection, start
 const A = 'binding_' + 'a'.repeat(32), B = 'binding_' + 'b'.repeat(32);
 const SA = 'session_' + 'a'.repeat(32), SB = 'session_' + 'b'.repeat(32);
 const IDEA = 'idea_' + '1'.repeat(32);
-const META = (binding=A, session=SA) => ({ok:true,code:'ok',binding_id:binding,session_id:session,csrf_token:'test-only-csrf'});
+const META = (binding=A, session=SA) => ({ok:true,code:'ok',binding_id:binding,session_id:session,csrf_token:'test-only-csrf',tab_secret:'test-only-tab-'+binding});
 const response = (body,status=200) => ({ok:status>=200&&status<300,status,json:async()=>structuredClone(body)});
 const reject = code => error => error.code===code;
+
+function memoryStorage() {
+  const map = new Map();
+  return {map, getItem: k => map.has(k) ? map.get(k) : null, setItem: (k, v) => map.set(k, String(v)), removeItem: k => map.delete(k)};
+}
 
 function emulatedServer(namespace, cookieJar = new Map()) {
   const sessions = new Map([[A,SA],[B,SB]]), codes = new Map([['code-a',A],['code-b',B]]);
@@ -41,7 +46,7 @@ function emulatedServer(namespace, cookieJar = new Map()) {
       cookieJar.set(namespace+':'+binding,true);
       return response(META(binding,sessions.get(binding)));
     }
-    if(!selector||!cookieJar.has(namespace+':'+selector)) return response({ok:false,code:'browser_unauthorized'},401);
+    if(!selector||!cookieJar.has(namespace+':'+selector)||options.headers['X-Idea-Tab']!=='test-only-tab-'+selector) return response({ok:false,code:'browser_unauthorized'},401);
     if(url.endsWith('/session')) return response(META(selector,sessions.get(selector)));
     if(options.method==='POST'&&options.headers['X-CSRF-Token']!=='test-only-csrf') return response({ok:false,code:'wrong_csrf'},403);
     if(url.endsWith('/capture')) {
@@ -161,7 +166,7 @@ test('actual startApp render preserves binding after Capture and reload restores
   }
   const names=['document','location','history','addEventListener'];
   const saved=new Map(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]));
-  const server=emulatedServer('render'); const api=new IdeaApi(server.fetcher); await api.pair('code-a');
+  const server=emulatedServer('render'); const tabs=memoryStorage(); const api=new IdeaApi(server.fetcher,15000,null,300000,tabs); await api.pair('code-a');
   let currentUrl=new URL('http://127.0.0.1:1234/?binding='+A);
   const writes=[]; const nodes=new Map();
   globalThis.document={activeElement:null,createElement:tag=>new Node(tag),getElementById:id=>{
@@ -182,7 +187,7 @@ test('actual startApp render preserves binding after Capture and reload restores
     assert.equal(currentUrl.searchParams.get('binding'),A);
     assert.equal(currentUrl.searchParams.get('idea_id'),IDEA);
     assert.ok(writes.filter(url=>url.includes('idea_id')).every(url=>new URL(url,currentUrl).searchParams.get('binding')===A));
-    const reloadedApi=new IdeaApi(server.fetcher);
+    const reloadedApi=new IdeaApi(server.fetcher,15000,null,300000,tabs);
     const reloaded=startApp(reloadedApi);
     await new Promise(resolve=>setImmediate(resolve));
     assert.equal(reloadedApi.bindingId,A); assert.equal(reloadedApi.sessionId,SA);
@@ -423,4 +428,41 @@ test('actual app Capture and Priorities require Shape first for persisted archiv
     else{assert.equal(h.get('urgency-6')['aria-pressed'],'true');assert.equal(h.get('importance-7')['aria-pressed'],'true');}
     assert.equal(h.flow.canOpen('shape'),true);assert.equal(h.get('compact-shape').disabled,false);
   });
+});
+
+test('per-tab secret: api.js sends X-Idea-Tab on every call, keeps it in sessionStorage-shaped storage and never in the page',async()=>{
+  const server=emulatedServer('tab'); const tabs=memoryStorage();
+  const api=new IdeaApi(server.fetcher,15000,null,300000,tabs); await api.pair('code-a');
+  assert.equal(tabs.map.get('glitch-idea-tab:'+A),'test-only-tab-'+A);
+  await api.state(); await api.write('activity',{});
+  const authed=server.calls.filter(call=>!call.url.endsWith('/pair'));
+  assert.ok(authed.length>=3);
+  assert.ok(authed.every(call=>call.options.headers['X-Idea-Tab']==='test-only-tab-'+A));
+  assert.equal(server.calls[0].options.headers['X-Idea-Tab'],undefined);
+  assert.ok(authed.every(call=>call.options.credentials==='same-origin'));
+});
+
+test('per-tab secret: reload in the same tab keeps it, a new tab (empty storage) is refused until it pairs',async()=>{
+  const server=emulatedServer('tab2'); const tabs=memoryStorage();
+  await new IdeaApi(server.fetcher,15000,null,300000,tabs).pair('code-a');
+  const reload=new IdeaApi(server.fetcher,15000,A,300000,tabs);
+  assert.equal((await reload.session()).session_id,SA);
+  const newTab=new IdeaApi(server.fetcher,15000,A,300000,memoryStorage());
+  await assert.rejects(newTab.session(),reject('browser_unauthorized'));
+});
+
+test('per-tab secret: a 401 drops the stored secret and a pair response without one is refused',async()=>{
+  const server=emulatedServer('tab3'); const tabs=memoryStorage();
+  const api=new IdeaApi(server.fetcher,15000,null,300000,tabs); await api.pair('code-a');
+  tabs.map.set('glitch-idea-tab:'+A,'x'); api.tabSecret='wrong';
+  await assert.rejects(api.state(),reject('browser_unauthorized'));
+  assert.equal(api.tabSecret,null); assert.equal(tabs.map.has('glitch-idea-tab:'+A),false);
+  const bare=new IdeaApi(async()=>response({ok:true,code:'ok',binding_id:A,session_id:SA,csrf_token:'c'}),15000,null,300000,memoryStorage());
+  await assert.rejects(bare.pair('x'),reject('invalid_session'));
+});
+
+test('per-tab secret: api.js uses sessionStorage only, never localStorage or document.cookie',async()=>{
+  const api=await source('api.js');
+  assert.match(api,/globalThis\.sessionStorage/);
+  assert.doesNotMatch(api,/localStorage|document\.cookie|console\./);
 });

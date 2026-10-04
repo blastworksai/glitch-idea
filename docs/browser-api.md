@@ -9,8 +9,8 @@ the service API. Native Windows/macOS/Orca qualification remains pending.
 ## Shared rules
 
 All application routes are under `/api/v1/`. Reads require a browser session
-cookie. Writes additionally require exact Origin, Host and the per-session
-`X-CSRF-Token`. Session cookie is HttpOnly, SameSite=Strict, session-scoped;
+cookie and the per-tab secret in `X-Idea-Tab` (see Pairing). Writes additionally
+require exact Origin, Host and the per-session `X-CSRF-Token`. Session cookie is HttpOnly, SameSite=Strict, session-scoped;
 Secure is required on HTTPS. No localStorage secret, bearer URL, wildcard CORS,
 browser shell execution, generic file read, editable actor or validator config.
 Agent authentication is separate and never delivered to the browser.
@@ -50,7 +50,20 @@ channel. Neither launch argv nor domain Markdown contains a reusable secret.
 service Origin/Host and `Content-Type: application/json`, and accepts exactly
 `{code: string}`. The code expires within 60 seconds, allows at most five
 attempts, and can be redeemed once. Success sets the session-scoped HttpOnly
-SameSite=Strict cookie and returns `{ok:true,code:"ok",session_id,csrf_token}`.
+SameSite=Strict cookie and returns
+`{ok:true,code:"ok",binding_id,session_id,csrf_token,tab_secret}`.
+`tab_secret` is a fresh random secret of the same strength as the cookie and
+CSRF secrets. It appears only in this response; the page keeps it in
+`sessionStorage` (origin-and-port scoped, per tab; never a cookie, never
+persistent storage, never logged or put in a URL) and sends it as the
+`X-Idea-Tab` header on every `/api/v1/*` call, including `GET /session`. Cookies
+are not port-scoped, so another listener on the same loopback address could
+receive the cookie; the secret is what it cannot get. A browser request whose
+`X-Idea-Tab` is missing, wrong or duplicated is refused (401
+`browser_unauthorized`, or 400 for duplicates) whatever the cookie says; the
+comparison is constant-time and the cookie stays a second factor. A reload in the
+same tab keeps the secret; a new tab must pair again. Invalidating or re-pairing
+a session drops and rotates the secret.
 A replay of the redeemed code invalidates that browser session and outstanding
 requests; the UI displays the specific re-pair warning. Failures are 401
 `wrong_pairing_code`, `pairing_expired_or_locked`, or
@@ -59,8 +72,8 @@ agent resume; no automatic retries of a rejected bootstrap.
 
 `GET /session` with the valid cookie returns `csrf_token` along with session
 identity/status and capabilities. After reload, the browser calls this before
-any mutation and keeps the token only in memory. No localStorage or token in
-URLs. `GET /state` carries domain state only; it need not duplicate this token.
+any mutation and keeps the token only in memory. No persistent-storage secret
+or token in URLs. `GET /state` carries domain state only; it need not duplicate this token.
 A restart invalidates cookies and requests pairing again (401). Explicit trusted
 resume rebinds fresh credentials to the existing durable receipt session, rather
 than creating a new receipt namespace for an outstanding retry. A missing

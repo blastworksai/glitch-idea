@@ -59,10 +59,10 @@ class AgentLaunchTests(unittest.TestCase):
         status,result,cookie=self.wire('/api/v1/pair',{'code':self.opened['pairing_code']},
                                       {'X-Idea-Binding':self.opened['binding_id']})
         self.assertEqual(status,200,result)
-        self.cookie=cookie.split(';',1)[0];self.csrf=result['csrf_token']
+        self.cookie=cookie.split(';',1)[0];self.csrf=result['csrf_token'];self.tab=result['tab_secret']
 
     def browser(self,name,payload=None,ok=True,expected_status=None,*,timeout=5):
-        headers={'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie}
+        headers={'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie,'X-Idea-Tab':self.tab}
         if payload is not None:headers['X-CSRF-Token']=self.csrf
         status,result,_=self.wire('/api/v1/'+name,payload,headers,timeout=timeout)
         self.assertEqual(status,(200 if ok else 400) if expected_status is None else expected_status,result);return result
@@ -218,7 +218,7 @@ class AgentLaunchTests(unittest.TestCase):
         # Redesign R5/R6: "idea wizards should be resumable"; "read-only in the browser is good".
         row=[item for item in self.browser('ideas')['ideas'] if item['idea_id']==self.idea_id][0]
         self.assertEqual((row['current_step'],row['completed_steps']),(self.browser('state')['current_step'],1))
-        auth={'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie}
+        auth={'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie,'X-Idea-Tab':self.tab}
         status,kind,body=self.raw_get('/api/v1/ideas/'+self.idea_id+'/markdown',auth)
         self.assertEqual((status,kind),(200,'text/plain; charset=utf-8'))
         self.assertEqual(body,(self.store/(self.idea_id+'.md')).read_bytes())
@@ -232,7 +232,7 @@ class AgentLaunchTests(unittest.TestCase):
         # Redesign R7 over HTTP: the same session/CSRF gates as any browser write.
         listing=self.browser('ideas')
         payload=dict(request_id='rerank-http',idea_id=self.idea_id,expected_backlog_revision=listing['backlog_revision'],position=1,reason='Kept first')
-        status,_,_=self.wire('/api/v1/rerank',payload,{'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie})
+        status,_,_=self.wire('/api/v1/rerank',payload,{'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie,'X-Idea-Tab':self.tab})
         self.assertEqual(status,403,'no CSRF, no write')
         result=self.browser('rerank',payload)
         self.assertEqual((result['write_state'],result['position']),('applied',1))
@@ -246,11 +246,11 @@ class AgentLaunchTests(unittest.TestCase):
         key='fixture-key-0123456789'
         self.assertEqual(self.browser('settings'),dict(ok=True,code='ok',where='native',api=dict(base_url=None,key_set=False)))
         self.assertEqual(self.browser('settings/test',{}),dict(ok=True,code='ok',reachable=False,reason='api_not_configured',service=None))
-        status,_,_=self.wire('/api/v1/settings/test',{},{'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie})
+        status,_,_=self.wire('/api/v1/settings/test',{},{'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie,'X-Idea-Tab':self.tab})
         self.assertEqual(status,403,'no CSRF, no outward call')
         with FakeWorkflowApi(key) as fake:
             payload=dict(where='api',base_url=fake.url,key=key)
-            status,_,_=self.wire('/api/v1/settings/save',payload,{'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie})
+            status,_,_=self.wire('/api/v1/settings/save',payload,{'X-Idea-Binding':self.opened['binding_id'],'Cookie':self.cookie,'X-Idea-Tab':self.tab})
             self.assertEqual(status,403,'no CSRF, no settings change')
             saved=self.browser('settings/save',payload)
             self.assertEqual(saved['api'],dict(base_url=fake.url,key_set=True)); self.assertNotIn(key,json.dumps(saved))
@@ -283,7 +283,7 @@ class AgentLaunchTests(unittest.TestCase):
         self.opened=self.client.open_binding('resume',self.opened['binding_id']);worker.join(3)
         self.assertFalse(worker.is_alive());self.assertEqual(errors,['agent_unauthorized'])  # rotated credential, said plainly
         with self.assertRaises(AgentClientError):self.agent.respond(self.reply(correlation))
-        self.assertEqual(self.wire('/api/v1/state',headers={'X-Idea-Binding':self.opened['binding_id'],'Cookie':oldcookie})[0],401)
+        self.assertEqual(self.wire('/api/v1/state',headers={'X-Idea-Binding':self.opened['binding_id'],'Cookie':oldcookie,'X-Idea-Tab':self.tab})[0],401)
         self.pair();state=self.browser('state')
         self.assertEqual(state['proposals'][0]['proposal_id'],saved['evidence']['proposal_id'])
         self.assertEqual(state['proposals'][0]['stale_reason'],'wrong_generation')

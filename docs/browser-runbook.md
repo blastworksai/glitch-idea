@@ -188,7 +188,8 @@ In this release Option 2 is configured and tested only: ideas are still saved in
 - To resume: `session-open --resume binding_ID` (or `browser-open ... --resume binding_ID`).
   This re-pairs the same binding, keeps its selected idea and save receipts, issues a new pairing code and starts a new agent generation.
   Old agent credentials and outstanding replies do not carry over; a stale reply needs a fresh browser request.
-- A browser reload keeps the cookie; a service restart does not, so pair again.
+- A browser reload keeps the cookie and the tab's own secret; a service restart does not, so pair again.
+  Every tab holds its own secret in its session storage, so a new tab, or a copied link opened in another tab, must pair with a fresh code.
 - The service stops on its own after 15 minutes with no authenticated activity.
   Saved Markdown and binding metadata survive.
 - Drafts save when you leave a field, or after 3 seconds without typing.

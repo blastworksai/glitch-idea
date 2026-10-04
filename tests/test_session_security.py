@@ -28,7 +28,7 @@ class SessionTests(unittest.TestCase):
         self.bid=self.policy.open_binding('Operator',self.sid)
         self.server=BridgeServer(self.policy);self.worker=threading.Thread(target=self.server.serve_forever,daemon=True);self.worker.start()
         self.addCleanup(self.stop)
-        self.cookies={};self.csrf={}
+        self.cookies={};self.csrf={};self.tabs={}
 
     def make_policy(self,**kwargs):
         def factory(record):return Service(self.store,{},TrustedContext(record['actor'],record['receipt_session_id'],record['selected_idea_id']))
@@ -47,6 +47,7 @@ class SessionTests(unittest.TestCase):
         if auth:
             headers['Cookie']='; '.join(self.cookies.values())
             if bid in self.csrf:headers['X-CSRF-Token']=self.csrf[bid]
+            if bid in self.tabs:headers['X-Idea-Tab']=self.tabs[bid]
         if body is not None:headers.update({'Origin':self.server.origin,'Content-Type':'application/json'})
         headers.update(extra or {})
         conn=http.client.HTTPConnection('127.0.0.1',self.server.server_port,timeout=3)
@@ -60,7 +61,7 @@ class SessionTests(unittest.TestCase):
         status,data,headers=self.request('/api/v1/pair',{'code':code},bid=bid,auth=False)
         self.assertEqual(status,200);self.assertEqual(data['binding_id'],bid)
         self.assertRegex(data['csrf_token'],r'^[0-9a-f]{64}$')
-        self.cookies[bid]=headers['Set-Cookie'].split(';')[0]
+        self.cookies[bid]=headers['Set-Cookie'].split(';')[0];self.tabs[bid]=data['tab_secret']
         status,data,_=self.request('/api/v1/session',bid=bid);self.assertEqual(status,200)
         self.csrf[bid]=data['csrf_token'];return code
 
@@ -231,7 +232,7 @@ class SessionTests(unittest.TestCase):
         code=self.policy.issue_pairing(self.bid)
         status,pair,headers=self.request('/api/v1/pair',{'code':code},auth=False)
         self.assertEqual(status,200)
-        self.cookies[self.bid]=headers['Set-Cookie'].split(';')[0]
+        self.cookies[self.bid]=headers['Set-Cookie'].split(';')[0];self.tabs[self.bid]=pair['tab_secret']
         session=self.request('/api/v1/session',bid=self.bid)[1]
         script="""
 import fs from 'node:fs';
