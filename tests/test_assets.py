@@ -382,11 +382,11 @@ class AssetsTests(unittest.TestCase):
             self.assertEqual(self.put(intent)[0],500)
         self.assertFalse((self.root/codec.blob_path(intent['asset_id'])).exists())
         stages = list((self.root/'assets/staging').iterdir()); self.assertEqual(len(stages),1)
-        self.assertEqual(stages[0].stat().st_mode & 0o777,0o440)
+        self.assertEqual(stages[0].stat().st_mode & 0o777,0o400)
         self.assertEqual(self.put(intent)[0],200)
         blob = self.root/codec.blob_path(intent['asset_id'])
         linked = next(path for path in (self.root/'assets/staging').iterdir() if path.stat().st_ino==blob.stat().st_ino)
-        self.assertEqual(linked.stat().st_mode & 0o777,0o440); self.assertEqual(blob.read_bytes(),PNG)
+        self.assertEqual(linked.stat().st_mode & 0o777,0o400); self.assertEqual(blob.read_bytes(),PNG)
 
     def set_payload(self,ids=None,set_id=None,rid='set-1'):
         with self.store.transaction() as state: idea = state['ideas'][KEY]

@@ -80,9 +80,18 @@ def _directory(store,relative):
     store._safe_root()
     path = store._safe(relative,directory=True)
     if not path.exists():
-        path.mkdir(parents=True,exist_ok=True)
+        missing = []
+        for candidate in (path,*path.parents):
+            if candidate == store.path or candidate.exists(): break
+            missing.append(candidate)
+        for candidate in reversed(missing):
+            candidate.mkdir(mode=0o700,exist_ok=True)
         store._safe(relative,directory=True)
         sync_directory(path.parent)
+    # The shared asset root may have been created earlier by metadata writes; keep it owner-only too.
+    for owned in (store.path/'assets',path):
+        if os.name == 'posix' and owned.is_dir() and stat.S_IMODE(owned.stat().st_mode) & 0o077:
+            os.chmod(owned,0o700)
     require(path.stat().st_dev==store.path.stat().st_dev,'Asset directory is on another filesystem','corrupt_store')
     return path
 
@@ -128,7 +137,7 @@ def _stream(store,intent,body,*,staging=True):
                 _directory(store,'assets/staging')
                 relative = 'assets/staging/'+intent['upload_id']+'.'+uuid.uuid4().hex+'.part'
                 path = store._safe(relative)
-                descriptor = os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0),0o660)
+                descriptor = os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0),0o600)
         with (os.fdopen(descriptor,'wb') if staging else nullcontext(None)) as stage:
             if stage is not None:
                 info = os.fstat(stage.fileno())
@@ -172,7 +181,7 @@ def _publish_blob(store,stage,record):
                     and info.st_size==record['size'],'Unsafe retained stage','corrupt_store')
             seal = getattr(os,'fchmod',None)
             require(callable(seal),'Descriptor stage sealing unavailable','platform_unavailable')
-            seal(stream.fileno(),0o440); os.fsync(stream.fileno())
+            seal(stream.fileno(),0o400); os.fsync(stream.fileno())
             # Intents/stages may have committed while the body streamed. Recount
             # and link under the shared Store lock, without reading the body.
             with store.transaction():
