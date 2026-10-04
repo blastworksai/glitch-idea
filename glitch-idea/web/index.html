@@ -1,0 +1,31 @@
+<!doctype html>
+<!-- Original glitch-idea browser shell; no supplied branding or assets. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Glitch idea</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#step-panel">Skip to current step</a>
+  <header class="app-bar">
+    <strong>Glitch idea</strong>
+    <nav id="app-nav" class="app-nav" aria-label="Main">
+      <button id="nav-ideas" type="button" class="nav-item">Ideas</button>
+      <button id="nav-setup" type="button" class="nav-item">Setup</button>
+    </nav>
+    <span id="identity">New idea</span>
+    <span id="progress">0 of 7 saved</span>
+    <span id="save-status" role="status" aria-live="polite">Connecting…</span>
+  </header>
+  <p id="agent-status" class="agent-status" role="status"></p>
+  <section id="connection" class="connection" aria-label="Connect this browser" hidden></section>
+  <nav id="compact-nav" class="compact-nav" aria-label="Idea steps"></nav>
+  <main id="columns" class="columns" aria-label="Idea workflow"></main>
+  <p id="announcement" class="sr-only" role="status" aria-live="polite"></p>
+  <noscript>This local guided workflow requires JavaScript.</noscript>
+</body>
+</html>

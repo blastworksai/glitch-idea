@@ -1,6 +1,6 @@
 {
   "name": "glitch-idea",
   "kind": "local-skill",
-  "summary": "Capture and shape new ideas, preserve distinct assessments and operator order, and register plan and execution evidence.",
+  "summary": "Capture and shape new ideas in a local browser flow or from the command line, preserve distinct assessments and operator order, hand back a /glitch-plan prompt, and register plan and execution evidence.",
   "way_in": "$glitch-idea; capture a new idea; resume an idea by its permanent ID"
 }
