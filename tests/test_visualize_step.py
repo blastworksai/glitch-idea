@@ -61,22 +61,50 @@ class VisualizeStepTests(unittest.TestCase):
         self.service.handlers['visualize'] = TrustedStepHandler(lambda *args:self.fail('replay handler'))
         self.assertEqual(self.service.accept(payload),result)
 
-    def test_skipped_and_not_applicable_require_reason_and_clear_pointer_keep_history(self):
+    def test_skipped_needs_no_reason_and_clears_pointer_keep_history(self):
         self.publish_set(); self.service.accept(self.set_payload())
-        for disposition in ('skipped','not-applicable'):
-            payload = self.payload(self.state(),request_id=disposition)
-            payload['fields'] = dict(disposition=disposition,reason='No visual design is needed for this slice',
+        for reason in (None,'No visual design is needed for this slice'):
+            disposition = 'skipped'
+            payload = self.payload(self.state(),request_id='skip-'+str(reason is None))
+            payload['fields'] = dict(disposition=disposition,reason=reason,
                                      design_set_id=None,brief_evidence_id=None)
             self.service.accept(payload); projected = self.service.state()
             self.assertIsNone(projected['accepted']['visualize']['design_set_id'])
             self.assertEqual(projected['steps']['visualize']['status'],disposition)
             self.assertEqual(len(projected['asset_inventory']['records']),3)
 
-    def test_skipped_whitespace_or_hidden_set_pointer_refused(self):
+    def test_skipped_hidden_set_pointer_refused_and_not_applicable_is_invalid(self):
         self.publish_set()
-        for reason,set_id in (('   ',None),('\n\t',None),('Explicit reason',identifier('set',1))):
+        payload = self.set_payload()
+        payload['fields'].update(disposition='not-applicable',reason='Nonvisual',design_set_id=None,source=None)
+        self.assert_refused(payload)
+        for reason,set_id in (('Explicit reason',identifier('set',1)),):
             payload = self.set_payload(); payload['fields'].update(disposition='skipped',reason=reason,design_set_id=set_id)
             self.assert_refused(payload)
+
+    def test_accepted_set_requires_a_source_from_the_closed_enum(self):
+        self.publish_set()
+        for source in (None,'figma','Claude_Design'):
+            payload = self.set_payload(); payload['fields']['source'] = source
+            self.assert_refused(payload)
+        del payload['fields']['source']
+        self.assert_refused(payload)
+        payload = self.set_payload(); payload['fields']['source'] = 'prototype'
+        # The fixture set holds one png, not the prototype's zip plus png.
+        self.assert_refused(payload,'supporting_evidence')
+
+    def test_prototype_design_set_is_one_zip_and_one_png(self):
+        self.publish_set()
+        with self.store.transaction() as state: base = self.set_record(state,2)
+        png = base['members'][0]
+        zipped = dict(png,asset_id=identifier('asset',9),name='bundle.zip',type='application/zip')
+        self.assertEqual(sorted(m['type'] for m in (png,zipped)),['application/zip','image/png'])
+        fields = dict(disposition='accepted_set',reason=None,design_set_id='set_'+'1'*32,brief_evidence_id=None,
+                      source='prototype',assets=[zipped['asset_id'],png['asset_id']])
+        from idea_workflow import validate_step_fields
+        self.assertEqual(validate_step_fields('visualize',fields)['source'],'prototype')
+        for bad in ([png['asset_id'],png['asset_id']],['x'],[]):
+            with self.assertRaises(IdeaError): validate_step_fields('visualize',dict(fields,assets=bad))
 
     def test_non_null_brief_or_proposal_has_no_fabricated_provenance(self):
         self.publish_set()
@@ -98,7 +126,7 @@ class VisualizeStepTests(unittest.TestCase):
             state['order'].append(other); state['backlog_revision'] += 1; self.store.commit(state)
         request = bridge.RequestInfo('POST','unused',{},'fixture')
         upload = ingestion.upload_metadata(self.binding,request,dict(request_id='other-metadata',idea_id=other,
-            expected_revision=6,name='Other.png',declared_type='image/png',size=len(projection.PNG)))
+            expected_revision=7,name='Other.png',declared_type='image/png',size=len(projection.PNG)))
         request = bridge.RequestInfo('PUT','unused',{},'fixture',upload['upload_id'])
         ingestion.upload_bytes(self.binding,request,bridge.BoundedBody(io.BytesIO(projection.PNG),len(projection.PNG)))
         def factory(state):
@@ -110,35 +138,62 @@ class VisualizeStepTests(unittest.TestCase):
         payload = self.set_payload(); payload['fields']['design_set_id'] = identifier('set',2)
         self.assert_refused(payload,'asset_not_found')
 
-    def test_stale_shape_and_capture_sources_refuse_existing_set(self):
-        self.publish_set()
+    def accept_changed(self,step,key):
         with self.store.transaction(write=True) as state:
-            value = fields()['shape']; value['outcome'] = 'Changed accepted outcome'
-            state['ideas'][KEY] = accept(state['ideas'][KEY],'shape',value)['idea']; self.store.commit(state)
+            value = fields()[step]; value[key] = 'Changed accepted '+key
+            state['ideas'][KEY] = accept(state['ideas'][KEY],step,value)['idea']; self.store.commit(state)
+
+    def test_stale_discovery_source_refuses_existing_set(self):
+        self.publish_set(); self.accept_changed('discovery','problem')
+        with self.store.transaction(write=True) as state:
+            # Exploration consumes Discovery; re-saving it leaves only the Discovery witness changed.
+            state['ideas'][KEY] = accept(state['ideas'][KEY],'exploration')['idea']; self.store.commit(state)
         self.assert_refused(self.set_payload(),'stale_source')
+
+    def test_stale_exploration_source_refuses_existing_set(self):
+        self.publish_set(); self.accept_changed('exploration','outcome')
+        self.assert_refused(self.set_payload(),'stale_source')
+
+    def test_stale_capture_source_refuses_existing_set(self):
+        self.publish_set()
         with self.store.transaction(write=True) as state:
             value = fields()['capture']; value['raw_text'] = 'Changed capture words'
             idea = accept(state['ideas'][KEY],'capture',value)['idea']
-            state['ideas'][KEY] = accept(idea,'shape',fields()['shape'])['idea']; self.store.commit(state)
+            for later in ('method','discovery','exploration'):
+                idea = accept(idea,later,fields()[later])['idea']
+            state['ideas'][KEY] = idea; self.store.commit(state)
         self.assert_refused(self.set_payload(),'stale_source')
 
     def test_unrelated_overall_revision_change_preserves_set_source(self):
         self.publish_set()
         with self.store.transaction(write=True) as state:
             before = visual.current_source(state['ideas'][KEY])
-            value = fields()['priorities']; value['urgency'] = 9
-            state['ideas'][KEY] = accept(state['ideas'][KEY],'priorities',value)['idea']
+            value = fields()['assess']; value['assessment']['confidence'] = 'high'
+            state['ideas'][KEY] = accept(state['ideas'][KEY],'assess',value)['idea']
             self.assertEqual(visual.current_source(state['ideas'][KEY]),before); self.store.commit(state)
         self.service.accept(self.set_payload())
         self.assertEqual(self.service.state()['accepted']['visualize']['design_set_id'],identifier('set',1))
 
-    def test_edited_consumed_draft_is_not_current_accepted_source(self):
+    def test_priorities_change_sits_upstream_of_discovery_and_refuses_until_resaved(self):
         self.publish_set()
         with self.store.transaction(write=True) as state:
-            idea = state['ideas'][KEY]; value = fields()['shape']; value['outcome'] = 'Unaccepted draft'
-            state['ideas'][KEY] = save_draft(idea,'shape',value,expected_revision=idea['revision'],
+            value = fields()['priorities']; value['urgency'] = 9
+            state['ideas'][KEY] = accept(state['ideas'][KEY],'priorities',value)['idea']; self.store.commit(state)
+        self.assert_refused(self.set_payload(),'not_ready')
+
+    def refuse_unaccepted_draft(self,step,key):
+        self.publish_set()
+        with self.store.transaction(write=True) as state:
+            idea = state['ideas'][KEY]; value = fields()[step]; value[key] = 'Unaccepted draft'
+            state['ideas'][KEY] = save_draft(idea,step,value,expected_revision=idea['revision'],
                 expected_draft_version=idea['workflow']['draft_version'])['idea']; self.store.commit(state)
         self.assert_refused(self.set_payload())
+
+    def test_edited_discovery_draft_is_not_current_accepted_source(self):
+        self.refuse_unaccepted_draft('discovery','problem')
+
+    def test_edited_exploration_draft_is_not_current_accepted_source(self):
+        self.refuse_unaccepted_draft('exploration','outcome')
 
     def pure_inputs(self):
         state = self.state(); idea = state['ideas'][KEY]; payload = self.payload(state)

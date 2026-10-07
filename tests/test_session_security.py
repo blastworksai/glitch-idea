@@ -148,8 +148,8 @@ class SessionTests(unittest.TestCase):
     def test_expiry_five_attempts_and_explicit_resume_for_new_code(self):
         code=self.policy.issue_pairing(self.bid);generation=self.policy.agent_credentials(self.bid)['generation'];self.now+=60
         self.assertEqual(self.request('/api/v1/pair',{'code':code},bid=self.bid)[1]['code'],'pairing_expired_or_locked')
-        self.assertIn((self.bid,generation),self.cancelled)
-        self.policy.open_binding('Operator',self.sid,binding_id=self.bid,resume=True)
+        self.assertNotIn((self.bid,generation),self.cancelled)  # a late code never revokes the agent
+        self.assertEqual(self.policy.agent_credentials(self.bid)['generation'],generation)
         code=self.policy.issue_pairing(self.bid)
         for _ in range(5):self.request('/api/v1/pair',{'code':'wrong'},bid=self.bid)
         self.assertEqual(self.request('/api/v1/pair',{'code':code},bid=self.bid)[1]['code'],'pairing_expired_or_locked')

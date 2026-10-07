@@ -11,11 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'glitch-idea/script
 import idea_handoff_evidence as codec
 from idea_domain import IdeaError
 from idea_markdown import encode_document, parse_document
-from idea_workflow import capture_workflow, source_digest
+from idea_workflow import STEP_ORDER, capture_workflow, source_digest
 from test_workflow import ACTOR, STAMP, accept, fields, original_idea
 
 
-def fixture(*, assets=False, raw=None, method=None, windows=False):
+def fixture(*, assets=False, raw=None, method=None, exploration=None, windows=False):
     values = fields()
     root = 'C:\\Example Store' if windows else '/example/Café Store'
     workspace = 'C:\\Example Work' if windows else '/example/Work 💡'
@@ -24,9 +24,11 @@ def fixture(*, assets=False, raw=None, method=None, windows=False):
         values['capture']['raw_text'] = raw
     if method is not None:
         values['method'].update(method)
+    if exploration is not None:
+        values['exploration'].update(exploration)
     design = None
     if assets:
-        values['visualize'].update(disposition='accepted_set', reason=None, design_set_id='set_'+'a'*32)
+        values['visualize'].update(disposition='accepted_set', source='claude_design', reason=None, design_set_id='set_'+'a'*32)
         design = dict(set_id='set_'+'a'*32, members=[dict(asset_id='asset_'+'b'*32,
             name='Café 💡 design.png', type='image/png', size=17, sha256='c'*64,
             path=root+('/assets/blobs/' if not windows else '\\assets\\blobs\\')+'asset_'+'b'*32+'.bin')])
@@ -36,7 +38,7 @@ def fixture(*, assets=False, raw=None, method=None, windows=False):
     idea = capture_workflow(idea, values['capture'], new_capture=True, actor='operator',
         timestamp=STAMP, evidence_id='capture-fixture',
         source_digest=source_digest('capture', 1, {'capture':values['capture']}))['idea']
-    for step in ('priorities', 'shape', 'method', 'visualize', 'assess'):
+    for step in STEP_ORDER[1:-1]:
         idea = accept(idea, step, values[step])['idea']
     receipt = idea['workflow']['steps']['assess']['acceptance']
     position = idea['workflow']['steps']['assess']['fields']['position']
@@ -78,7 +80,7 @@ class HandoffEvidenceTests(unittest.TestCase):
                         expected_idea_id=idea['idea_id']), record)
                     self.assertEqual(codec.verify_current(record, state, idea, design), record)
                     self.assertEqual(raw, codec.encode_record(dict(reversed(list(record.items())))))
-                    decoded = codec.decode_record(raw); decoded['accepted']['shape']['fields']['assumptions'].append('Detached')
+                    decoded = codec.decode_record(raw); decoded['accepted']['exploration']['fields']['assumptions'].append('Detached')
                     source = codec.eligible_source(state, idea, design); source['accepted'].clear()
                     self.assertEqual((state, idea, design, record), before)
 
@@ -97,7 +99,14 @@ class HandoffEvidenceTests(unittest.TestCase):
         self.assertNotIn('sha256', planning['live_detail'])
         self.assertEqual(codec.decode_record(raw)['source_files']['detail'],record['source_files']['detail'])
         self.assertEqual(planning['design_set'], design)
-        self.assertEqual(planning['shape'], record['accepted']['shape']['fields'])
+        self.assertNotIn('shape', planning)
+        self.assertEqual(planning['discovery'], record['accepted']['discovery']['fields'])
+        self.assertEqual(planning['exploration'], record['accepted']['exploration']['fields'])
+        self.assertEqual(planning['method'], record['accepted']['method']['fields'])
+        self.assertIn('Lids are hard to clean', prompt)
+        self.assertIn('Check the lid', planning['exploration']['sketch'][0]['title'])
+        self.assertEqual(planning['exploration']['sketch'][0]['done_when'], 'Lid is checked')
+        self.assertIn('Align is done; this is the input for Plan', prompt)
         self.assertNotIn('prompt', parse_document(raw).metadata)
         self.refused(lambda:codec.render_prompt(record, root+'/wrong.md'), 'corrupt_store')
 
@@ -169,32 +178,32 @@ class HandoffEvidenceTests(unittest.TestCase):
 
     def test_acceptance_digests_dependencies_and_future_receipts_refuse(self):
         _, _, _, record = fixture()
-        changes = [lambda r:r['accepted']['shape']['acceptance'].update(source_digest='0'*64),
+        changes = [lambda r:r['accepted']['exploration']['acceptance'].update(source_digest='0'*64),
             lambda r:r['accepted']['assess']['acceptance']['dependencies'].clear(),
-            lambda r:r['accepted']['shape']['acceptance'].update(accepted_revision=r['source_revision']+1),
+            lambda r:r['accepted']['exploration']['acceptance'].update(accepted_revision=r['source_revision']+1),
             lambda r:r['accepted']['capture'].update(acceptance=None),
-            lambda r:r['accepted']['shape']['acceptance']['dependencies'].update(review=dict(revision=1,digest='a'*64)),
+            lambda r:r['accepted']['exploration']['acceptance']['dependencies'].update(review=dict(revision=1,digest='a'*64)),
             lambda r:r['accepted']['method']['fields'].update(selection='experiment-led')]
         for change in changes:
             mutated = copy.deepcopy(record); change(mutated)
             self.refused(lambda mutated=mutated:codec.validate_record(mutated))
 
     def test_conditional_methods_are_real_accepted_requirements(self):
-        methods = [dict(selection='appetite-led', investment=dict(cap=3,unit='days',boundary='One page')),
-                   dict(selection='experiment-led', experiment=dict(question='Does it help?',
-                       evidence='Observed completion', success_criterion='More completions', stop_rule='Stop after ten')),
-                   dict(selection='adaptive-slices')]
-        for method in methods:
+        cases = [(dict(selection='appetite-led'), dict(investment=dict(cap=3,unit='days',boundary='One page'))),
+                 (dict(selection='experiment-led'), dict(experiment=dict(question='Does it help?',
+                     evidence='Observed completion', success_criterion='More completions', stop_rule='Stop after ten'))),
+                 (dict(selection='adaptive-slices'), {})]
+        for method, exploration in cases:
             with self.subTest(method=method):
-                state, idea, design, record = fixture(method=method)
+                state, idea, design, record = fixture(method=method, exploration=exploration)
                 self.assertEqual(codec.verify_current(record,state,idea,design),record)
 
     def test_dirty_invalidated_missing_and_archived_workflows_refuse(self):
         for mode in ('dirty', 'invalidated', 'missing', 'archived'):
             state, idea, design, _ = fixture()
             if mode == 'dirty':
-                idea['workflow']['drafts']['shape'] = dict(idea['workflow']['steps']['shape']['fields'],outcome='Unsaved')
-            elif mode == 'invalidated': idea['workflow']['steps']['method']['invalidated_by'] = ['shape']
+                idea['workflow']['drafts']['exploration'] = dict(idea['workflow']['steps']['exploration']['fields'],outcome='Unsaved')
+            elif mode == 'invalidated': idea['workflow']['steps']['method']['invalidated_by'] = ['discovery']
             elif mode == 'missing': del idea['workflow']
             else: idea['status'] = 'archived'
             self.refused(lambda:codec.eligible_source(state,idea,design),
@@ -217,7 +226,7 @@ class HandoffEvidenceTests(unittest.TestCase):
     def test_digest_ignores_unconsumed_publication_navigation_and_backlog(self):
         state, idea, design, record = fixture()
         state['transaction_revision'] += 20; state['backlog_revision'] += 1
-        idea['workflow']['current_step'] = 'shape'; idea['workflow']['draft_version'] += 1
+        idea['workflow']['current_step'] = 'discovery'; idea['workflow']['draft_version'] += 1
         state['unrelated_notes'] = 'No packet input'
         self.assertEqual(codec.verify_current(record,state,idea,design),record)
         changed = copy.deepcopy(record); changed['source_files']['detail']['sha256'] = 'e'*64

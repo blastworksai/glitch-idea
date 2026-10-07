@@ -96,7 +96,7 @@ def _file(name, mime, size):
 
 
 def _source(source):
-    _exact(source, ('capture', 'shape'), 'asset source')
+    _exact(source, ('capture', 'discovery', 'exploration'), 'asset source')
     for step, witness in source.items():
         _exact(witness, ('revision', 'digest'), step+' source witness')
         integer(witness['revision'], step+' source revision', 1)
@@ -105,7 +105,7 @@ def _source(source):
 
 
 def source_digest(source):
-    """Hash compact accepted Capture/Shape witnesses, excluding overall revision."""
+    """Hash compact accepted Capture, Discovery and Exploration witnesses, excluding overall revision."""
     return hashlib.sha256(_canonical(dict(operation='visualize-assets', source=_source(source)))).hexdigest()
 
 

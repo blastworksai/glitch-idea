@@ -62,11 +62,11 @@ The harness creates a throwaway store and owner-only runtime directory, opens a 
 1. Pair the browser with the one-time code, typed as key events.
 2. Capture an idea whose text is long and contains HTML-like markup; confirm it renders as text and runs nothing.
 3. Set urgency and importance.
-4. Shape, Method, Visualize (skipped once as optional), Assess and Review, using the human-edit path in every step; Method must show that memory is unavailable and claim no preference.
+4. Methods, Discovery, Exploration, Visualize (skipped once as optional), Assess and Review, using the human-edit path in every step; Methods must show that memory is unavailable and claim no preference, and Discovery and Exploration, which are locked while the terminal is connected, are released by hand first.
 5. Generate the planning prompt; confirm it begins with `/glitch-plan` and contains `## Idea trace`.
-6. Confirm each saved step shows the saved state at the top of its navigation control, and that the progress text reads exactly `6 of 7 saved, 1 skipped or not applicable`.
+6. Confirm each saved step shows the saved state at the top of its navigation control, and that the progress text reads exactly `7 of 8 saved, 1 skipped`.
 7. Reload and confirm the saved state and the saved capture text persist.
-8. Confirm seven columns at 1280 px and the compact navigation at 440 px, with no horizontal overflow.
+8. Confirm eight columns at 1280 px and the compact navigation at 440 px, with no horizontal overflow.
 9. Capture the accessibility tree at 440 px and at 1280 px: step button labels, the navigation name and the status regions.
 10. Check a narrow 220 px viewport as a stand-in for 200% zoom (informational).
 11. Confirm the agent status line reads `Agent connected`.
@@ -75,8 +75,9 @@ The harness creates a throwaway store and owner-only runtime directory, opens a 
 14. Complete Capture using only Tab, typed characters, Space and Enter on a new idea.
 15. Induce a save conflict from a second writer on that idea and confirm the browser keeps the answer and shows the stale-revision message.
 16. Resume the agent: run `session-open --resume` for the same binding, re-pair the page with key events if it asks, and confirm the status line reads `Agent connected` on that binding.
-17. Agent proposals on a new idea, answered by a fixed fixture agent that drives the documented `events` and `respond` verbs with synthetic replies (it is not a model): in Shape, Method and Assess, request a suggestion with the step's own button, use it, edit one field by real input, accept, and confirm the saved value is the edited one.
-    Method may first raise a Memory request, which the fixture answers as unavailable.
+17. Agent proposals on a new idea, answered by a fixed fixture agent that drives the documented `events` and `fill` verbs with synthetic replies (it is not a model): in Methods (memory only), Discovery, Exploration and Assess, let the page send the step's request itself (there is no request button), see the fixture's fills appear, edit one field by real input, accept, and confirm the saved value is the edited one.
+    `respond` is used only for the Visualize design brief.
+    Methods shows the memory result beside the human's own method choice and never changes that choice.
 18. Outside the browser: kill the service process, resume the same binding, and confirm the ideas are still there; run three concurrent command-line capture writers and confirm all land and `doctor` is healthy.
 
 It also fails if the page raised any uncaught exception.
@@ -95,7 +96,7 @@ Record these on the host itself, with the commands and output:
 - Clean install: run `python3 install.py --dry-run ...` then the real install into a fresh skills root, store and venv, following the operator runbook.
   Then run the harness with `--python <venv interpreter> --helper <installed skill>/scripts/idea.py`, so the journey runs through the installed copy.
 The harness already exercises agent proposals and Resume with a fixture agent.
-A real model agent's proposals, including its Memory answer, are exercised in section 6 step 7.
+A real model agent's suggestions, including its memory answer, are exercised in section 6 step 7.
 
 Checks that need a visible browser (design-set upload through the file chooser, clipboard deny, real browser zoom, a screen reader, keyboard-only use at 440 px) are made from the operator's own computer against this Linux service, in the SSH rows of section 6.
 A Linux desktop screen reader is recorded as NOT OBSERVED when no Linux desktop exists.
@@ -110,9 +111,9 @@ Steps, performed by a person with a real mouse and keyboard in a visible browser
 1. Install and launch following the operator runbook for that system.
    Record each command, its exit status and the error code if any.
 2. Pair with the one-time code within 60 seconds.
-3. Walk the whole journey in section 4.1 by hand: Capture with long text containing HTML-like markup, both priorities, Shape, Method, Visualize skipped once, Assess, Review, Generate planning prompt.
+3. Walk the whole journey in section 4.1 by hand: Capture with long text containing HTML-like markup, both priorities, Methods, Discovery, Exploration, Visualize skipped once, Assess, Review, Generate planning prompt.
    Screenshot each step at wide width and at 440 px.
-4. Confirm the compact navigation appears at 440 px and the seven columns appear when wide; confirm the saved mark is at the top of each saved step.
+4. Confirm the compact navigation appears at 440 px and the eight columns appear when wide; confirm the saved mark is at the top of each saved step.
 5. Keyboard only, at both the wide width and a 440 px window: Capture and one more step using Tab, Shift+Tab, arrow keys on the step navigation, Space and Enter, with a visible focus ring throughout.
 6. Screen reader: run NVDA on Windows, VoiceOver on macOS.
    At 100% zoom and again at 200% zoom, listen to the step navigation, the save status, the agent status and an error message.
@@ -149,8 +150,8 @@ The browser opens on the local computer through an SSH port forward, because the
 5. Clipboard: deny clipboard permission and confirm the manual copy path; the prompt text must be selectable and complete.
    Also record real browser zoom at 100% and 200%, keyboard-only use at a 440 px window, and the screen reader (NVDA on Windows, VoiceOver on macOS) against this Linux service; these are the visible-browser checks for the Linux row.
 6. Drop the SSH connection mid-session, restore it, and confirm the page reports a lost connection without marking an unsaved step as saved and that Check save result or reload recovers.
-7. Real agent: with the initiating agent session running the skill (not a fixture), request a suggestion in Shape, Method and Assess, use each, edit one field, and accept.
-   For Method, record the Memory status the agent returned and confirm the page shows it without preselecting a method.
+7. Real agent: with the initiating agent session running the skill (not a fixture), request a suggestion in Methods, Discovery, Exploration and Assess, use each, edit one field, and accept.
+   For Methods, record the memory status the agent returned and confirm the page shows it without preselecting a method.
    Only `found` or `searched_no_preference` counts as evidence of a working memory capability; `unavailable` or `error` records that capability as NOT OBSERVED for this row (section 5 step 8 already covers the missing-memory display).
    Record each event operation and that the accepted value is your edit.
 

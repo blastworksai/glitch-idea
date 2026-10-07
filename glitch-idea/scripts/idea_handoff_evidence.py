@@ -169,7 +169,7 @@ def eligible_source(state, idea, design_set=None):
             and state['ideas'].get(idea.get('idea_id')) == idea, 'Handoff idea differs from state', 'not_ready')
     projection = derive_state(idea)
     for step in STEPS:
-        allowed = ('saved', 'skipped', 'not-applicable') if step == 'visualize' else ('saved',)
+        allowed = ('saved', 'skipped') if step == 'visualize' else ('saved',)
         require(projection['steps'][step]['status'] in allowed, 'Current acceptance required for '+step, 'not_ready')
     revision, key = idea['revision'], idea['idea_id']
     accepted = {step:{name:copy.deepcopy(idea['workflow']['steps'][step][name])
@@ -332,6 +332,13 @@ def record_link(record, raw):
     return _link(checked, raw)
 
 
+def _discovery_for_prompt(fields):
+    """Prior art rides in the prompt; a Discovery accepted before it existed says so plainly."""
+    if 'prior_art' in fields:
+        return fields
+    return dict(fields, prior_art='Not checked')
+
+
 def render_prompt(record, packet_path):
     checked = validate_record(record)
     packet = _absolute(packet_path)
@@ -342,10 +349,12 @@ def render_prompt(record, packet_path):
     planning = dict(workspace=accepted['capture']['fields']['workspace'],
         live_detail=checked['source_files']['detail']['path'], packet_path=packet_path,
         revision_evidence=checked['source_files']['revision'],
-        shape=accepted['shape']['fields'], method=accepted['method']['fields'],
+        discovery=_discovery_for_prompt(accepted['discovery']['fields']), exploration=accepted['exploration']['fields'],
+        method=accepted['method']['fields'],
         design_set=checked['design_set'])
     return ('/glitch-plan\n\nPaste this prompt into a NEW window or pane. '
             'Use the confirmed workspace and immutable planning source below. '
+            'Align is done; this is the input for Plan. '
             'Retain this exact Idea trace in the plan.\n\n## Idea trace\n'
             'idea_id: '+checked['idea_id']+'\nidea_revision: '+str(checked['source_revision'])+
             '\n\n## Planning source\n'+''.join('    '+line+'\n' for line in _literal(planning, 2).split('\n')))

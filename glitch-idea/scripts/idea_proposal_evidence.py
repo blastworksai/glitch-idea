@@ -16,7 +16,7 @@ import math
 import re
 
 from idea_domain import MAX_INPUT, integer, require, text
-from idea_workflow import (MEMORY_STATUSES, STEP_ORDER, source_digest,
+from idea_workflow import (MEMORY_STATUSES, STEP_ORDER, check_memory_preference, source_digest,
                            validate_step_fields)
 from idea_assessment import (assessment_digest, validate_assessment_source,
                              validate_assessment_proposal)
@@ -25,8 +25,8 @@ RECORD_KEYS = frozenset(('schema_version', 'kind', 'proposal_id', 'binding_id',
     'generation', 'actor', 'timestamp', 'request_id', 'session_id', 'idea_id',
     'accepted_revision', 'draft_version', 'operation', 'source_digest', 'data', 'proposal'))
 LINK_KEYS = frozenset(('proposal_id', 'path', 'sha256'))
-OPERATIONS = frozenset(('shape', 'memory', 'method', 'visual_brief', 'assessment', 'position'))
-SUPPORTED = frozenset(('shape', 'memory', 'method', 'assessment'))
+OPERATIONS = frozenset(('discovery', 'exploration', 'memory', 'method', 'visual_brief', 'assessment', 'position'))
+SUPPORTED = frozenset(('discovery', 'exploration', 'memory', 'method', 'visual_brief', 'assessment'))
 _PATH = re.compile(r'history/(idea_[0-9a-f]{32})/metadata/([0-9a-f]{64})\.md')
 _HASH = re.compile(r'[0-9a-f]{64}')
 
@@ -72,13 +72,15 @@ def _hash(value):
 
 
 def _memory(value):
-    _exact(value, ('status', 'sources', 'rationale'), 'memory proposal')
+    require(type(value) is dict and {'status', 'sources', 'rationale'} <= set(value)
+            <= {'status', 'sources', 'rationale', 'preferred_method'}, 'Invalid memory proposal fields')
     validate_step_fields('method', {'memory': value}, partial=True)
     require(type(value['status']) is str and value['status'] in MEMORY_STATUSES, 'Invalid memory status')
     require(type(value['sources']) is list, 'Memory sources must be a list')
     require(all(type(s) is str and s.strip() for s in value['sources']), 'Memory sources must be nonempty references')
     if value['rationale'] is not None:
         text(value['rationale'], 'memory rationale')
+    check_memory_preference(value, 'memory')
     if value['status'] == 'found':
         require(bool(value['sources']) and type(value['rationale']) is str
                 and bool(value['rationale'].strip()), 'Found preference requires sources and rationale')
@@ -103,6 +105,8 @@ def validate_record(record):
     integer(record['accepted_revision'], 'accepted revision', 1)
     integer(record['draft_version'], 'draft version')
     operation = record['operation']
+    # Schema-1 'shape' proposals predate workflow v3 and are refused, never decoded.
+    require(operation != 'shape', 'This proposal was made with an older glitch-idea', 'unsupported_proposal_version')
     require(type(operation) is str and operation in OPERATIONS, 'Unknown proposal operation')
     require(operation in SUPPORTED, 'Proposal codec is unavailable for this operation', 'operation_unavailable')
     _hash(record['source_digest'])
@@ -114,7 +118,7 @@ def validate_record(record):
         validate_assessment_proposal(record['proposal'], source=source, idea_id=record['idea_id'])
         return copy.deepcopy(record)
     # Keep the previous schema1 validation/encoding path byte-for-byte for
-    # Shape/Memory/Method. No old record is adapted or rewritten on read.
+    # Discovery/Exploration/Memory/Method. No old record is adapted or rewritten on read.
     require(type(record['data']) is dict and set(record['data']) <= set(STEP_ORDER), 'Invalid source step map')
     for step, fields in record['data'].items():
         validate_step_fields(step, fields, partial=True)
@@ -122,10 +126,20 @@ def validate_record(record):
             'Proposal source digest differs from recorded input', 'stale_source')
     if operation == 'memory':
         _memory(record['proposal'])
+    elif operation == 'visual_brief':
+        # The prototype-skill signal only: a closed enum, never free text, never a design choice.
+        require(type(record['proposal']) is dict and set(record['proposal']) == {'prototype_skill'}
+                and type(record['proposal']['prototype_skill']) is str
+                and record['proposal']['prototype_skill'] in ('available', 'unavailable'),
+                'Invalid visual brief proposal')
     else:
-        validate_step_fields(operation, record['proposal'])
         if operation == 'method':
+            require(type(record['proposal']) is dict and set(record['proposal']) == {'memory'},
+                    'Method proposal carries memory only')
+            validate_step_fields('method', record['proposal'], partial=True)
             _memory(record['proposal']['memory'])
+        else:
+            validate_step_fields(operation, record['proposal'], legacy=True)
     return copy.deepcopy(record)
 
 

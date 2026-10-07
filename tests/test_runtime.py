@@ -342,8 +342,9 @@ class RuntimeTests(unittest.TestCase):
         self.mode = ''
         for number in range(2, 9): self.owner.persist_binding(self.record(number))
         before = list(self.calls)
-        self.assert_code('binding_capacity', lambda: self.client.open_binding('new'))
-        self.assertEqual(self.calls, before, 'persisted capacity before trusted server NEW')
+        # Capacity is the owner's decision now (it may free a finished session): the client no longer pre-refuses.
+        self.assertEqual(self.client.open_binding('new')['binding_id'], self.record()['binding_id'])
+        self.assertNotEqual(self.calls, before, 'the client asks the owner instead of pre-refusing')
         for args in (('shell',), ('resume',), ('new', 'binding_' + 'c' * 32), ('resume', '../private')):
             self.assert_code('invalid_control', lambda: self.client.open_binding(*args))
 

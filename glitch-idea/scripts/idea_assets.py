@@ -274,10 +274,10 @@ def attachment(binding,request,payload):
 
 
 def visual_disposition(binding,request,payload):
-    """Explicit skip/N-A through the same pure generic acceptance reducer."""
+    """Explicit skip through the same pure generic acceptance reducer."""
     app = binding.application; checked = app._edit_payload(payload,accept=True)
-    require(checked['step']=='visualize' and checked['fields'].get('disposition') in ('skipped','not-applicable'),
-            'Visual disposition requires skipped or not-applicable')
+    require(checked['step']=='visualize' and checked['fields'].get('disposition')=='skipped',
+            'Visual disposition requires skipped')
     live = app._agent_context()  # Capture policy context before entering Store.
     result = app.store.mutate_assets(app.context.session_id,checked['request_id'],
         dict(operation='visual-disposition',payload=checked),

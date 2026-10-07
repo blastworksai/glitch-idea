@@ -1,30 +1,55 @@
 // Pure state/controller seam; DOM and server authority stay separate.
-export const STEPS = Object.freeze([
-  {key: 'capture', title: 'Capture the idea'},
-  {key: 'priorities', title: 'Your priorities'},
-  {key: 'shape', title: 'Shape the outcome'},
-  {key: 'method', title: 'Choose a methodology'},
-  {key: 'visualize', title: 'Visualize when useful'},
-  {key: 'assess', title: 'Assess and position'},
-  {key: 'review', title: 'Review and hand off'},
-]);
+// One owner for the step labels. The order of Methods and Discovery is ONE server setting:
+// the page takes it from the state's `step_order` and falls back to this default when it is absent or unusable.
+const STEP_TITLES = Object.freeze({capture: 'Capture', priorities: 'Priorities', method: 'Methods', discovery: 'Discovery',
+  exploration: 'Exploration', visualize: 'Visualize', assess: 'Assess', review: 'Review'});
+const DEFAULT_ORDER = Object.freeze(['capture', 'priorities', 'method', 'discovery', 'exploration', 'visualize', 'assess', 'review']);
+const SWAPPED_ORDER = Object.freeze(['capture', 'priorities', 'discovery', 'method', 'exploration', 'visualize', 'assess', 'review']);
+// The server's order must be exactly the default or the default with Methods/Discovery swapped; anything else is ignored.
+export function stepsFor(order) {
+  const valid = Array.isArray(order) && [DEFAULT_ORDER, SWAPPED_ORDER].some(known => known.length === order.length && known.every((key, index) => key === order[index]));
+  return (valid ? order : DEFAULT_ORDER).map(key => ({key, title: STEP_TITLES[key]}));
+}
+export const STEPS = Object.freeze(stepsFor(null).map(step => Object.freeze(step)));
 const KEYS = STEPS.map(step => step.key);
-const COMPLETE = new Set(['saved', 'skipped', 'not-applicable']);
-const STATUSES = new Set(['todo', 'current', 'saved', 'review-needed', 'unsaved', 'skipped', 'not-applicable']);
-const DEPENDENTS = {
-  capture: ['shape', 'method', 'visualize', 'assess', 'review'],
-  priorities: ['assess', 'review'], shape: ['method', 'visualize', 'assess', 'review'],
-  method: ['review'], visualize: ['review'], assess: ['review'], review: [],
-};
+const COMPLETE = new Set(['saved', 'skipped']);
+const STATUSES = new Set(['todo', 'current', 'saved', 'review-needed', 'unsaved', 'skipped']);
+// Mirrors idea_workflow.derive_dependencies: the consumed-input edges (target -> sources), derived from the order.
+function dependenciesFor(order) {
+  const discoveryFirst = order.indexOf('discovery') < order.indexOf('method');
+  return {capture: [], priorities: [], method: ['capture', 'priorities'],
+    discovery: ['capture', 'priorities', ...(discoveryFirst ? [] : ['method'])],
+    exploration: discoveryFirst ? ['discovery', 'method'] : ['method', 'discovery'],
+    visualize: ['capture', 'discovery', 'exploration'], assess: ['capture', 'priorities', 'discovery', 'exploration'],
+    review: order.slice(0, -1)};
+}
+// Inverse map (source -> every step that consumes it, directly or through others), listed in step order.
+// Mirrors idea_workflow.dependent_steps, which walks the same graph transitively.
+export function dependentsFor(order) {
+  const keys = stepsFor(order).map(step => step.key), forward = dependenciesFor(keys);
+  const reaches = source => {
+    const seen = new Set(), pending = [source];
+    while (pending.length) {
+      const from = pending.pop();
+      for (const target of keys) if (forward[target].includes(from) && !seen.has(target)) { seen.add(target); pending.push(target); }
+    }
+    return seen;
+  };
+  return Object.fromEntries(keys.map(source => [source, keys.filter(target => reaches(source).has(target))]));
+}
+const DEPENDENTS = dependentsFor(null);
 const clone = value => JSON.parse(JSON.stringify(value));
 const canonical = value => Array.isArray(value) ? value.map(canonical) :
   value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
 const same = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+// The one owner of the method labels (stored ids never change).
+export const METHOD_LABELS = Object.freeze({'bounded-plan': 'Full Plan Up Front', 'adaptive-slices': 'Vertical Slicing (Agile)',
+  'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First'});
+
 export const statusLabel = status => ({todo: 'To do', current: 'Current', saved: 'Saved',
-  'review-needed': 'Review needed', unsaved: 'Unsaved', skipped: 'Skipped',
-  'not-applicable': 'Not applicable'}[status] ?? 'Unavailable');
+  'review-needed': 'Review needed', unsaved: 'Unsaved', skipped: 'Skipped'}[status] ?? 'Unavailable');
 export const statusGlyph = status => ({saved: '✓', 'review-needed': '!',
-  unsaved: '◉', skipped: '−', 'not-applicable': '−', current: '◐', todo: '○'}[status] ?? '?');
+  unsaved: '◉', skipped: '−', current: '◐', todo: '○'}[status] ?? '?');
 
 export function validCapture(fields) {
   return typeof fields?.raw_text === 'string' && Boolean(fields.raw_text.trim()) &&
@@ -49,7 +74,7 @@ function tabStorage() {
 const REQUEST = /^[A-Za-z0-9_.:-]{1,128}$/;
 const METHODS = ['bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led'];
 const SCOPES = ['small-change', 'capability', 'project', 'epic'];
-const MEMORY = ['found', 'searched_no_preference', 'unavailable', 'error'];
+const MEMORY = ['found', 'varied', 'searched_no_preference', 'unavailable', 'error'];
 const REASONS = ['wrong_generation', 'wrong_session', 'agent_unavailable', 'stale_revision', 'stale_source', 'supporting_evidence'];
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const exact = (value, keys) => object(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
@@ -58,8 +83,11 @@ const integer = value => Number.isSafeInteger(value) && value >= 0 && value <= 1
 const failure = (code, uncertain = false) => Object.assign(new Error(code), {code, uncertain});
 const defaultBuffers = () => ({capture: {raw_text: '', workspace: {name: '', path: '', confirmed: false}},
   priorities: {urgency: null, importance: null},
-  shape: {outcome: '', scope: null, scope_reason: '', alternatives: [], assumptions: [], next_slice: '', learning: []},
-  method: {selection: null, reason: '', investment: null, experiment: null, memory: {status: 'unavailable', sources: [], rationale: null}},
+  method: {selection: null, reason: '', memory: {status: 'unavailable', sources: [], rationale: null, preferred_method: null}},
+  discovery: {problem: '', audience: '', workaround: '', evidence: '', kill_criteria: '', challenges: [],
+    prior_art: [], prior_art_none: false, prior_art_searched: ''},
+  exploration: {outcome: '', alternatives: [], assumptions: [], scope: null, scope_reason: '', next_slice: '', learning: [],
+    investment: null, experiment: null, sketch: []},
   visualize: {disposition: null, reason: null, design_set_id: null, brief_evidence_id: null},
   assess: {assessment: null, position: {proposed_position: null, actual_position: null, neighbors: {before: null, after: null}, override_reason: null}}});
 const packetIdentity = packet => [packet.handoff_id, packet.sha256, packet.source_digest, packet.source_revision, packet.path];
@@ -83,57 +111,101 @@ const meaningful = value => text(value) && Boolean(value.trim());
 const texts = value => Array.isArray(value) && value.length <= 1000 && value.every(text);
 const optional = (value, validate) => value == null || validate(value);
 function memory(value, partial = false) {
-  const keys = ['status', 'sources', 'rationale'];
-  return (partial ? subset(value, keys) : exact(value, keys)) &&
+  const keys = ['status', 'sources', 'rationale', 'preferred_method'];
+  // The preference is required exactly when the memory was found, and null (or absent) otherwise.
+  const preference = !partial && (value.status === 'found' ? METHODS.includes(value.preferred_method) : value.preferred_method == null);
+  return subset(value, keys) && (partial || keys.slice(0, 3).every(key => Object.hasOwn(value, key))) &&
     optional(value.status, v => MEMORY.includes(v)) && optional(value.sources, texts) && optional(value.rationale, text) &&
-    (partial || (MEMORY.includes(value.status) && Array.isArray(value.sources) && value.sources.every(meaningful) &&
+    optional(value.preferred_method, v => METHODS.includes(v)) &&
+    (partial || (preference && MEMORY.includes(value.status) && Array.isArray(value.sources) && value.sources.every(meaningful) &&
       (value.status !== 'found' || (value.sources.length > 0 && meaningful(value.rationale))) &&
       (!['unavailable', 'error'].includes(value.status) || value.sources.length === 0)));
 }
-function shapeFields(value, partial = false) {
-  const keys = ['outcome', 'scope', 'scope_reason', 'alternatives', 'assumptions', 'next_slice', 'learning'];
-  return (partial ? subset(value, keys) : exact(value, keys)) &&
-    ['outcome', 'scope_reason', 'next_slice'].every(k => optional(value[k], text)) &&
-    optional(value.scope, v => SCOPES.includes(v)) &&
-    ['assumptions', 'learning'].every(k => optional(value[k], texts)) &&
-    optional(value.alternatives, v => Array.isArray(v) && v.length <= 1000 && v.every(a =>
-      subset(a, ['route', 'reason']) && optional(a.route, text) && optional(a.reason, text))) &&
-    (partial || (['outcome', 'scope_reason', 'next_slice'].every(k => meaningful(value[k])) && SCOPES.includes(value.scope) &&
-      value.alternatives?.length > 0 && value.alternatives.every(a => exact(a, ['route', 'reason']) && meaningful(a.route) && meaningful(a.reason)) &&
-      ['assumptions', 'learning'].every(k => Array.isArray(value[k]) && value[k].every(meaningful))));
+const list = (value, each) => Array.isArray(value) && value.length <= 1000 && value.every(each);
+const challenge = c => subset(c, ['challenge', 'response']) && optional(c.challenge, text) && optional(c.response, text);
+// CP6p: "Does it already exist?". Mirrors idea_models prior_art / prior_art_none / prior_art_searched.
+export const PRIOR_ART_KEYS = ['name', 'link', 'does', 'differs', 'licence'];
+export const MAX_PRIOR_ART = 8;
+const priorRow = r => exact(r, PRIOR_ART_KEYS) && PRIOR_ART_KEYS.every(k => optional(r[k], text));
+const priorShape = v => optional(v.prior_art, a => Array.isArray(a) && a.length <= MAX_PRIOR_ART && a.every(priorRow)) &&
+  optional(v.prior_art_none, b => typeof b === 'boolean') && optional(v.prior_art_searched, text);
+// Either rows (name, differs, licence filled) and the box unticked, or the box ticked, no rows and a place we looked.
+const priorReady = v => v.prior_art_none === true
+  ? Array.isArray(v.prior_art) && v.prior_art.length === 0 && meaningful(v.prior_art_searched)
+  : v.prior_art_none === false && Array.isArray(v.prior_art) && v.prior_art.length >= 1 &&
+    v.prior_art.every(r => meaningful(r?.name) && meaningful(r?.differs) && meaningful(r?.licence));
+const PRIOR_FIELDS = ['prior_art', 'prior_art_none', 'prior_art_searched'];
+// `legacy` reads an answer accepted before CP6p: the three prior-art fields may be absent, all three or none (as idea_workflow LEGACY_ABSENT_OK).
+export function discoveryFields(value, partial = false, legacy = false) {
+  const words = ['problem', 'audience', 'workaround', 'evidence', 'kill_criteria'], keys = [...words, 'challenges'];
+  const all = [...keys, 'prior_art', 'prior_art_none', 'prior_art_searched'];
+  return subset(value, all) && (partial || keys.every(k => Object.hasOwn(value, k))) &&
+    words.every(k => optional(value[k], text)) && optional(value.challenges, v => list(v, challenge)) && priorShape(value) &&
+    (partial || (words.every(k => meaningful(value[k])) && value.challenges.length > 0 &&
+      value.challenges.every(c => exact(c, ['challenge', 'response']) && meaningful(c.challenge) && meaningful(c.response)) &&
+      ((legacy && PRIOR_FIELDS.every(k => !Object.hasOwn(value, k))) || priorReady(value))));
+}
+const MAX_SKETCH = 5;
+const sketchItem = item => subset(item, ['title', 'why_next', 'done_when', 'method']) &&
+  ['title', 'why_next', 'done_when'].every(k => optional(item[k], text)) && optional(item.method, v => METHODS.includes(v));
+const positiveCap = n => typeof n === 'number' && Number.isFinite(n) && n > 0 && n <= 1e12;
+const investmentKeys = ['cap', 'unit', 'boundary'], experimentKeys = ['question', 'evidence', 'success_criterion', 'stop_rule'];
+// `method` is the ACCEPTED Method selection (null/absent when unknown): it decides whether investment/experiment are required.
+export function explorationFields(value, partial = false, method = null) {
+  const words = ['outcome', 'scope_reason', 'next_slice'], lists = ['assumptions', 'learning'];
+  const keys = ['outcome', 'alternatives', 'assumptions', 'scope', 'scope_reason', 'next_slice', 'learning', 'investment', 'experiment', 'sketch'];
+  const investment = v => subset(v, investmentKeys) && optional(v.cap, positiveCap) && optional(v.unit, text) && optional(v.boundary, text);
+  const experiment = v => subset(v, experimentKeys) && Object.values(v).every(item => optional(item, text));
+  if (!((partial ? subset(value, keys) : exact(value, keys)) &&
+    words.every(k => optional(value[k], text)) && optional(value.scope, v => SCOPES.includes(v)) && lists.every(k => optional(value[k], texts)) &&
+    optional(value.alternatives, v => list(v, a => subset(a, ['route', 'reason']) && optional(a.route, text) && optional(a.reason, text))) &&
+    optional(value.sketch, v => Array.isArray(v) && v.length <= MAX_SKETCH && v.every(sketchItem)) &&
+    optional(value.investment, investment) && optional(value.experiment, experiment))) return false;
+  if (partial) return true;
+  if (!(words.every(k => meaningful(value[k])) && SCOPES.includes(value.scope) &&
+    value.alternatives?.length > 0 && value.alternatives.every(a => exact(a, ['route', 'reason']) && meaningful(a.route) && meaningful(a.reason)) &&
+    lists.every(k => Array.isArray(value[k]) && value[k].every(meaningful)) &&
+    value.sketch?.length > 0 && value.sketch.every(i => meaningful(i.title) && meaningful(i.done_when)))) return false;
+  if (method == null) return true;
+  return (method === 'appetite-led' ? exact(value.investment, investmentKeys) && positiveCap(value.investment.cap) &&
+      meaningful(value.investment.unit) && meaningful(value.investment.boundary) : value.investment == null) &&
+    (method === 'experiment-led' ? exact(value.experiment, experimentKeys) && Object.values(value.experiment).every(meaningful) : value.experiment == null);
 }
 function methodFields(value, partial = false) {
-  const keys = ['selection', 'reason', 'investment', 'experiment', 'memory'];
-  const investment = v => subset(v, ['cap', 'unit', 'boundary']) && optional(v.cap, n => typeof n === 'number' && Number.isFinite(n) && n > 0 && n <= 1e12) &&
-    optional(v.unit, text) && optional(v.boundary, text);
-  const experiment = v => subset(v, ['question', 'evidence', 'success_criterion', 'stop_rule']) && Object.values(v).every(item => optional(item, text));
+  const keys = ['selection', 'reason', 'memory'];
+  // The reason is optional: it helps planning but never blocks acceptance.
   return (partial ? subset(value, keys) : exact(value, keys)) && optional(value.selection, v => METHODS.includes(v)) && optional(value.reason, text) &&
-    optional(value.investment, investment) && optional(value.experiment, experiment) && optional(value.memory, v => memory(v, partial)) &&
-    (partial || (METHODS.includes(value.selection) && meaningful(value.reason) && memory(value.memory) &&
-      (value.selection === 'appetite-led' ? exact(value.investment, ['cap', 'unit', 'boundary']) && investment(value.investment) && typeof value.investment.cap === 'number' && Number.isFinite(value.investment.cap) && value.investment.cap > 0 && meaningful(value.investment.unit) && meaningful(value.investment.boundary) : value.investment === null) &&
-      (value.selection === 'experiment-led' ? exact(value.experiment, ['question', 'evidence', 'success_criterion', 'stop_rule']) && Object.values(value.experiment).every(meaningful) : value.experiment === null)));
+    optional(value.memory, v => memory(v, partial)) && (partial || (METHODS.includes(value.selection) && memory(value.memory)));
 }
-export const validShape = fields => shapeFields(fields);
+export const validDiscovery = fields => discoveryFields(fields);
+// An answer accepted before CP6p stays readable without the prior-art fields.
+export const validDiscoveryAccepted = fields => discoveryFields(fields, false, true);
+export const validExploration = (fields, method = null) => explorationFields(fields, false, method);
 export const validMethod = fields => methodFields(fields);
 const SET = /^set_[0-9a-f]{32}$/;
 const ASSET = /^asset_[0-9a-f]{32}$/;
 export function visualizeFields(value, partial = false) {
-  const keys = ['disposition', 'reason', 'design_set_id', 'brief_evidence_id'];
-  if (!(partial ? subset(value, keys) : exact(value, keys)) ||
-      !optional(value.disposition, v => ['accepted_set', 'skipped', 'not-applicable'].includes(v)) ||
+  const keys = ['disposition', 'reason', 'design_set_id', 'brief_evidence_id'], all = [...keys, 'source', 'assets'];
+  if (!subset(value, all) || (!partial && !keys.every(key => Object.hasOwn(value, key))) ||
+      !optional(value.disposition, v => ['accepted_set', 'skipped'].includes(v)) ||
       !optional(value.reason, text) || !optional(value.design_set_id, v => typeof v === 'string' && SET.test(v)) ||
-      !optional(value.brief_evidence_id, v => meaningful(v) && boundedText(v, 200))) return false;
-  return partial || (value.brief_evidence_id === null && ['accepted_set', 'skipped', 'not-applicable'].includes(value.disposition) &&
+      !optional(value.brief_evidence_id, v => meaningful(v) && boundedText(v, 200)) ||
+      !optional(value.source, v => ['claude_design', 'prototype'].includes(v)) ||
+      !optional(value.assets, v => Array.isArray(v) && v.length >= 1 && v.length <= 20 && v.every(id => typeof id === 'string' && ASSET.test(id)) && new Set(v).size === v.length)) return false;
+  // Skip is one click: its reason is optional. An accepted set names its source.
+  return partial || (value.brief_evidence_id === null && ['accepted_set', 'skipped'].includes(value.disposition) &&
     (value.reason === null || text(value.reason)) && (value.disposition === 'accepted_set'
       ? value.design_set_id === null || (typeof value.design_set_id === 'string' && SET.test(value.design_set_id))
-      : value.design_set_id === null && meaningful(value.reason)));
+      : value.design_set_id === null && value.source == null && value.assets == null));
 }
 export const validVisualize = fields => visualizeFields(fields);
 // Assess mirrors the existing domain schema/formula; scores are never input.
 const ASSESS_KEYS = ['method', 'version', 'inputs', 'basis', 'assumptions', 'confidence', 'provenance'];
 const ASSESS_METHODS = ['wsjf', 'rice', 'kano'];
 const KANO = ['must-be', 'performance', 'delighter', 'indifferent', 'reverse', 'questionable'];
-const proposalOperation = key => key === 'assess' ? 'assessment' : key;
+const proposalOperation = key => key === 'assess' ? 'assessment' : key === 'visualize' ? 'visual_brief' : key;
+const stepOfOperation = operation => operation === 'assessment' ? 'assess' : operation === 'visual_brief' ? 'visualize' : operation;
+const PROTOTYPE_SKILL = ['available', 'unavailable'];
 const rating = v => v === null || (subset(v, ['urgency', 'importance', 'actor', 'timestamp']) &&
   ['urgency', 'importance', 'actor'].every(k => Object.hasOwn(v, k)) && validPriorities(v) &&
   meaningful(v.actor) && boundedText(v.actor, 200) && (!Object.hasOwn(v, 'timestamp') || (meaningful(v.timestamp) && boundedText(v.timestamp, 100))));
@@ -243,15 +315,18 @@ function validateAssessmentState(state) {
     if (fields != null && !assessFields(fields, true)) throw new Error('Invalid assessment fields');
   }
 }
+// Mirrors idea_assessment.CONSUMED_STEPS.
+const CONSUMED = ['capture', 'priorities', 'discovery', 'exploration'];
 function assessmentSourceData(data, state) {
-  if (!boundedAssessmentTree(data) || !exact(data, ['steps', 'backlog', 'target']) || !exact(data.steps, ['capture', 'priorities', 'shape']) ||
+  if (!boundedAssessmentTree(data) || !exact(data, ['steps', 'backlog', 'target']) || !exact(data.steps, CONSUMED) ||
       !exact(data.steps.capture, ['raw_text', 'workspace']) || !exact(data.steps.capture.workspace, ['name', 'path', 'confirmed']) ||
       !validCapture(data.steps.capture) || !boundedText(data.steps.capture.raw_text, 1024 * 1024) ||
       !text(data.steps.capture.workspace.name) || !text(data.steps.capture.workspace.path) ||
-      !exact(data.steps.priorities, ['urgency', 'importance']) || !validPriorities(data.steps.priorities) || !validShape(data.steps.shape) ||
+      !exact(data.steps.priorities, ['urgency', 'importance']) || !validPriorities(data.steps.priorities) || !validDiscoveryAccepted(data.steps.discovery) ||
+      !validExploration(data.steps.exploration, state.accepted?.method?.selection) ||
       !backlogFields(data.backlog, state.idea_id) || !state.backlog_status?.available || !same(data.backlog, state.backlog) ||
       !(data.target === null || assessFields(data.target, true))) return false;
-  if (!['capture', 'priorities', 'shape'].every(k => state.steps[k].status === 'saved' && same(data.steps[k], state.accepted?.[k]))) return false;
+  if (!CONSUMED.every(k => state.steps[k].status === 'saved' && same(data.steps[k], state.accepted?.[k]))) return false;
   const target = data.backlog.comparisons[data.backlog.order.indexOf(state.idea_id)];
   return target.revision === state.revision && target.ratings !== null &&
     same({urgency: target.ratings.urgency, importance: target.ratings.importance}, data.steps.priorities) &&
@@ -262,19 +337,30 @@ function assessmentProposal(value, ideaId) {
     !Object.values(value.position.neighbors).includes(ideaId);
 }
 function sourceData(data) {
-  if (!subset(data, ['capture', 'shape', 'method'])) return false;
+  if (!subset(data, ['capture', 'priorities', 'method', 'discovery', 'exploration'])) return false;
   for (const [step, fields] of Object.entries(data)) {
-    if (step === 'shape' && !shapeFields(fields, true)) return false;
+    if (step === 'discovery' && !discoveryFields(fields, true)) return false;
+    if (step === 'exploration' && !explorationFields(fields, true)) return false;
     if (step === 'method' && !methodFields(fields, true)) return false;
+    if (step === 'priorities' && !(subset(fields, ['urgency', 'importance']) && Object.values(fields).every(v => v == null || (Number.isInteger(v) && v >= 1 && v <= 10)))) return false;
     if (step === 'capture' && !(subset(fields, ['raw_text', 'workspace']) &&
       optional(fields.raw_text, v => boundedText(v, 1024*1024)) &&
       optional(fields.workspace, w => subset(w, ['name', 'path', 'confirmed']) && optional(w.name, text) && optional(w.path, text) && optional(w.confirmed, v => typeof v === 'boolean')))) return false;
   }
   return true;
 }
+const PRIOR_GROUP = ['prior_art', 'prior_art_none', 'prior_art_searched'];
 // Mirrors idea_proposals.FILL_KEYS: what a terminal conversation may fill (the human owns the rest).
-export const FILL_KEYS = Object.freeze({shape: ['outcome', 'scope', 'scope_reason', 'alternatives', 'assumptions', 'next_slice', 'learning'],
-  method: ['reason'], assessment: ['assessment', 'proposed_position']});
+export const FILL_KEYS = Object.freeze({
+  discovery: ['problem', 'audience', 'workaround', 'evidence', 'kill_criteria', 'challenges', 'prior_art', 'prior_art_none', 'prior_art_searched'],
+  exploration: ['outcome', 'alternatives', 'assumptions', 'scope', 'scope_reason', 'next_slice', 'learning', 'investment', 'experiment', 'sketch'],
+  method: ['memory'], assessment: ['assessment', 'proposed_position'], visual_brief: ['source', 'assets']});
+// The steps a terminal conversation can guide (Method asks for memory only, never a selection).
+const CONVERSE = ['discovery', 'exploration', 'method', 'assess'];
+// Visualize's Prototype Here road: asked for by an explicit click only, never automatically.
+const ASKABLE = [...CONVERSE, 'visualize'];
+// The two steps a person can take back by hand from a terminal conversation.
+const HAND_STEPS = ['discovery', 'exploration'];
 function validateAgent(state) {
   // Legacy intermediate state has no proposal provider. Fail closed on any
   // partial provider projection rather than inventing connected assistance.
@@ -283,7 +369,7 @@ function validateAgent(state) {
       !(state.idea_id === null || (typeof state.idea_id === 'string' && /^idea_[0-9a-f]{32}$/.test(state.idea_id))) ||
       !(state.agent_generation === null || (typeof state.agent_generation === 'string' && GENERATION.test(state.agent_generation))) ||
       (state.agent_status === 'connected' && state.agent_generation === null) ||
-      !subset(state.proposal_sources, ['shape', 'method', 'memory', 'assessment']) || !Array.isArray(state.proposals) || state.proposals.length > 128 ||
+      !subset(state.proposal_sources, ['discovery', 'exploration', 'method', 'memory', 'assessment', 'visual_brief']) || !Array.isArray(state.proposals) || state.proposals.length > 128 ||
       (state.idea_id === null && state.proposals.length !== 0)) throw new Error('Invalid agent projection');
   for (const [operation, entry] of Object.entries(state.proposal_sources)) {
     if (!exact(entry, ['available', 'code', 'source']) || typeof entry.available !== 'boolean' || typeof entry.code !== 'string') throw new Error('Invalid proposal source');
@@ -293,20 +379,20 @@ function validateAgent(state) {
       const source = entry.source;
       if (entry.code !== 'ok' || !exact(source, ['accepted_revision', 'draft_version', 'data', 'source_digest']) ||
           !integer(source.accepted_revision) || source.accepted_revision < 1 || source.accepted_revision !== state.revision ||
-          !integer(source.draft_version) || source.draft_version !== state.draft_version || !HASH.test(source.source_digest) || typeof source.source_digest !== 'string' || !(operation === 'assessment' ? assessmentSourceData(source.data, state) : sourceData(source.data))) throw new Error('Invalid proposal source');
+          !integer(source.draft_version) || source.draft_version !== state.draft_version || !HASH.test(source.source_digest) || typeof source.source_digest !== 'string' || !(operation === 'assessment' ? assessmentSourceData(source.data, state) : operation === 'visual_brief' ? object(source.data) : sourceData(source.data))) throw new Error('Invalid proposal source');
     }
   }
   const ids = new Set();
   for (const item of state.proposals) {
     if (!exact(item, ['proposal_id', 'request_id', 'operation', 'accepted_revision', 'draft_version', 'source_digest', 'proposal', 'stale', 'stale_reason', 'acceptance_eligible', 'acceptance_reason', 'evidence', 'content_omitted']) ||
         typeof item.proposal_id !== 'string' || !PROPOSAL.test(item.proposal_id) || ids.has(item.proposal_id) ||
-        typeof item.request_id !== 'string' || !REQUEST.test(item.request_id) || !['shape', 'method', 'memory', 'assessment'].includes(item.operation) ||
+        typeof item.request_id !== 'string' || !REQUEST.test(item.request_id) || !['discovery', 'exploration', 'method', 'memory', 'assessment', 'visual_brief'].includes(item.operation) ||
         !integer(item.accepted_revision) || item.accepted_revision < 1 || !integer(item.draft_version) || typeof item.source_digest !== 'string' || !HASH.test(item.source_digest) ||
         typeof item.content_omitted !== 'boolean' || !exact(item.evidence, ['path', 'sha256']) ||
         typeof item.evidence.path !== 'string' || !new RegExp('^history/' + state.idea_id + '/metadata/[0-9a-f]{64}\\.md$').test(item.evidence.path) ||
         typeof item.evidence.sha256 !== 'string' || !HASH.test(item.evidence.sha256) ||
         (item.content_omitted ? item.proposal !== null || item.acceptance_eligible !== false || item.acceptance_reason !== 'projection_omitted' :
-          !(item.operation === 'shape' ? validShape(item.proposal) : item.operation === 'method' ? validMethod(item.proposal) : item.operation === 'assessment' ? assessmentProposal(item.proposal, state.idea_id) : memory(item.proposal)))) throw new Error('Invalid proposal summary');
+          !(item.operation === 'discovery' ? validDiscoveryAccepted(item.proposal) : item.operation === 'exploration' ? validExploration(item.proposal) : item.operation === 'method' ? (exact(item.proposal, ['memory']) && memory(item.proposal.memory)) : item.operation === 'assessment' ? assessmentProposal(item.proposal, state.idea_id) : item.operation === 'visual_brief' ? (exact(item.proposal, ['prototype_skill']) && PROTOTYPE_SKILL.includes(item.proposal.prototype_skill)) : memory(item.proposal)))) throw new Error('Invalid proposal summary');
     for (const [flag, reason, positive] of [['stale', 'stale_reason', false], ['acceptance_eligible', 'acceptance_reason', true]]) {
       if (typeof item[flag] !== 'boolean' || (item[flag] === positive ? item[reason] !== null : !(REASONS.includes(item[reason]) || (reason === 'acceptance_reason' && item.content_omitted && item[reason] === 'projection_omitted')))) throw new Error('Invalid proposal eligibility');
     }
@@ -330,12 +416,18 @@ function validateAgent(state) {
       (state.idea_id === null && inventory.total !== 0)) throw new Error('Invalid proposal inventory');
 }
 
-// Plain-words status line for a conversation step (shape, method, assess).
+// The waiting sentence for a pending suggestion: false to say "editable" while a field is locked.
+export function waitingLine(flow, key) {
+  const locked = HAND_STEPS.includes(key) && FILL_KEYS[key]?.some(name => flow.fieldLocked(key, name));
+  return locked ? 'Waiting for your terminal. Use "Fill this step by hand" to answer yourself.' : 'Waiting for the initiating agent. Your answers remain editable.';
+}
+
+// Plain-words status line for a conversation step (discovery, exploration, method, assess).
 export function conversationStatus(flow, key) {
   const state = flow.state;
   if (state?.agent_status !== 'connected') return 'No agent is connected. You can fill this step by hand, or reinvoke /glitch-idea in your terminal to be guided.';
   const open = state.conversation?.operation === proposalOperation(key);
-  if (!open && ['sending', 'waiting'].includes(flow.proposalPending?.phase) && flow.proposalPending.key === key) return 'Asking your terminal to start this step…';
+  if (!open && ['sending', 'waiting'].includes(flow.proposalPending?.phase) && flow.proposalPending.key === key) return key === 'method' ? 'Checking what your Glitch remembers…' : 'Asking your terminal to start this step…';
   const count = flow.filled[key]?.size ?? 0;
   return 'Your terminal is guiding this step. Answer there; agreed answers appear here as you go.' +
     (count > 0 ? ' ' + count + (count === 1 ? ' answer' : ' answers') + ' filled from your terminal.' : '');
@@ -348,6 +440,130 @@ export function filledNote({flow, key, name, id, element, target, input}) {
   input?.setAttribute?.('aria-describedby', note.id);
   if (input?.parentNode?.insertBefore) input.parentNode.insertBefore(note, input); else target.append(note);
   return note;
+}
+
+const fieldEmpty = value => value == null || (typeof value === 'string' ? !value.trim() :
+  Array.isArray(value) ? value.length === 0 : object(value) ? Object.values(value).every(fieldEmpty) : false);
+const blankText = value => !(typeof value === 'string' && value.trim());
+
+// Plain sentences naming everything that keeps Accept off. Empty only when Accept would be enabled for content
+// reasons. `fields` is the step's buffer; `flow` adds the flow-level reasons (saving, paused, archived, order, locks).
+export function acceptBlockers(step, fields, flow = null) {
+  const out = [], add = sentence => { if (!out.includes(sentence)) out.push(sentence); };
+  const f = fields ?? {};
+  if (step === 'capture') {
+    if (blankText(f.raw_text)) add('Describe the idea.');
+    if (blankText(f.workspace?.name) || blankText(f.workspace?.path)) add('Choose the workspace.');
+    else if (f.workspace?.confirmed !== true) add('Confirm the workspace.');
+    if (!validCapture(f) && !out.length) add('Describe the idea and confirm the workspace.');
+  } else if (step === 'priorities') {
+    for (const [key, label] of [['urgency', 'Urgency'], ['importance', 'Importance']]) {
+      if (!(Number.isInteger(f[key]) && f[key] >= 1 && f[key] <= 10)) add('Choose ' + label + ' from 1 to 10.');
+    }
+  } else if (step === 'method') {
+    if (!METHODS.includes(f.selection)) add('Choose a method.');
+    if (!validMethod(f) && !out.length) add('Finish the method choice and its memory check.');
+  } else if (step === 'discovery') {
+    for (const [key, sentence] of [['problem', 'Describe the problem.'], ['audience', 'Say who has the problem.'],
+      ['workaround', 'Say how people cope today.'], ['evidence', 'Add your evidence.'], ['kill_criteria', 'Say what would make you stop.']]) {
+      if (!meaningful(f[key])) add(sentence);
+    }
+    if (!Array.isArray(f.challenges) || !f.challenges.length) add('Add at least one challenge with your response to it.');
+    else if (!f.challenges.every(c => meaningful(c?.challenge) && meaningful(c?.response))) add('Fill both the challenge and your response on every challenge.');
+    const rows = Array.isArray(f.prior_art) ? f.prior_art : [];
+    if (f.prior_art_none === true) {
+      if (rows.length) add('Remove the products you listed, or untick Nothing comparable found.');
+      else if (!meaningful(f.prior_art_searched)) add('Say where you looked for something comparable.');
+    } else if (!rows.length) add('Add a product that already exists, or tick Nothing comparable found and say where you looked.');
+    else rows.forEach((r, i) => {
+      const missing = [['name', 'a name'], ['differs', 'how we differ'], ['licence', 'its licence']].filter(([k]) => !meaningful(r?.[k])).map(x => x[1]);
+      if (missing.length) add('Give product ' + (i + 1) + ' ' + (missing.length > 1 ? missing.slice(0, -1).join(', ') + ' and ' + missing.at(-1) : missing[0]) + '.');
+    });
+    if (!validDiscovery(f) && !out.length) add('Finish the missing answers on this step.');
+  } else if (step === 'exploration') {
+    const method = flow?.state?.accepted?.method?.selection ?? null;
+    if (!meaningful(f.outcome)) add('Add the desired result.');
+    if (!SCOPES.includes(f.scope)) add('Choose a scope.');
+    if (!meaningful(f.scope_reason)) add('Say why you chose that scope.');
+    if (!meaningful(f.next_slice)) add('Say what you will do next.');
+    if (!Array.isArray(f.alternatives) || !f.alternatives.length) add('Add at least one alternative route (Route and Why both filled).');
+    else if (!f.alternatives.every(a => meaningful(a?.route) && meaningful(a?.reason))) add('Fill both Route and Why on every alternative.');
+    for (const [key, label] of [['assumptions', 'assumptions'], ['learning', 'things to learn']]) {
+      if (!Array.isArray(f[key]) || !f[key].every(meaningful)) add('Fill in or remove the empty ' + label + '.');
+    }
+    if (!Array.isArray(f.sketch) || !f.sketch.length) add('Sketch at least one item, each with a title and when it is done.');
+    else if (f.sketch.length > MAX_SKETCH) add('Keep the sketch to ' + MAX_SKETCH + ' items or fewer.');
+    else if (!f.sketch.every(i => meaningful(i?.title) && meaningful(i?.done_when))) add('Give every sketch item a title and when it is done.');
+    if (method === 'appetite-led') {
+      const i = f.investment;
+      if (!(positiveCap(i?.cap) && meaningful(i?.unit) && meaningful(i?.boundary))) add('Set the investment: a cap above zero, its unit, and what it covers.');
+    } else if (method != null && f.investment != null) add('Clear the investment: it only applies to an appetite-led method.');
+    if (method === 'experiment-led') {
+      if (!experimentKeys.every(k => meaningful(f.experiment?.[k]))) add('Fill all four experiment answers: question, evidence, success criterion and stop rule.');
+    } else if (method != null && f.experiment != null) add('Clear the experiment: it only applies to an experiment-led method.');
+    if (!validExploration(f, method) && !out.length) add('Finish the missing answers on this step.');
+  } else if (step === 'visualize') {
+    if (f.disposition === 'accepted_set') { if (!['claude_design', 'prototype'].includes(f.source)) add('Choose how the design was made: Claude Design or Prototype Here.'); }
+    else if (f.disposition !== 'skipped') add('Choose a design road: Claude Design, Prototype Here, or skip this step.');
+    if (!validVisualize(f) && !out.length) add('Finish the design choice.');
+  } else if (step === 'assess') {
+    const a = f.assessment, p = f.position, inputs = a?.inputs ?? {};
+    const labels = {value: 'Value', time_criticality: 'Time criticality', enablement: 'Enablement', effort: 'Effort', reach: 'Reach', impact: 'Impact', confidence: 'Confidence'};
+    if (!ASSESS_METHODS.includes(a?.method)) add('Choose an assessment method.');
+    else if (a.method === 'kano') {
+      if (!KANO.includes(inputs.category)) add('Choose a Kano category.');
+      if (typeof inputs.hypothesis !== 'boolean') add('Say whether this is still a hypothesis.');
+    } else {
+      const names = a.method === 'wsjf' ? ['value', 'time_criticality', 'enablement', 'effort'] : ['reach', 'impact', 'confidence', 'effort'];
+      const bad = names.filter(k => !numeric(inputs[k], k));
+      if (bad.length) add(bad.map(k => labels[k]).join(', ').replace(/, ([^,]*)$/, ' and $1') + (bad.length > 1 ? ' need numbers' : ' needs a number') +
+        (names.includes('effort') ? '; Effort must be above 0' : '') + (names.includes('confidence') ? ' and Confidence between 0 and 1' : '') + '.');
+    }
+    if (!['low', 'medium', 'high'].includes(a?.confidence)) add('Choose how sure you are: low, medium or high.');
+    if (!meaningful(a?.version)) add('Add a version label for your assessment.');
+    if (!(a?.basis != null && assessmentBasis(a.basis, false))) add('Explain what your numbers are based on.');
+    if (!(a?.provenance != null && assessmentBasis(a.provenance, false))) add('Say where your numbers come from.');
+    if (!Array.isArray(a?.assumptions) || !a.assumptions.every(meaningful)) add('Fill in or remove the empty assumptions.');
+    const total = flow?.state?.backlog?.order?.length;
+    if (flow?.state && flow.state.backlog_status?.available !== true) add('The backlog is not available yet. Reload and try again.');
+    if (!(integer(p?.proposed_position) && p.proposed_position > 0) || !(integer(p?.actual_position) && p.actual_position > 0)) add('Choose a position in the backlog.');
+    else {
+      if (p.proposed_position !== p.actual_position && !meaningful(p.override_reason)) add('Say why your position differs from the proposed one.');
+      if (typeof total === 'number' && p.proposed_position > total) add('Choose a position inside the backlog.');
+      if (flow?.state?.backlog_status?.available === true &&
+          !same(p.neighbors, insertionNeighbors(flow.state.backlog.order, flow.state.idea_id, p.actual_position))) add('Reload to refresh the neighbouring ideas.');
+    }
+    if (!validAssess(f) && !out.length) add('Finish the missing answers on this step.');
+  }
+  if (!flow) return out;
+  const state = flow.state;
+  if (flow.busy || flow.pending) add('Saving…');
+  if (flow.paused) add('This idea is paused. Resume it to continue.');
+  if (flow.selectionUncertain) add('The selected idea could not be verified. Reload it first.');
+  if (state?.idea_id && step !== 'capture') {
+    if (state.idea_status === 'archived') { if (step !== 'exploration') add('This idea is archived. Reactivate it before accepting new answers.'); }
+    else if (state.idea_status !== 'active') add('The idea status is unavailable. Reload before accepting.');
+  } else if (state?.idea_id && state.idea_status !== 'active') add('This idea is not active. Reload before accepting.');
+  const keys = flow.keys, needs = dependenciesFor(keys)[step] ?? [];
+  for (const prior of keys.filter(k => needs.includes(k))) {
+    if (!COMPLETE.has(flow.status(prior))) add('Save ' + STEP_TITLES[prior] + ' first.');
+  }
+  if (HAND_STEPS.includes(step)) {
+    const required = FILL_KEYS[step];
+    const waiting = required.filter(name => flow.fieldLocked(step, name)).length;
+    if (waiting) add('Fill this step by hand or let your terminal finish: ' + waiting + (waiting === 1 ? ' field' : ' fields') + ' still waiting.');
+  }
+  return out;
+}
+
+// The sentence set behind a disabled Accept: the step's own blockers plus connection and suggestion state,
+// never empty so a disabled Accept always says why.
+export function disabledAcceptReason(step, fields, flow, {connected = true, eligible = true} = {}) {
+  const out = acceptBlockers(step, fields, flow), add = sentence => { if (!out.includes(sentence)) out.push(sentence); };
+  if (!connected) add('Reconnect to the idea service before accepting.');
+  if (!eligible) add('The suggestion you used can no longer be accepted. Accept your answers as your own, or unlink it.');
+  if (!out.length) add('This step cannot be accepted yet. Check the answers above.');
+  return out.join(' ');
 }
 
 export class Flow {
@@ -380,11 +596,15 @@ export class Flow {
     this.polling = false;
     this.pollOptions = null;
     this.state = null;
+    this.steps = stepsFor(null);  // {key, title} in the server's order
+    this.dependents = DEPENDENTS;
     this.current = 'capture';
     this.buffers = defaultBuffers();
     this.dirty = new Set();
     // Terminal conversation (R2): fields the agent filled, per step; last fill applied per request; automatic attempts already made.
     this.filled = {};
+    this.terminalFilled = {};  // fields the terminal has ever filled for this idea; unlike `filled`, a human edit keeps them
+    this.releasing = null;
     this.fillApplied = new Map();
     this.fillIdea = null;
     this.fillSave = null;
@@ -395,6 +615,50 @@ export class Flow {
     this.error = null;
     this.message = 'Connect to load your saved idea.';
     this.onChange = () => {};
+  }
+
+  get keys() { return this.steps.map(step => step.key); }
+
+  // True once the person took this terminal-guided step by hand (the server persists it).
+  handReleased(key) { return HAND_STEPS.includes(key) && this.state?.hand?.[key] === true; }
+
+  // Terminal-guided fields stay locked until the terminal fills them, unless the person took the step by hand.
+  // A field that already holds an answer is never locked (it came from a fill, a saved draft or the person).
+  fieldLocked(key, name) {
+    if (!HAND_STEPS.includes(key) || !FILL_KEYS[key].includes(name)) return false;
+    const state = this.state;
+    if (state?.agent_status !== 'connected' || this.handReleased(key) || COMPLETE.has(state.steps?.[key]?.status)) return false;
+    const accepted = state.accepted?.method?.selection ?? null;
+    if (name === 'investment' && accepted !== 'appetite-led') return false;
+    if (name === 'experiment' && accepted !== 'experiment-led') return false;
+    if (this.terminalFilled[key]?.has(name)) return false;
+    if (key === 'discovery' && PRIOR_GROUP.includes(name)) {
+      // One lock for the whole section: it opens once any of its three fields holds an answer.
+      if (name !== 'prior_art' || PRIOR_GROUP.some(n => this.terminalFilled.discovery?.has(n))) return false;
+      const b = this.buffers.discovery ?? {};
+      return fieldEmpty(b.prior_art) && b.prior_art_none !== true && fieldEmpty(b.prior_art_searched);
+    }
+    return fieldEmpty(this.buffers[key]?.[name]);
+  }
+
+  // Release one step to the person: only that step's request is cancelled; the agent binding stays.
+  async releaseStep(key) {
+    if (!HAND_STEPS.includes(key) || !this.state?.idea_id || this.disposed || this.releasing || this.selectionUncertain) return false;
+    const ideaId = this.state.idea_id;
+    this.releasing = key; this.error = null; this.onChange();
+    try {
+      const result = await this.api.release(key);
+      if (this.disposed) return false;
+      if (result.idea_id !== ideaId || this.state?.idea_id !== ideaId) throw failure('invalid_response', true);
+      if (result.hand) this.state.hand = {discovery: false, exploration: false, ...(this.state.hand ?? {}), [key]: true};
+      if (this.proposalPending?.key === key) this.proposalPending = null;  // the server cancelled that request
+      this.message = result.hand ? 'You took this step by hand. Your terminal will not fill it.' : 'This step is already saved.';
+      return true;
+    } catch (error) {
+      this.error = error;
+      this.message = 'Taking this step by hand did not complete (' + (error?.code ?? 'unknown') + '). Nothing changed.';
+      return false;
+    } finally { this.releasing = null; if (!this.disposed) this.onChange(); }
   }
 
   validateState(state) {
@@ -408,6 +672,10 @@ export class Flow {
           (COMPLETE.has(evidence.status) && (!evidence.evidence_id || !Number.isInteger(evidence.accepted_revision)))) {
         throw new Error('Invalid step evidence');
       }
+    }
+    // Hand release (per terminal-guided step). Older projections omit it: that reads as "not released".
+    if (Object.hasOwn(state, 'hand') && !(exact(state.hand, HAND_STEPS) && HAND_STEPS.every(key => typeof state.hand[key] === 'boolean'))) {
+      throw new Error('Invalid hand projection');
     }
     validateAssessmentState(state);
     validateAgent(state);
@@ -431,6 +699,8 @@ export class Flow {
   load(state, preserve = false) {
     this.validateState(state);
     this.state = clone(state);
+    this.steps = stepsFor(state.step_order);
+    this.dependents = dependentsFor(this.keys);
     this.restoreSelections();
     this.reconcileProposal();
     if (!preserve) {
@@ -490,12 +760,12 @@ export class Flow {
   applyFills() {
     const state = this.state;
     if (this.fillIdea !== (state?.idea_id ?? null)) {
-      this.fillIdea = state?.idea_id ?? null; this.filled = {}; this.fillApplied = new Map();
+      this.fillIdea = state?.idea_id ?? null; this.filled = {}; this.terminalFilled = {}; this.fillApplied = new Map();
     }
     const talk = state?.conversation;
     if (!talk || talk.idea_id !== state.idea_id || talk.accepted_revision !== state.revision) return false;
-    const key = talk.operation === 'assessment' ? 'assess' : talk.operation;
-    if (!['shape', 'method', 'assess'].includes(key) || state.steps?.[key]?.status === 'saved') return false;
+    const key = stepOfOperation(talk.operation);
+    if (!ASKABLE.includes(key) || state.steps?.[key]?.status === 'saved' || this.handReleased(key)) return false;
     // A request this tab sent starts at 0; after a reload the tab's record continues it. A
     // conversation this tab never saw is adopted as already applied: never overwrite later edits.
     let last = this.fillApplied.get(talk.request_id);
@@ -524,7 +794,7 @@ export class Flow {
         }
         next.position = position; this.buffers.assess = next;
       } else this.buffers[key] = {...this.buffers[key], ...clone(fields)};
-      for (const name of Object.keys(fields)) this.filled[key].add(name);
+      for (const name of Object.keys(fields)) { this.filled[key].add(name); (this.terminalFilled[key] ??= new Set()).add(name); }
     }
     const sequence = fresh.at(-1).sequence;
     // In memory at once (never applied twice on this page); in tab storage only once the draft holds
@@ -538,12 +808,12 @@ export class Flow {
     return true;
   }
 
-  // Reaching Shape, Method or Assess starts the terminal conversation: one automatic request
+  // Reaching Discovery, Exploration, Method or Assess starts the terminal conversation: one automatic request
   // per idea, revision, step and agent session. A failed or refused attempt is never retried automatically.
   async autoConverse(key) {
     const state = this.state;
-    if (!['shape', 'method', 'assess'].includes(key) || !state?.idea_id || state.agent_status !== 'connected' || this.disposed) return false;
-    if (state.steps?.[key]?.status === 'saved' || this.proposalPending) return false;
+    if (!CONVERSE.includes(key) || !state?.idea_id || state.agent_status !== 'connected' || this.disposed) return false;
+    if (state.steps?.[key]?.status === 'saved' || this.proposalPending || this.handReleased(key)) return false;
     const operation = proposalOperation(key);
     if (state.conversation?.operation === operation) return false;
     if (this.proposals(key).some(item => !item.stale && item.accepted_revision === state.revision)) return false;
@@ -593,19 +863,26 @@ export class Flow {
   status(key) {
     if (this.dirty.has(key)) return 'unsaved';
     const persisted = this.state?.steps[key]?.status ?? (key === 'capture' ? 'current' : 'todo');
-    if (COMPLETE.has(persisted) && [...this.dirty].some(source => DEPENDENTS[source]?.includes(key))) return 'review-needed';
+    if (COMPLETE.has(persisted) && [...this.dirty].some(source => this.dependents[source]?.includes(key))) return 'review-needed';
     return persisted;
   }
 
   progress() {
     return {saved: KEYS.filter(key => this.status(key) === 'saved').length,
-      skipped: KEYS.filter(key => ['skipped', 'not-applicable'].includes(this.status(key))).length};
+      skipped: KEYS.filter(key => this.status(key) === 'skipped').length};
+  }
+
+  // Whether the steps before this one allow opening it, ignoring any transient busy or paused state.
+  reachable(key) {
+    if (!KEYS.includes(key)) return false;
+    if (key === this.current || this.status(key) !== 'todo') return true;
+    const order = this.keys;
+    return order.slice(0, order.indexOf(key)).every(prior => COMPLETE.has(this.status(prior)));
   }
 
   canOpen(key) {
     if (!KEYS.includes(key) || this.busy || this.paused) return false;
-    if (key === this.current || this.status(key) !== 'todo') return true;
-    return KEYS.slice(0, KEYS.indexOf(key)).every(prior => COMPLETE.has(this.status(prior)));
+    return this.reachable(key);
   }
 
   open(key) {
@@ -662,7 +939,7 @@ export class Flow {
       if (raw === null) return;
       if (typeof raw !== 'string' || raw.length > 256) throw new Error('Invalid selection storage');
       const selected = JSON.parse(raw);
-      if (!subset(selected, ['shape', 'method', 'assess']) || !Object.values(selected).every(id => typeof id === 'string' && PROPOSAL.test(id))) {
+      if (!subset(selected, CONVERSE) || !Object.values(selected).every(id => typeof id === 'string' && PROPOSAL.test(id))) {
         throw new Error('Invalid selection storage');
       }
       // IDs are associations, never authority. Missing, stale or omitted IDs
@@ -676,7 +953,7 @@ export class Flow {
   persistSelections() {
     if (!this.selectionScope || !this.selectionStorage) return this.selectionStorageAvailable = false;
     try {
-      const selected = Object.fromEntries(['shape', 'method', 'assess'].filter(key => this.selectedProposals[key])
+      const selected = Object.fromEntries(CONVERSE.filter(key => this.selectedProposals[key])
         .map(key => [key, this.selectedProposals[key]]));
       if (Object.keys(selected).length) this.selectionStorage.setItem(this.selectionScope, JSON.stringify(selected));
       else this.selectionStorage.removeItem(this.selectionScope);
@@ -706,7 +983,8 @@ export class Flow {
     const operation = !this.state?.idea_id ? 'capture' : draft ? 'draft' : 'accept';
     if (operation === 'capture' && !validCapture(this.buffers.capture)) return false;
     if (!draft && key === 'priorities' && !validPriorities(this.buffers.priorities)) return false;
-    if (!draft && key === 'shape' && !validShape(this.buffers.shape)) return false;
+    if (!draft && key === 'discovery' && !validDiscovery(this.buffers.discovery)) return false;
+    if (!draft && key === 'exploration' && !validExploration(this.buffers.exploration, this.state?.accepted?.method?.selection ?? null)) return false;
     if (!draft && key === 'method' && !validMethod(this.buffers.method)) return false;
     if (!draft && key === 'assess' && (!validAssess(this.buffers.assess) || !this.state?.backlog_status?.available ||
         !same(this.buffers.assess.position.neighbors, insertionNeighbors(this.state.backlog.order, this.state.idea_id, this.buffers.assess.position.actual_position)) ||
@@ -826,7 +1104,8 @@ export class Flow {
   }
 
   async loadIdeas() {
-    if (this.disposed || this.ideasLoading || this.busy || this.selectionUncertain) return false;
+    // A read-only list: an automatic request being sent in the background must not swallow the human's click on Ideas.
+    if (this.disposed || this.ideasLoading || (this.busy && !this.proposalFlight) || this.selectionUncertain) return false;
     const epoch = this.mutationEpoch;
     this.ideasLoading = true; this.ideasError = null; this.onChange();
     try {
@@ -839,16 +1118,25 @@ export class Flow {
     } finally { this.ideasLoading = false; if (!this.disposed) this.onChange(); }
   }
 
+  // Back to the step workflow from the Ideas or Setup page: only the view changes, nothing is loaded or saved.
+  showWorkflow() { this.view = 'workflow'; this.onChange(); return true; }
+
   // Setup is a pure page view: nothing is loaded or saved by opening it.
   showSetup() { this.view = 'setup'; this.onChange(); return true; }
 
   async showIdeas() {
-    if (!await this.loadIdeas() || this.disposed) return false;
+    // An automatic request that starts while the list is being read moves the epoch and discards that read; the click
+    // is not lost, the list is read once more.
+    let loaded = await this.loadIdeas();
+    if (!loaded && !this.disposed && !this.ideasError) loaded = await this.loadIdeas();
+    if (!loaded || this.disposed) return false;
     this.view = 'ideas'; this.onChange(); return true;
   }
 
-  // A request that is only waiting on the terminal never holds the human in this idea.
-  waitingOnTerminal() { return this.proposalPending?.phase === 'waiting'; }
+  // A request that is only waiting on the terminal never holds the human in this idea. Neither does one the service
+  // certainly refused (a failed, non-ambiguous send): nothing is in flight and Retry stays on the step if they return.
+  // Only a send in flight, or one whose outcome is uncertain, holds them.
+  waitingOnTerminal() { const p = this.proposalPending; return p?.phase === 'waiting' || (p?.phase === 'failed' && p.ambiguous === false); }
 
   async selectIdea(ideaId) {
     if (!(ideaId === null || (typeof ideaId === 'string' && IDEA.test(ideaId))) || this.disposed || this.paused ||
@@ -992,7 +1280,7 @@ export class Flow {
       recovered ? 'Saved result recovered' : 'Saved';
     this.message += this.selectionWarning();
     if (pending.operation !== 'draft' && !this.dirty.has(pending.key)) {
-      const next = KEYS.slice(KEYS.indexOf(pending.key) + 1).find(key => !COMPLETE.has(this.status(key)));
+      const order = this.keys, next = order.slice(order.indexOf(pending.key) + 1).find(key => !COMPLETE.has(this.status(key)));
       if (next) this.current = next;
     }
   }
@@ -1146,7 +1434,7 @@ export class Flow {
   }
 
   canPropose(key) {
-    return ['shape', 'method', 'assess'].includes(key) && !this.disposed && !this.paused && !this.selectionUncertain && !this.busy && !this.pending && !this.proposalPending &&
+    return ASKABLE.includes(key) && !this.handReleased(key) && !this.disposed && !this.paused && !this.selectionUncertain && !this.busy && !this.pending && !this.proposalPending &&
       this.state?.agent_status === 'connected' && GENERATION.test(this.state?.agent_generation ?? '') && this.state.proposal_sources?.[proposalOperation(key)]?.available === true;
   }
 
@@ -1187,7 +1475,7 @@ export class Flow {
           result.source_digest !== pending.source.source_digest || !['pending', 'completed'].includes(result.status) ||
           result.write_state !== (result.status === 'pending' ? 'not_applied' : 'applied')) throw Object.assign(new Error('Invalid proposal response'), {code: 'invalid_response', uncertain: true});
       pending.phase = 'waiting'; pending.ambiguous = false;
-      this.message = 'Waiting for the initiating agent. Your answers remain editable.';
+      this.message = waitingLine(this, pending.key);
       return true;
     } catch (error) {
       pending.phase = 'failed'; pending.ambiguous = error.uncertain === true;
@@ -1213,13 +1501,11 @@ export class Flow {
     if (!item || this.state?.agent_status !== 'connected') return false;
     let fields = clone(item.proposal);
     if (key === 'method') {
-      const current = this.buffers.method;
-      // A recommendation never preselects the human's methodology or budget.
-      fields = {...clone(current), selection: current.selection ?? null,
-        reason: fields.reason, memory: fields.memory,
-        investment: current.selection === 'appetite-led' ? clone(current.investment ?? null) : null,
-        experiment: current.selection === 'experiment-led' ? clone(current.experiment ?? null) : null};
-    } else if (!['shape', 'assess'].includes(key)) return false;
+      // A method proposal is the agent's memory result only: it never selects, and never touches the human's reason.
+      fields = {...clone(this.buffers.method), memory: clone(fields.memory)};
+    } else if (!['discovery', 'exploration', 'assess'].includes(key)) return false;
+    // The suggestion came from the terminal: every field it covers counts as delivered, so no lock outlives it.
+    if (HAND_STEPS.includes(key)) (this.terminalFilled[key] ??= new Set()), FILL_KEYS[key].forEach(name => this.terminalFilled[key].add(name));
     this.selectedProposals[key] = id;
     this.persistSelections();
     this.edit(key, fields);
@@ -1228,7 +1514,7 @@ export class Flow {
   }
 
   clearProposal(key) {
-    if (this.busy || this.pending || !['shape', 'method', 'assess'].includes(key)) return false;
+    if (this.busy || this.pending || !CONVERSE.includes(key)) return false;
     delete this.selectedProposals[key];
     this.persistSelections();
     this.proposalError = null;

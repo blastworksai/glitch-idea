@@ -13,7 +13,7 @@ from unittest.mock import patch
 import test_agent_launch as transport
 import test_service as service_fixture
 from test_workflow import accept, complete, fields, original_idea
-from idea_agent_client import AgentClientError
+from idea_agent_client import AgentClient, AgentClientError
 from idea_agent_source import proposal_source_digest
 from idea_assessment import backlog_projection, insertion_neighbors, validate_actual_position
 from idea_domain import IdeaError, now
@@ -35,14 +35,22 @@ class MiddleFlowTests(unittest.TestCase):
     wire = transport.AgentLaunchTests.wire
     pair = transport.AgentLaunchTests.pair
     browser = transport.AgentLaunchTests.browser
-    install_test_handlers = transport.AgentLaunchTests.install_test_handlers
     accept_fields = transport.AgentLaunchTests.accept_fields
-    accept_test_shape = transport.AgentLaunchTests.accept_test_shape
     draft = transport.AgentLaunchTests.draft
+
+    def install_test_handlers(self):
+        # Explicit test-only validators qualify provider wiring; no claim about packaged handlers follows.
+        self.owner.handlers.update({step:TrustedStepHandler(lambda *args:None) for step in ('method','discovery','exploration')})
+        self.opened=self.client.open_binding('resume',self.opened['binding_id']);self.pair()
+        self.agent=AgentClient(self.client,self.opened['session_id'])
+
+    def accept_test_exploration(self):
+        for step in ('priorities','method','discovery','exploration'):
+            self.accept_fields(step,fields()[step],'accepted-'+step)
 
     def ready(self):
         self.install_test_handlers()
-        self.accept_test_shape()
+        self.accept_test_exploration()
 
     def enqueue_assessment(self, request='assessment-http-1'):
         state = self.browser('state')
@@ -170,7 +178,7 @@ class MiddleFlowTests(unittest.TestCase):
         # Durable fixture only; this does not exercise the future Assess handler.
         with self.owner.store.transaction(write=True) as state:
             idea = state['ideas'][self.idea_id]
-            for step in ('method', 'visualize', 'assess'):
+            for step in ('visualize', 'assess'):
                 idea = accept(idea, step)['idea']
             state['ideas'][self.idea_id] = idea
             self.owner.store.commit(state)
@@ -205,7 +213,6 @@ class MiddleFlowTests(unittest.TestCase):
         self.owner.handlers.update(assess=TrustedStepHandler(validate, apply),
             visualize=TrustedStepHandler(lambda *args: None))
         self.ready()
-        self.accept_fields('method', fields()['method'], 'fixture-method')
         self.accept_fields('visualize', fields()['visualize'], 'fixture-visualize')
 
     def assess_payload(self, value, request, proposal=None):
@@ -463,13 +470,13 @@ class PackagedMiddleJourneyTests(unittest.TestCase):
 
     def packaged_ready(self,*,visual='skipped'):
         handlers,routes = load_registry()
-        self.assertEqual(set(self.owner.handlers),{'shape','method','visualize','assess'})
+        self.assertEqual(set(self.owner.handlers),{'method','discovery','exploration','visualize','assess'})
         for step,handler in handlers.items():
             self.assertIs(self.owner.handlers[step],handler)
         self.assertIs(self.owner.routes['visual-set/accept'],routes['visual-set/accept'])
         self.selected()
         self.assertEqual(self.selected()['steps']['capture']['status'],'saved')
-        for step in ('priorities','shape','method'):
+        for step in ('priorities','method','discovery','exploration'):
             self.accept_current(step,fields()[step],'packaged-'+step+'-'+self.idea_id)
         if visual=='set':
             return self.upload_set()
@@ -496,7 +503,7 @@ class PackagedMiddleJourneyTests(unittest.TestCase):
         payload = dict(request_id='packaged-set',idea_id=self.idea_id,expected_revision=state['revision'],
             expected_draft_version=state['draft_version'],step='visualize',proposal_id=None,
             expected_backlog_revision=None,design_set_id=None,asset_ids=[upload['asset_id']],
-            fields=dict(disposition='accepted_set',reason=None,design_set_id=None,brief_evidence_id=None))
+            fields=dict(disposition='accepted_set',source='claude_design',reason=None,design_set_id=None,brief_evidence_id=None))
         accepted = self.browser('visual-set/accept',payload)
         self.assertEqual(self.browser('visual-set/accept',payload),accepted)
         state = self.selected()
@@ -616,7 +623,7 @@ class PackagedMiddleJourneyTests(unittest.TestCase):
         before = self.domain()['ideas'][self.idea_id]; assets = self.immutable_assets()
         value = copy.deepcopy(before['workflow']['steps'][step]['fields'])
         if step=='capture': value['raw_text'] = 'Human edited Capture source words'
-        elif step=='shape': value['outcome'] = 'Human changed accepted outcome'
+        elif step=='exploration': value['outcome'] = 'Human changed accepted outcome'
         else: value['urgency'] = 9
         accepted = self.accept_current(step,value,'packaged-change-'+step)
         state = self.selected(); after = self.domain()['ideas'][self.idea_id]
@@ -628,12 +635,19 @@ class PackagedMiddleJourneyTests(unittest.TestCase):
         self.assertEqual(after['assessments'],before['assessments'])
         self.assertEqual(after['origin'],before['origin'])
         self.assertEqual(after['workflow']['steps']['visualize']['fields']['design_set_id'],set_id)
-        if step in ('capture','shape'):
+        if step=='capture':
+            for consumer in ('method','discovery','exploration','visualize'):
+                self.assertEqual(state['steps'][consumer]['status'],'review-needed',consumer)
+        elif step=='exploration':
             self.assertEqual(state['steps']['visualize']['status'],'review-needed')
-            self.assertEqual(state['steps']['method']['status'],'review-needed')
+            # Method and Discovery come before Exploration: they stay saved.
+            for earlier in ('method','discovery'):
+                self.assertEqual(state['steps'][earlier]['status'],'saved',earlier)
         else:
-            self.assertEqual(state['steps']['visualize']['status'],'saved')
-            self.assertEqual(state['steps']['shape']['status'],'saved')
+            # v3 invalidation is transitive: Visualize reads Discovery and Exploration, which read Method,
+            # which reads Priorities. The design set itself stays preserved (checked above and below).
+            for consumer in ('method','discovery','exploration','visualize'):
+                self.assertEqual(state['steps'][consumer]['status'],'review-needed',consumer)
         self.assertNotEqual(state['steps']['review']['status'],'saved')
         self.assertEqual(self.immutable_assets(),assets)
         with self.owner.store.transaction() as active:
@@ -642,8 +656,8 @@ class PackagedMiddleJourneyTests(unittest.TestCase):
     def test_packaged_capture_change_invalidates_consumers_preserving_set_history(self):
         self.check_source_invalidation('capture')
 
-    def test_packaged_shape_change_invalidates_consumers_preserving_set_history(self):
-        self.check_source_invalidation('shape')
+    def test_packaged_exploration_change_invalidates_consumers_preserving_set_history(self):
+        self.check_source_invalidation('exploration')
 
     def test_packaged_priorities_change_invalidates_assess_preserving_visual_source(self):
         self.check_source_invalidation('priorities')

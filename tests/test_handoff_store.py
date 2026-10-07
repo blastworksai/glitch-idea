@@ -18,7 +18,7 @@ import idea_markdown as md
 import idea_store as storage
 import idea_transactions as tx
 from idea_domain import IdeaError, decode, digest, encoded
-from idea_workflow import save_draft
+from idea_workflow import STEP_ORDER, save_draft
 from idea_workflow import capture_workflow, source_digest
 from test_handoff_evidence import fixture as source_fixture
 from test_workflow import accept, fields, original_idea, STAMP
@@ -124,8 +124,8 @@ class HistoricalHandoffStoreTests(unittest.TestCase):
         before = self.files(); original = self.show()
         with self.store.transaction(write=True) as state:
             idea = state['ideas'][self.key]
-            draft = dict(idea['workflow']['steps']['shape']['fields'],outcome='New unsaved outcome')
-            state['ideas'][self.key] = save_draft(idea,'shape',draft,expected_revision=idea['revision'],
+            draft = dict(idea['workflow']['steps']['exploration']['fields'],outcome='New unsaved outcome')
+            state['ideas'][self.key] = save_draft(idea,'exploration',draft,expected_revision=idea['revision'],
                 expected_draft_version=idea['workflow']['draft_version'])['idea']
             self.store.commit(state)
         after = self.show()
@@ -145,8 +145,8 @@ class HistoricalHandoffStoreTests(unittest.TestCase):
         before = (self.root/self.links[0]['path']).read_bytes()
         with self.store.transaction(write=True) as state:
             idea = state['ideas'][self.key]
-            shaped = dict(idea['workflow']['steps']['shape']['fields'],outcome='Accepted new slice')
-            state['ideas'][self.key] = accept(idea,'shape',shaped)['idea']
+            shaped = dict(idea['workflow']['steps']['exploration']['fields'],outcome='Accepted new slice')
+            state['ideas'][self.key] = accept(idea,'exploration',shaped)['idea']
             self.store.commit(state)
         with self.store.transaction() as state:
             self.assertGreater(state['ideas'][self.key]['revision'],self.packets[0]['source_revision'])
@@ -269,11 +269,11 @@ def publication_seed(root, *, large=False):
     workspace.mkdir(parents=True,exist_ok=True)
     store = storage.Store(root,observer=ACTOR); sid = store.create_session()
     values = fields(); values['capture']['workspace']['path'] = str(workspace.resolve())
-    if large: values['shape']['assumptions'] = ['Bounded assumption '+str(n)+'x'*60000 for n in range(20)]
+    if large: values['exploration']['assumptions'] = ['Bounded assumption '+str(n)+'x'*60000 for n in range(20)]
     idea = original_idea()
     idea = capture_workflow(idea,values['capture'],new_capture=True,actor='operator',timestamp=STAMP,
         evidence_id='capture-fixture',source_digest=source_digest('capture',1,{'capture':values['capture']}))['idea']
-    for step in ('priorities','shape','method','visualize','assess'): idea = accept(idea,step,values[step])['idea']
+    for step in STEP_ORDER[1:-1]: idea = accept(idea,step,values[step])['idea']
     receipt = idea['workflow']['steps']['assess']['acceptance']; position = idea['workflow']['steps']['assess']['fields']['position']
     placement = dict(idea_id=idea['idea_id'],idea_revision=receipt['accepted_revision'],position=1,
         reason='Accepted placement',actor=receipt['actor'],timestamp=receipt['timestamp'],
@@ -356,7 +356,7 @@ class HandoffPublicationTests(unittest.TestCase):
         payload = publication_payload(self.store,self.key); result = self.publish(payload=payload)
         with self.store.transaction(write=True) as state:
             idea = state['ideas'][self.key]
-            state['ideas'][self.key] = accept(idea,'shape',dict(idea['workflow']['steps']['shape']['fields'],outcome='New slice'))['idea']
+            state['ideas'][self.key] = accept(idea,'exploration',dict(idea['workflow']['steps']['exploration']['fields'],outcome='New slice'))['idea']
             self.store.commit(state)
         self.workspace.rmdir(); self.store = storage.Store(self.root,observer=ACTOR)
         before = self.files()
@@ -467,7 +467,7 @@ class HandoffPublicationTests(unittest.TestCase):
 
     def accepted_design(self):
         data = 'Real accepted design notes café\n'.encode(); number = '9'*32
-        intent = dict(schema_version=1,kind='upload-intent',idea_id=self.key,source_revision=6,actor=ACTOR,
+        intent = dict(schema_version=1,kind='upload-intent',idea_id=self.key,source_revision=7,actor=ACTOR,
             timestamp=STAMP,upload_id='upload_'+number,asset_id='asset_'+number,session_id=self.sid,
             name='Design café.txt',declared_type='text/plain',size=len(data))
         self.store.mutate_assets(self.sid,'design-intent',{'operation':'fixture-intent'},lambda s:{'idea_id':self.key},
@@ -478,7 +478,7 @@ class HandoffPublicationTests(unittest.TestCase):
                                  prepare_records=lambda s:[complete])
         def prepare(state):
             source = {}
-            for step in ('capture','shape'):
+            for step in ('capture','discovery','exploration'):
                 record = state['ideas'][self.key]['workflow']['steps'][step]; revision = record['acceptance']['accepted_revision']
                 source[step] = dict(revision=revision,digest=source_digest(step,revision,{step:record['fields']}))
             return [dict(schema_version=1,kind='design-set',idea_id=self.key,source_revision=state['ideas'][self.key]['revision'],
@@ -487,7 +487,7 @@ class HandoffPublicationTests(unittest.TestCase):
                     type=complete['validated_type'],size=complete['size'],sha256=complete['sha256'])])]
         def accept_set(state):
             idea = state['ideas'][self.key]; visual = dict(idea['workflow']['steps']['visualize']['fields'],
-                disposition='accepted_set',reason=None,design_set_id='set_'+number)
+                disposition='accepted_set',source='claude_design',reason=None,design_set_id='set_'+number)
             state['ideas'][self.key] = accept(idea,'visualize',visual)['idea']; return {'idea_id':self.key}
         self.store.mutate_assets(self.sid,'design-accept',{'operation':'fixture-set'},accept_set,prepare_records=prepare)
         return blob,data,complete
@@ -499,7 +499,7 @@ class HandoffPublicationTests(unittest.TestCase):
             type='text/plain',size=len(data),sha256=digest(data),path=str(blob)))
         with self.store.transaction(write=True) as state:
             idea = state['ideas'][self.key]
-            state['ideas'][self.key] = accept(idea,'shape',dict(idea['workflow']['steps']['shape']['fields'],outcome='New design slice'))['idea']
+            state['ideas'][self.key] = accept(idea,'exploration',dict(idea['workflow']['steps']['exploration']['fields'],outcome='New design slice'))['idea']
             self.store.commit(state)
         with storage.Store(self.root).transaction() as state:
             self.assertEqual(storage.Store(self.root).path,self.store.path)

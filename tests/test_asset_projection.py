@@ -32,14 +32,14 @@ class AssetProjectionTests(unittest.TestCase):
         self.service = Service(self.store,{},self.context); self.binding = bridge.ApplicationBinding(self.service)
         request = bridge.RequestInfo('POST','/api/v1/uploads',{},'fixture')
         self.intent = ingestion.upload_metadata(self.binding,request,dict(request_id='metadata',idea_id=KEY,
-            expected_revision=6,name='Actual.png',declared_type='image/png',size=len(PNG)))
+            expected_revision=7,name='Actual.png',declared_type='image/png',size=len(PNG)))
         request = bridge.RequestInfo('PUT','unused',{},'fixture',self.intent['upload_id'])
         ingestion.upload_bytes(self.binding,request,bridge.BoundedBody(io.BytesIO(PNG),len(PNG)))
 
     def set_record(self,state,number=1):
         entries = self.store.asset_records(state,KEY)
         asset = next(record for record in entries if record['kind']=='asset'); source = {}
-        for step in ('capture','shape'):
+        for step in ('capture','discovery','exploration'):
             record = state['ideas'][KEY]['workflow']['steps'][step]
             revision = record['acceptance']['accepted_revision']
             source[step] = dict(revision=revision,digest=source_digest(step,revision,{step:record['fields']}))
@@ -56,7 +56,7 @@ class AssetProjectionTests(unittest.TestCase):
         idea = state['ideas'][KEY]
         return dict(request_id=request_id,idea_id=KEY,expected_revision=idea['revision'],
             expected_draft_version=idea['workflow']['draft_version'],step='visualize',proposal_id=None,
-            expected_backlog_revision=None,fields=dict(disposition='accepted_set',reason=None,
+            expected_backlog_revision=None,fields=dict(disposition='accepted_set',reason=None,source='claude_design',
             design_set_id=identifier('set',number),brief_evidence_id=None))
 
     def test_public_projection_exact_verified_entries_counts_orphans_and_detachment(self):

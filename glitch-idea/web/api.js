@@ -1,4 +1,22 @@
 // Same-origin browser API; credentials live only in this instance.
+// A moved or delivered idea is a read-only pointer to its file in a workspace; an active one has no home.
+const homeOk = home => home !== null && typeof home === 'object' && !Array.isArray(home) &&
+  Object.keys(home).sort().join() === 'file_path,workspace_name,workspace_path' &&
+  Object.values(home).every(value => typeof value === 'string' && value.length > 0 && value.length <= 4096);
+// A pointer's file is exactly <workspace>/ideas/<idea_id>.md; the reply is checked here, not trusted.
+const homeMatches = (home, id) => {
+  const file = hostPath(home.file_path), workspace = hostPath(home.workspace_path);
+  return file !== null && workspace !== null && file === workspace.replace(/\/+$/, '') + '/ideas/' + id + '.md';
+};
+const refOk = ref => scalarText(ref, 500) && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(ref);
+const lifecycleOk = row => typeof row.read_only === 'boolean' && row.read_only === (row.lifecycle !== 'active') && (
+  row.lifecycle === 'active'
+    ? ['archived', 'ready-to-plan', 'review-needed', 'in-progress'].includes(row.status) && row.home === null && row.delivered_ref === null
+    : row.lifecycle === 'moved'
+      ? row.status === 'moved' && homeOk(row.home) && homeMatches(row.home, row.idea_id) && row.delivered_ref === null
+      : row.lifecycle === 'delivered' && row.status === 'delivered' && homeOk(row.home) &&
+        homeMatches(row.home, row.idea_id) && refOk(row.delivered_ref));
+
 export class ApiError extends Error {
   constructor(code, status = 0, data = {}, uncertain = false) {
     super(code);
@@ -21,7 +39,8 @@ const SESSION = /^session_[0-9a-f]{32}$/;
 const UPLOAD = /^upload_[0-9a-f]{32}$/;
 const ASSET = /^asset_[0-9a-f]{32}$/;
 const IDEA = /^idea_[0-9a-f]{32}$/;
-const STEP_KEYS = ['capture', 'priorities', 'shape', 'method', 'visualize', 'assess', 'review'];
+// Every step key a resume row may name, in the default order (folds.js STEPS; a test keeps the two equal).
+const STEP_KEYS = ['capture', 'priorities', 'method', 'discovery', 'exploration', 'visualize', 'assess', 'review'];
 const MARKDOWN_MAX_BYTES = 2 * 1024 * 1024;
 const REQUEST = /^[A-Za-z0-9_.:-]{1,128}$/;
 export const UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
@@ -280,6 +299,10 @@ export class IdeaApi {
       let data;
       try { data = await response.json(); }
       catch { throw new ApiError('invalid_response', response.status, {}, writing); }
+      // The superseded-tab refusal arrives as {"error":{"code":...}}; read it as an ordinary failure.
+      if (!response.ok && data && typeof data === 'object' && typeof data.code !== 'string' && typeof data.error?.code === 'string') {
+        data = {ok: false, code: data.error.code};
+      }
       if (!data || typeof data.ok !== 'boolean' || typeof data.code !== 'string') {
         throw new ApiError('invalid_response', response.status, {}, writing);
       }
@@ -361,6 +384,18 @@ export class IdeaApi {
     return data;
   }
 
+  // Take a terminal-guided step by hand: cancels only that step's open agent request.
+  async release(step) {
+    if (step !== 'discovery' && step !== 'exploration') throw new ApiError('invalid_input');
+    this.requirePinnedSession();
+    const data = await this.request('conversation/release', {step});
+    if (!exact(data, ['ok', 'code', 'idea_id', 'step', 'hand', 'released', 'write_state', 'revision', 'draft_version']) ||
+        data.ok !== true || data.code !== 'ok' || !typed(IDEA, data.idea_id) || data.step !== step || typeof data.hand !== 'boolean' ||
+        !counter(data.released) || !['applied', 'no_op'].includes(data.write_state) || !counter(data.revision, 1) ||
+        !counter(data.draft_version)) invalidReply(true);
+    return data;
+  }
+
   async ideas() {
     this.requirePinnedSession();
     const data = await this.request('ideas');
@@ -372,14 +407,19 @@ export class IdeaApi {
       const base = ['idea_id', 'revision', 'position', 'title', 'status', 'method', 'updated', 'detail_path'];
       // Resume fields (current step, completed count) come from current services; older replies omit them.
       const resume = Object.hasOwn(row, 'current_step');
-      if (!exact(row, resume ? [...base, 'current_step', 'completed_steps'] : base) ||
+      // The four lifecycle keys travel together: all present, or (an older reply) all absent, which means an active idea.
+      const pointer = Object.hasOwn(row, 'lifecycle');
+      const view = pointer ? row : {...row, lifecycle: 'active', home: null, delivered_ref: null, read_only: false};
+      if (!exact(pointer ? row : view, [...base, ...(resume ? ['current_step', 'completed_steps'] : []), 'lifecycle', 'home', 'delivered_ref', 'read_only']) ||
+          (!pointer && ['home', 'delivered_ref', 'read_only'].some(key => Object.hasOwn(row, key))) ||
           (resume && (!STEP_KEYS.includes(row.current_step) || !Number.isSafeInteger(row.completed_steps) ||
             row.completed_steps < 0 || row.completed_steps > STEP_KEYS.length)) ||
           !typed(IDEA, row.idea_id) || ids.has(row.idea_id) || !counter(row.revision, 1) ||
           row.position !== index + 1 || !scalarText(row.title, 200, false) ||
-          !['archived', 'ready-to-plan', 'review-needed', 'in-progress'].includes(row.status) ||
+          !lifecycleOk(view) ||
           !(row.method === null || METHODS.has(row.method)) || !scalarText(row.updated, 200) ||
-          !hostPath(row.detail_path)?.endsWith('/' + row.idea_id + '.md')) invalidReply();
+          !hostPath(row.detail_path) || (view.lifecycle === 'active' && !hostPath(row.detail_path).endsWith('/' + row.idea_id + '.md')) ||
+          (view.lifecycle !== 'active' && row.detail_path !== view.home.file_path)) invalidReply();
       ids.add(row.idea_id);
     }
     return data;

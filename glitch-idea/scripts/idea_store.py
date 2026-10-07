@@ -305,24 +305,19 @@ def _external_idea(original, baseline, observer):
     def changed(step, fields):
         causes.add(step)
         mirrors.setdefault(step, {}).update(copy.deepcopy(fields))
-    for field in ('shape', 'ratings'):
+    require(original['shape'] == baseline['shape'], 'The retired shape record cannot be edited; use the workflow steps', 'external_edit_conflict')
+    for field in ('ratings',):
         old, new = baseline[field], original[field]
         if old == new:
             continue
         require(type(new) is dict, 'Current '+field+' must contain valid inputs', 'external_edit_conflict')
         old = old or {}
-        if field == 'ratings':
-            if old:
-                require({k:v for k,v in new.items() if k not in ('urgency','importance')} ==
-                        {k:v for k,v in old.items() if k not in ('urgency','importance')}, 'Rating attribution is protected', 'external_edit_conflict')
-            else:
-                new = dict(new,actor=observer,timestamp=now())
-            changed('priorities', {k:new[k] for k in ('urgency','importance') if new[k] != old.get(k)})
+        if old:
+            require({k:v for k,v in new.items() if k not in ('urgency','importance')} ==
+                    {k:v for k,v in old.items() if k not in ('urgency','importance')}, 'Rating attribution is protected', 'external_edit_conflict')
         else:
-            changed_shape = {k:new[k] for k in STEP_FIELDS['shape'] if new[k] != old.get(k)}
-            if changed_shape: changed('shape', changed_shape)
-            mapped = {alias:new[key] for key,alias in (('method','selection'),('method_reason','reason')) if new[key] != old.get(key)}
-            if mapped: changed('method', mapped)
+            new = dict(new,actor=observer,timestamp=now())
+        changed('priorities', {k:new[k] for k in ('urgency','importance') if new[k] != old.get(k)})
         result[field] = copy.deepcopy(new)
     require(len(original['assessments']) == len(baseline['assessments']), 'Assessment list membership is protected', 'external_edit_conflict')
     for n, (old,new) in enumerate(zip(baseline['assessments'],original['assessments'])):
@@ -368,18 +363,7 @@ def _external_idea(original, baseline, observer):
             if step == 'priorities' and result['ratings'] is not None:
                 for key in ('urgency','importance'):
                     if key in updates and updates[key] is not None: result['ratings'][key] = updates[key]
-            elif step == 'shape' and result['shape'] is not None:
-                mirrored = dict(result['shape'], **{k:v for k,v in updates.items() if k in STEP_FIELDS['shape']})
-                try: shape(mirrored)
-                except IdeaError: pass  # valid partial browser source stays draft-only
-                else: result['shape'] = mirrored
-            elif step == 'method' and result['shape'] is not None:
-                mirrored = copy.deepcopy(result['shape'])
-                for key,alias in (('method','selection'),('method_reason','reason')):
-                    if alias in updates: mirrored[key] = updates[alias]
-                try: shape(mirrored)
-                except IdeaError: pass
-                else: result['shape'] = mirrored
+            # Discovery, Exploration and Method have no legacy mirror: the workflow is their only source.
             elif step == 'assess' and result['assessments'] and 'assessment' in updates:
                 try: computed = assessment(updates['assessment'])
                 except IdeaError: continue  # partial source stays a review draft
@@ -396,12 +380,26 @@ def _external_idea(original, baseline, observer):
     return result
 
 
+def _decode_pointer(decode, raw):
+    """Decode a stored lifecycle pointer; a tampered one is a corrupt store, with its own message kept."""
+    try:
+        return decode(raw)
+    except IdeaError as exc:
+        if exc.code != 'invalid_input':
+            raise
+        raise IdeaError('corrupt_store', str(exc)) from exc
+
+
 class Store:
     def __init__(self, path, *, observer=None):
         # Preserve spelling until safety checks: resolve() would hide symlinks.
         self.path = Path(path).expanduser().absolute()
         self.state_path = self.path / 'state.json'
         self._contexts = threading.local()
+        # Last clean markdown load (J6e). In memory only; read and written solely
+        # inside transaction() while holding store_lock (in-process mutex + flock),
+        # so threads on this Store are serialized and never share a half-written entry.
+        self._load_cache = None
         if observer is None:
             if os.name == 'posix':
                 import pwd
@@ -640,6 +638,42 @@ class Store:
         except (KeyError, TypeError, AttributeError, IndexError, ValueError) as exc:
             raise IdeaError('invalid_markdown', 'Malformed editable Markdown schema: '+str(exc)) from exc
 
+    def _remember_load(self, loaded):
+        """Cache a load only when it needed no normalizing write (imported == state)."""
+        state, files, docs, imported, receipts, entries, paths = loaded
+        self._load_cache = copy.deepcopy(loaded) if imported == state else None
+
+    def _reuse_load(self):
+        """Return a private deep copy of the cached load iff every byte it read is unchanged.
+
+        Fingerprint: the exact bytes (stronger than their sha256) of every file in
+        the inventory (IDEAS.md, idea/history/metadata/plan/placement/evidence and
+        asset evidence files), and of every receipt file the load read. The inventory
+        key set must also match, so an added or removed file misses. Any difference
+        or any error returns None and the caller runs the full parse path, which
+        replaces the cache. Linked asset blobs are re-verified in full every time.
+        """
+        cached = self._load_cache
+        if cached is None:
+            return None
+        _, files, _, _, receipts, _, _ = cached
+        try:
+            if self._inventory() != set(files):
+                return None
+            for relative, raw in files.items():
+                if read_bytes(self._safe(relative), MAX_STATE) != raw:
+                    return None
+            for relative, raw in receipts.items():
+                if read_bytes(self._safe(relative), MAX_RECEIPT_BYTES) != raw:
+                    return None
+            paths = self._asset_files()
+        except (IdeaError, OSError):
+            self._load_cache = None
+            return None
+        state, files, docs, imported, receipts, entries, _ = copy.deepcopy(cached)
+        self._verify_asset_blobs(entries)
+        return state, files, docs, imported, receipts, entries, paths
+
     def _migration_evidence(self, index_raw):
         import idea_migration as migration
         index = _markdown().decode_index(index_raw)
@@ -703,9 +737,23 @@ class Store:
         index = md.decode_index(read('IDEAS.md'))
         docs['IDEAS.md'] = index
         expected = {'IDEAS.md'}
+        moves = {link['idea_id']:link for link in md.move_links(index.metadata['extensions'])}
+        delivered = {link['idea_id']:link for link in md.delivered_links(index.metadata['extensions'])}
+        require(set(moves) | set(delivered) <= set(index.metadata['order']), 'Lifecycle pointer names an unknown idea', 'corrupt_store')
+        for key, link in delivered.items():
+            expected.add(link['path'])
+            require(digest(read(link['path'])) == link['sha256'], 'Delivered pointer hash differs from its index link', 'corrupt_store')
+            require(_decode_pointer(md.decode_delivered, files[link['path']])['idea_id'] == key, 'Delivered pointer names another idea', 'corrupt_store')
         for key in index.metadata['order']:
             relative = key+'.md'
-            document = md.parse_document(read(relative))
+            if key in moves:
+                # The living detail file left the store: rebuild it from the
+                # immutable pointer. The result is a view, never stored in files.
+                require(not self._safe(relative).exists(), 'Moved idea still has a detail file in the store: '+key, 'corrupt_store')
+                expected.add(moves[key]['path'])
+                document = md.parse_document(self._moved_detail(key, moves[key], read, index.metadata['transaction_revision'])[1])
+            else:
+                document = md.parse_document(read(relative))
             originals[key] = copy.deepcopy(document.metadata['idea'])
             inspected = copy.deepcopy(document.metadata)
             for entry in inspected['idea']['assessments']:
@@ -715,7 +763,8 @@ class Store:
             normalized[relative] = md.encode_document(inspected,document.body)
             md.decode_detail(normalized[relative], check_body=False)
             docs[relative] = document
-            expected.add(relative)
+            if key not in moves:
+                expected.add(relative)
             links = list(document.metadata['history'])
             for items in document.metadata['metadata_evidence'].values():
                 links.extend(items)
@@ -828,6 +877,62 @@ class Store:
         asset_paths = self._asset_files()
         return baseline, files, docs, imported, proposal_receipts, asset_entries, asset_paths
 
+    def _moved_detail(self, key, link, read, transaction_revision):
+        """Verify a moved pointer against its index link; return (pointer, detail bytes).
+
+        read(relative) returns the stored bytes of any reserved file.
+        """
+        md = _markdown()
+        raw = read(link['path'])
+        require(digest(raw) == link['sha256'], 'Moved pointer hash differs from its index link', 'corrupt_store')
+        pointer = _decode_pointer(md.decode_moved, raw)
+        require(pointer['idea_id'] == key, 'Moved pointer names another idea', 'corrupt_store')
+        history = []
+        for n in range(1, pointer['idea_revision']+1):
+            relative = 'history/'+key+'/r'+str(n)+'.md'
+            history.append(dict(path=relative, sha256=digest(read(relative))))
+        frozen = pointer['frozen']
+        return pointer, md.encode_detail(frozen['idea'], '', frozen['extensions'], history,
+                                         transaction_revision=transaction_revision)
+
+    def _moved_map(self, context):
+        """idea_id -> verified moved pointer, from the loaded index and files."""
+        index = context['docs'].get('IDEAS.md')
+        if index is None:
+            return {}
+        md = _markdown()
+        result = {}
+        for link in md.move_links(index.metadata['extensions']):
+            pointer = _decode_pointer(md.decode_moved, context['files'][link['path']])
+            result[link['idea_id']] = pointer
+        return result
+
+    @staticmethod
+    def _home(pointer):
+        return dict(workspace_name=pointer['workspace']['name'], workspace_path=pointer['workspace']['path'],
+                    file_path=pointer['home_path'])
+
+    def lifecycle(self, idea_id):
+        """Inside a transaction: dict(lifecycle, home, delivery) for one idea.
+
+        lifecycle is 'active', 'moved' or 'delivered'; home is the workspace
+        location of a moved idea's living detail file, else None.
+        """
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None, 'Lifecycle requires a Store transaction', 'invalid_transaction')
+        pointer = self._moved_map(context).get(idea_id)
+        delivery = None
+        index = context['docs'].get('IDEAS.md')
+        if index is not None:
+            for link in _markdown().delivered_links(index.metadata['extensions']):
+                if link['idea_id'] == idea_id:
+                    delivery = _markdown().decode_delivered(context['files'][link['path']])
+        state = 'delivered' if delivery is not None else 'moved' if pointer is not None else 'active'
+        return dict(lifecycle=state, home=None if pointer is None else self._home(pointer), delivery=delivery)
+
+    def _refuse_moved(self, moved, key):
+        raise IdeaError('idea_moved', 'This idea moved to a workspace; edit its file there', home=self._home(moved[key]))
+
     def _verify_handoff_history(self, state, files, packets, assets):
         """Validate historical sources, never require present business eligibility.
 
@@ -890,7 +995,12 @@ class Store:
                 files, docs, kind = {}, {}, 'legacy'
             elif index.exists():
                 migration_evidence = self._migration_evidence(read_bytes(index, MAX_STATE))
-                state, files, docs, imported, proposal_receipts, asset_entries, asset_paths = self._load_markdown()
+                loaded = self._reuse_load()
+                if loaded is None:
+                    loaded = self._load_markdown()
+                    self._remember_load(loaded)
+                state, files, docs, imported, proposal_receipts, asset_entries, asset_paths = loaded
+                loaded = None
                 kind = 'markdown'
             else:
                 lock.seek(0)
@@ -950,6 +1060,16 @@ class Store:
                         proposal_evidence=None, asset_append=None, asset_evidence=None,
                         handoff_append=None, handoff_evidence=None):
         baseline = context['baseline']
+        moved = self._moved_map(context) if context['kind'] == 'markdown' else {}
+        for key in moved:
+            if key in state['ideas'] and state['ideas'][key] != baseline['ideas'][key]:
+                self._refuse_moved(moved, key)
+        for key in ([proposal_append[0]] if proposal_append is not None else []) + list(asset_append or ()) + ([handoff_append[0]] if handoff_append is not None else []):
+            if key in moved:
+                self._refuse_moved(moved, key)
+        for placement in state['placements'][len(baseline['placements']):]:
+            if placement['idea_id'] in moved:
+                self._refuse_moved(moved, placement['idea_id'])
         require(set(state['ideas']) >= set(baseline['ideas']), 'Ideas cannot be removed by a normal commit', 'corrupt_store')
         for key, prior in baseline['ideas'].items():
             current = state['ideas'][key]
@@ -1026,6 +1146,9 @@ class Store:
         after = md.encode_state(state, previous=context['docs'], previous_state=baseline,
                                 extensions=extensions,proposal_evidence=verified_proposals,asset_evidence=verified_assets,
                                 handoff_evidence=verified_handoffs)
+        for key, pointer in moved.items():
+            after.pop(key+'.md', None)  # the living file is outside the store
+            after[md.pointer_path(key, 'moved')] = context['files'][md.pointer_path(key, 'moved')]
         require(len(after) <= MAX_STORE_FILES and sum(len(raw) for raw in after.values()) <= MAX_STORE_BYTES,
                 'Store after-images exceed file/byte limits', 'too_large')
         # Fresh physical inventory plus new immutable evidence, before publish.
@@ -1047,7 +1170,8 @@ class Store:
             return context['files'], {}, False
         return after, changes, changed
 
-    def _publish_commit(self, state, context, after, changes, extra=None, extra_expected=None):
+    def _publish_commit(self, state, context, after, changes, extra=None, extra_expected=None, move_out=None):
+        self._load_cache = None  # any publish attempt invalidates the remembered load
         self._check_cas(context)
         if context['kind'] == 'legacy' and (changes or extra):
             import idea_migration as migration
@@ -1069,13 +1193,16 @@ class Store:
                 return None
             expected = {path:None if path not in context['files'] else digest(context['files'][path]) for path in changes}
             expected.update(extra_expected or {})
-            result = transactions.publish(self.path, combined, expected)
+            result = transactions.publish(self.path, combined, expected, move_out=move_out)
             migration_evidence = context.get('migration_evidence', {})
         result.raise_for_error()
         initialize_marker(context['lock']).raise_for_error()
         md = _markdown()
         context.update(kind='markdown', baseline=copy.deepcopy(state), files=after,
                        docs={path:md.parse_document(raw) for path,raw in after.items() if path == 'IDEAS.md' or _IDEA_FILE.fullmatch(path)})
+        for link in md.move_links(context['docs']['IDEAS.md'].metadata['extensions']):
+            context['docs'][link['idea_id']+'.md'] = md.parse_document(self._moved_detail(
+                link['idea_id'], link, after.__getitem__, context['docs']['IDEAS.md'].metadata['transaction_revision'])[1])
         context['migration_evidence'] = migration_evidence
         # Purely reconstruct after-images already checked at the boundary.
         # Existing/staged blob witnesses remain verified; this adds no I/O.
@@ -1093,6 +1220,174 @@ class Store:
             if relative in context.get('proposal_receipts', {}):
                 context['proposal_receipts'][relative] = raw
         return result
+
+    def _workspace_home(self, idea_id, name, path):
+        """Validate a move target; return (canonical workspace path, home file path)."""
+        require(type(name) is str and 1 <= len(name) <= 100 and name.strip() and '\n' not in name and '\r' not in name
+                and not any(0xD800 <= ord(c) <= 0xDFFF for c in name), 'Workspace name must be one line of 1 to 100 characters')
+        unavailable = lambda why: IdeaError('workspace_unavailable', 'Workspace is unavailable: '+why)
+        if type(path) is not str or not path or '\0' in path or not os.path.isabs(path):
+            raise unavailable('the path must be absolute')
+        target = Path(path)
+        if any(part in ('', '.', '..') for part in path.split('/')[1:] if part != '') or '//' in path:
+            raise unavailable('the path must be canonical')
+        for component in reversed((target, *target.parents)):
+            try:
+                mode = component.lstat().st_mode
+            except OSError as exc:
+                raise unavailable('missing '+str(component)) from exc
+            if stat.S_ISLNK(mode):
+                raise unavailable('a symlink in the path: '+str(component))
+            if not stat.S_ISDIR(mode):
+                raise unavailable('not a directory: '+str(component))
+        if not os.access(target, os.W_OK | os.X_OK):
+            raise unavailable('not writable')
+        store, real = Path(os.path.realpath(self.path)), Path(os.path.realpath(target))
+        if real == store or store in real.parents or real in store.parents:
+            raise IdeaError('target_overlaps_store', 'The workspace and the idea store must not contain one another')
+        home = target/'ideas'/(idea_id+'.md')
+        folder = home.parent
+        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+            raise unavailable('the ideas folder is not a plain directory')
+        return target, home
+
+    def move_out(self, state, idea_id, *, expected_revision, plan, workspace_name, workspace_path, actor, timestamp=None):
+        """Move one idea's living detail file to <workspace>/ideas/<idea_id>.md.
+
+        Call inside a writable transaction with its state. plan is the complete
+        plan record (including content) exactly as register-plan builds it; it is
+        published in the same journaled commit as the immutable moved pointer,
+        the IDEAS.md link and the removal of the store copy. Revisions, metadata
+        and plan evidence stay. Returns dict(idea_id, home, pointer_path,
+        moved_sha256, plan, resumed). Raises idea_moved, not_found,
+        stale_revision, invalid_input, workspace_unavailable,
+        target_overlaps_store, home_conflict.
+        """
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None and context['write'], 'Move requires a writable Store transaction', 'invalid_transaction')
+        require(not context.get('request_running'), 'Request mutators cannot publish or perform I/O', 'invalid_transaction')
+        require(context['kind'] == 'markdown', 'Migrate before moving an idea', 'migration_required')
+        md = _markdown()
+        check_id(idea_id)
+        require(idea_id in state['ideas'], 'Unknown idea', 'not_found')
+        moved = self._moved_map(context)
+        if idea_id in moved:
+            self._refuse_moved(moved, idea_id)
+        integer(expected_revision, 'expected revision', 1)
+        text(actor, 'actor', 200)
+        idea = state['ideas'][idea_id]
+        require(idea['revision'] == expected_revision, 'Idea changed since it was read', 'stale_revision')
+        require(type(plan) is dict and plan.get('idea_id') == idea_id and plan.get('idea_revision') == idea['revision']
+                and plan.get('path') == str(self.path/'plan-evidence'/(str(plan.get('plan_id'))+'.md'))
+                and all(prior['plan_id'] != plan.get('plan_id') for prior in idea['plans']),
+                'Plan record must be new and belong to this idea revision')
+        require(idea_id+'.md' in context['files'], 'Idea detail file is not persisted', 'not_ready')
+        target, home = self._workspace_home(idea_id, workspace_name, workspace_path)
+        detail = context['files'][idea_id+'.md']
+        moved_sha = digest(detail)
+        resumed = False
+        if home.exists() or home.is_symlink():
+            info = home.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_size <= MAX_STATE and read_bytes(home, MAX_STATE) == detail:
+                resumed = True
+            else:
+                raise IdeaError('home_conflict', 'A different file already exists at the destination', home=dict(file_path=str(home)))
+        trial = copy.deepcopy(state)
+        entry = trial['ideas'][idea_id]
+        entry['plans'].append(copy.deepcopy(plan))
+        entry['status'] = 'archived'
+        trial['archives'].setdefault(idea_id+'/r'+str(entry['revision'])+'.json',
+                                     dict(idea_id=idea_id, origin=copy.deepcopy(entry['origin']), revision=copy.deepcopy(entry['revisions'][-1])))
+        after, _, _ = self._prepare_commit(trial, context)
+        frozen_idea = {k:copy.deepcopy(v) for k,v in trial['ideas'][idea_id].items() if k != 'revisions'}
+        for record in frozen_idea['plans']:
+            record.pop('content', None)
+        extensions = copy.deepcopy(context['docs'][idea_id+'.md'].metadata['extensions'])
+        pointer = md.encode_moved(idea_id, idea_revision=entry['revision'], plan_id=plan['plan_id'],
+                                  workspace=dict(name=workspace_name, path=str(target)), home_path=str(home),
+                                  moved_sha256=moved_sha, actor=actor, timestamp=timestamp or now(),
+                                  frozen=dict(idea=frozen_idea, extensions=extensions))
+        pointer_path = md.pointer_path(idea_id, 'moved')
+        after = dict(after)
+        after.pop(idea_id+'.md', None)
+        after[pointer_path] = pointer
+        index_extensions = copy.deepcopy(context['docs']['IDEAS.md'].metadata['extensions'])
+        index_extensions[md.MOVE_EXTENSION] = md.move_links(index_extensions) + [dict(idea_id=idea_id, path=pointer_path, sha256=digest(pointer))]
+        after['IDEAS.md'] = md.encode_index(trial, index_extensions, previous=context['docs']['IDEAS.md'], previous_state=context['baseline'])
+        # Prove a fresh load rebuilds exactly the state being published.
+        probe = {path:raw for path,raw in after.items()}
+        link = md.move_links(md.decode_index(after['IDEAS.md']).metadata['extensions'])[0]
+        probe[idea_id+'.md'] = self._moved_detail(idea_id, link, after.__getitem__, trial['transaction_revision'])[1]
+        rebuilt = md.decode_state(probe, check_body=False)
+        require(rebuilt['ideas'][idea_id] == trial['ideas'][idea_id], 'Moved idea would not reload identically', 'corrupt_store')
+        changes = {path:raw for path,raw in after.items() if context['files'].get(path) != raw}
+        if not resumed:
+            result = platform_write(home, detail, immutable=True)
+            result.raise_for_error()
+        published = self._publish_commit(trial, context, after, changes, move_out=idea_id+'.md')
+        state.clear()
+        state.update(trial)
+        return dict(idea_id=idea_id, home=dict(workspace_name=workspace_name, workspace_path=str(target), file_path=str(home)),
+                    pointer_path=pointer_path, moved_sha256=moved_sha, plan=plan, resumed=resumed, write_result=published)
+
+    def lifecycles(self, state):
+        """Inside a transaction: {idea_id: dict(lifecycle, home, delivery)} for every idea, one pass."""
+        context = getattr(self._contexts, 'active', None)
+        if context is None and not self.path.exists():
+            return {key: dict(lifecycle='active', home=None, delivery=None) for key in state['ideas']}  # nothing stored yet
+        require(context is not None, 'Lifecycle requires a Store transaction', 'invalid_transaction')
+        md = _markdown()
+        moved = self._moved_map(context)
+        delivered = {}
+        index = context['docs'].get('IDEAS.md')
+        if index is not None:
+            for link in md.delivered_links(index.metadata['extensions']):
+                delivered[link['idea_id']] = md.decode_delivered(context['files'][link['path']])
+        return {key: dict(lifecycle='delivered' if key in delivered else 'moved' if key in moved else 'active',
+                          home=self._home(moved[key]) if key in moved else None, delivery=delivered.get(key))
+                for key in state['ideas']}
+
+    def deliver(self, state, idea_id, *, ref, actor, timestamp=None):
+        """Record that a moved idea was delivered: one immutable pointer plus its index link.
+
+        Call inside a writable transaction with its unmodified state. Published
+        in one journaled commit. Same ref again returns repeated=True without a
+        write; a different ref raises delivery_conflict; an idea that is not
+        moved raises not_moved. There is no way back.
+        """
+        context = getattr(self._contexts, 'active', None)
+        require(context is not None and context['write'], 'Deliver requires a writable Store transaction', 'invalid_transaction')
+        require(not context.get('request_running'), 'Request mutators cannot publish or perform I/O', 'invalid_transaction')
+        require(context['kind'] == 'markdown', 'Migrate before delivering an idea', 'migration_required')
+        md = _markdown()
+        check_id(idea_id)
+        require(idea_id in state['ideas'], 'Unknown idea', 'not_found')
+        require(state == context['baseline'], 'Deliver requires an unmodified transaction state', 'invalid_transaction')
+        text(actor, 'actor', 200)
+        current = self.lifecycle(idea_id)
+        require(current['lifecycle'] != 'active', 'Only a moved idea can be delivered', 'not_moved')
+        if current['delivery'] is not None:
+            if current['delivery']['ref'] != ref:
+                raise IdeaError('delivery_conflict', 'This idea was already delivered with a different reference',
+                                delivered_ref=current['delivery']['ref'])
+            return dict(idea_id=idea_id, ref=ref, repeated=True, delivery=current['delivery'], write_result=None)
+        pointer = md.encode_delivered(idea_id, ref=ref, actor=actor, timestamp=timestamp or now())
+        pointer_path = md.pointer_path(idea_id, 'delivered')
+        trial = copy.deepcopy(state)
+        trial['transaction_revision'] = context['baseline']['transaction_revision'] + 1
+        index = context['docs']['IDEAS.md']
+        index_extensions = copy.deepcopy(index.metadata['extensions'])
+        index_extensions[md.DELIVERED_EXTENSION] = md.delivered_links(index_extensions) + [
+            dict(idea_id=idea_id, path=pointer_path, sha256=digest(pointer))]
+        after = dict(context['files'])
+        after[pointer_path] = pointer
+        after['IDEAS.md'] = md.encode_index(trial, index_extensions, previous=index, previous_state=context['baseline'])
+        changes = {path:raw for path,raw in after.items() if context['files'].get(path) != raw}
+        published = self._publish_commit(trial, context, after, changes)
+        state.clear()
+        state.update(trial)
+        return dict(idea_id=idea_id, ref=ref, repeated=False, delivery=md.decode_delivered(pointer),
+                    pointer_path=pointer_path, write_result=published)
 
     def commit(self, state):
         """Existing CLI/application contract; requests use the atomic receipt seam."""

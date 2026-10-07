@@ -42,9 +42,20 @@ not survive a new agent binding.
 
 ## Pairing, transport and CSRF recovery
 
-The launcher opens only a non-secret loopback root URL. The initiating agent
-retrieves the one-time code through its separate private authenticated helper
-channel. Neither launch argv nor domain Markdown contains a reusable secret.
+The launcher opens the loopback origin with the one-time pairing code in the URL
+fragment: `<origin>/#pair=<code>`, where the code is exactly 32 lowercase hex
+characters. The code is single-use and lasts 60 seconds, and a fragment never
+reaches the server or a referrer. On load the page reads the fragment, strips it
+from the address bar with `history.replaceState` before anything else, and
+redeems the code through `POST /pair` itself; the operator types nothing.
+Reusable secrets (the agent token, the tab secret, the cookie) never ride a URL.
+The brief exposure of the launch URL in the browser command's argv is accepted
+because the code is one-time and short-lived; domain Markdown still contains no
+secret. The returned `browser.url` stays the root-only origin, and the result
+carries `pairing_code` and a `fallback_line` for typing the code by hand. The
+initiating agent shows that line only when the operator reports the tab did not
+open paired. `session-open`, which launches no browser, is unchanged: the
+operator opens the origin and types the code.
 
 `POST /pair` is the only unauthenticated API mutation; it requires the exact
 service Origin/Host and `Content-Type: application/json`, and accepts exactly
@@ -67,8 +78,12 @@ a session drops and rotates the secret.
 A replay of the redeemed code invalidates that browser session and outstanding
 requests; the UI displays the specific re-pair warning. Failures are 401
 `wrong_pairing_code`, `pairing_expired_or_locked`, or
-`pairing_replay_session_invalidated`. Re-pairing requires explicit initiating
-agent resume; no automatic retries of a rejected bootstrap.
+`pairing_replay_session_invalidated`. Typing a code the tab already redeemed is
+such a replay, which is why the fallback line is shown only on request.
+Re-pairing requires explicit initiating agent resume (`session-open --resume
+<binding_id>` issues a fresh code); no automatic retries of a rejected
+bootstrap. A tab opened from an expired link shows: "This link's pairing code
+has expired. Ask your terminal for a new code (it runs session-open --resume)."
 
 `GET /session` with the valid cookie returns `csrf_token` along with session
 identity/status and capabilities. After reload, the browser calls this before
@@ -134,13 +149,15 @@ selection only while it holds no unsaved answer and no pending write; otherwise 
 foreign idea freezes the selection as uncertain. After any state has loaded, every
 read must return exactly the requested identity, null included. Before any state
 has loaded, Reload re-runs the first load, so it reads the URL's requested idea.
-Step keys/order are `capture`, `priorities`, `shape`, `method`, `visualize`,
-`assess`, `review`. Exact visible status vocabulary is `todo`, `current`, `saved`,
-`review-needed`, `unsaved`, `skipped`, `not-applicable`. `todo` has no completion;
+Step keys/order are `capture`, `priorities`, `method`, `discovery`, `exploration`,
+`visualize`, `assess`, `review` (the server's order is authoritative; Methods and
+Discovery may swap, Exploration always follows both; an idea made with an older
+workflow is refused `unsupported_idea_version`). Exact visible status vocabulary is `todo`, `current`, `saved`,
+`review-needed`, `unsaved`, `skipped`. `todo` has no completion;
 `current` identifies the active untouched step; `saved` requires durable current
 acceptance evidence; `review-needed` means prior evidence is invalidated by
 changed dependencies; `unsaved` means a draft differs from accepted data.
-`skipped` and `not-applicable` require durable human disposition evidence and
+`skipped` requires durable human disposition evidence and
 source revision. `current_step` identifies the expanded panel independently of
 its status, allowing the current panel to be unsaved/review-needed. Capabilities
 and response/error metadata carry unavailable/error; neither is a saved step
@@ -163,8 +180,9 @@ may be unsaved without altering the immutable original.
   "steps": {
     "capture": {"status": "saved", "accepted_revision": 1, "evidence_id": "capture-receipt-1"},
     "priorities": {"status": "unsaved", "accepted_revision": null, "evidence_id": null},
-    "shape": {"status": "todo", "accepted_revision": null, "evidence_id": null},
     "method": {"status": "todo", "accepted_revision": null, "evidence_id": null},
+    "discovery": {"status": "todo", "accepted_revision": null, "evidence_id": null},
+    "exploration": {"status": "todo", "accepted_revision": null, "evidence_id": null},
     "visualize": {"status": "todo", "accepted_revision": null, "evidence_id": null},
     "assess": {"status": "todo", "accepted_revision": null, "evidence_id": null},
     "review": {"status": "todo", "accepted_revision": null, "evidence_id": null}
@@ -234,7 +252,7 @@ No unchanged acceptance creates a revision. Human acceptance is separate from
 agent recommendation. Proposal acceptance uses `proposal_id` when needed;
 manual steps use `null`. `expected_backlog_revision` is mandatory for placement,
 null for non-placement acceptance. Workflow evidence extends a versioned
-snapshot; it does not silently change legacy `SHAPE_KEYS`.
+snapshot; it does not silently change the legacy snapshot keys.
 
 ```json
 {"request_id":"accept-1","idea_id":"idea_00000000000000000000000000000001","expected_revision":1,"expected_draft_version":3,"step":"priorities","fields":{"urgency":7,"importance":8},"proposal_id":null,"expected_backlog_revision":null}
@@ -250,22 +268,23 @@ snapshot; it does not silently change legacy `SHAPE_KEYS`.
 ## Step field schemas frozen for J2/J3
 
 The versioned workflow owns these fields, separately from unchanged legacy
-shape/ratings/assessment contracts. Drafts may contain null partial values;
+ratings/assessment contracts. Drafts may contain null partial values;
 acceptance enforces meaningful required fields. All text is rendered as text.
 
 | Step | Accepted fields and requirements |
 | --- | --- |
 | capture | `raw_text`, confirmed `workspace:{name,path,confirmed}`; immutable origin remains separate |
 | priorities | `urgency`, `importance`, independent integers 1–10; neither prefilled |
-| shape | `outcome`, `scope`, `scope_reason`, `alternatives:[{route,reason}]`, `assumptions:[text]`, `next_slice`, `learning:[text]`; meaningful alternative required |
-| method | `selection`, `reason`, `investment`, `experiment`, `memory`; no preselection |
-| visualize | `disposition`, `reason`, `design_set_id`, `brief_evidence_id`; disposition `accepted_set`, `skipped`, or `not-applicable` |
+| method | `selection`, `reason` (optional), `memory`; no preselection |
+| discovery | `problem`, `audience`, `workaround`, `evidence`, `kill_criteria`, `challenges`, `prior_art:[{name,link,does,differs,licence}]` (at most 8; all text), `prior_art_none` (boolean), `prior_art_searched` (text); accept needs rows with name, differs and licence filled and `prior_art_none` false, or `prior_art_none` true with no rows and `prior_art_searched` filled. A Discovery accepted before these fields existed still loads and reads "Not checked" |
+| exploration | `outcome`, `alternatives:[{route,reason}]`, `assumptions:[text]`, `scope`, `scope_reason`, `next_slice`, `learning:[text]`, `investment`, `experiment`, `sketch`; meaningful alternative and at least one sketch item (title and done-when) required |
+| visualize | `disposition`, `reason` (optional), `design_set_id`, `brief_evidence_id`, plus `source` (`claude_design` or `prototype`) and `assets` when a set is accepted; disposition `accepted_set` or `skipped` |
 | assess | `assessment`, `position`; assessment has existing exact method/version/inputs/basis/assumptions/confidence/provenance schema |
 | review | `handoff_id`, `source_revision`; derived packet/checks, no archive on copy |
 
 Scope vocabulary stays `small-change`, `capability`, `project`, `epic`. Method
 vocabulary stays `bounded-plan`, `adaptive-slices`, `appetite-led`,
-`experiment-led`. Appetite-led requires `investment:{cap,unit,boundary}` with
+`experiment-led`. The budget and experiment inputs sit in the Exploration answer. Appetite-led requires `investment:{cap,unit,boundary}` with
 positive finite cap, nonempty unit and boundary. Experiment-led requires
 `experiment:{question,evidence,success_criterion,stop_rule}`. Other methods
 require their unused conditional fields to be null. Memory evidence is
@@ -289,12 +308,14 @@ all current prerequisites even if a browser button is enabled.
 ## Current-agent proposals
 
 `POST /propose` accepts typed `operation` and source identifiers, never an
-arbitrary executable prompt. Operations are allowlisted: `shape`, `memory`,
+arbitrary executable prompt. Operations are allowlisted: `discovery`, `exploration`, `memory`,
 `method`, `visual_brief`, `assessment`, `position`. These are common protocol
 names; not-yet-built handlers return unavailable rather than fake results.
+In the current workflow only `visual_brief` is answered with `respond` (its proposal is the closed signal `{prototype_skill: available|unavailable}`, the event `data` is abridged in the example below).
+Discovery, Exploration, Methods (memory only) and Assess are answered with `fill`.
 
 ```json
-{"request_id":"propose-1","idea_id":"idea_00000000000000000000000000000001","expected_revision":2,"expected_draft_version":3,"operation":"shape","source_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"request_id":"propose-1","idea_id":"idea_00000000000000000000000000000001","expected_revision":2,"expected_draft_version":3,"operation":"visual_brief","source_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 ```
 
 Agent event/reply correlation is exact on `request_id`, `session_id`, `idea_id`,
@@ -305,17 +326,17 @@ No stale source/revision/session reply survives resume. Request cancellation
 and duplicate conflicting responses return explicit errors.
 
 ```json
-{"sequence":1,"request_id":"propose-1","session_id":"session_fixture","idea_id":"idea_00000000000000000000000000000001","accepted_revision":2,"draft_version":3,"operation":"shape","source_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","data":{"raw_text":"FAKE: improve a lunch box"}}
+{"sequence":1,"request_id":"propose-1","session_id":"session_fixture","idea_id":"idea_00000000000000000000000000000001","accepted_revision":2,"draft_version":3,"operation":"visual_brief","source_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","data":{"capture":{"raw_text":"FAKE: improve a lunch box"}}}
 ```
 
 ```json
-{"request_id":"propose-1","session_id":"session_fixture","idea_id":"idea_00000000000000000000000000000001","accepted_revision":2,"draft_version":3,"operation":"shape","source_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","proposal":{"outcome":"FAKE: easier cleaning","scope":"small-change","scope_reason":"FAKE: one lid","alternatives":[{"route":"FAKE: clean existing lid","reason":"FAKE: simpler"}],"assumptions":[],"next_slice":"FAKE: check lid","learning":[]}}
+{"request_id":"propose-1","session_id":"session_fixture","idea_id":"idea_00000000000000000000000000000001","accepted_revision":2,"draft_version":3,"operation":"visual_brief","source_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","proposal":{"prototype_skill":"available"}}
 ```
 
 ## Visual sets, inert uploads and handoff
 
 `POST /visual-disposition` uses the acceptance envelope, step `visualize` and
-its fields. `POST /visual-set/accept` uses the same envelope plus
+its fields. Dispositions are `accepted_set` (with `source` `claude_design` or `prototype`) and `skipped`; a skip needs no reason, and the old `not-applicable` value is invalid. `POST /visual-set/accept` uses the same envelope plus
 `design_set_id` and `asset_ids`. For first construction, `design_set_id` is null
 and `asset_ids` contains 1–20 unique complete asset IDs; the server generates
 immutable set membership/source evidence and accepts its pointer atomically.
@@ -390,10 +411,14 @@ authorized and the store can be read; auth failures must not reveal idea state.
 | 401 | missing/expired credential |
 | 403 | Host/Origin/CSRF refusal |
 | 404 | unknown route/request/asset |
-| 409 | stale revision/source, conflicting replay, save conflict |
+| 409 | stale revision/source, conflicting replay, save conflict, `idea_moved`, `not_moved`, `delivery_conflict` |
 | 413 | payload/file/set too large |
 | 503 | agent unavailable, bounded busy/capacity |
 | 500 | redacted internal error or reported uncertain persistence result |
+
+A moved or delivered idea is read-only: every browser save for it is refused `idea_moved` (409) with `details.home`.
+`GET /state` and the idea list still serve it, carrying `lifecycle`, `home` and `delivered_ref`, and the list has a `lifecycles` map.
+The capture state carries the configured `default_workspace` (or null) so the page can prefill the editable workspace field.
 
 Headers: `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
 `Referrer-Policy: no-referrer`, CSP self-only/no inline or eval scripts,
@@ -412,6 +437,14 @@ usual; the operator accepts. Opening another step's conversation supersedes an
 unanswered one (`request_cancelled` to its later fills); a second request for the
 same step while one is open is `request_busy`.
 
+### Hand release
+
+Discovery and Exploration are locked in the page while the terminal conversation is connected.
+`POST /api/v1/conversation/release` with `{step}` (`discovery` or `exploration`) takes that step by hand.
+It cancels only that step's open, unanswered agent request (the binding stays usable; the agent then sees `request_cancelled` for it).
+The reply is `{ok, code, idea_id, step, hand, released, write_state, revision, draft_version}`, with `released` the number of requests cancelled; the call is idempotent.
+`GET /state` may carry a `hand` mapping of those two steps to booleans, and a later request for a released step is refused `hand_released` (409).
+
 ## Private current-agent transport (CP2 source implementation)
 
 These fixed routes are separate from browser and owner
@@ -427,9 +460,10 @@ qualification remains pending.
   `write_state: committed_uncertain`; do not change the response on retry.
 - `POST /agent/v1/fill` accepts exactly the correlation fields above plus `fields`:
   a partial, typed slice of the open step agreed with the operator in the terminal
-  (Shape: any Shape field; Method: `reason` only; Assessment: `assessment` and
-  `proposed_position`; never a method selection, budget, memory claim or actual
-  position). The request must have been delivered and still be open. The fill is
+  (Discovery: any Discovery field; Exploration: any Exploration field; Method:
+  `memory` only; Assessment: `assessment` and `proposed_position`; Visualize
+  brief: `source` and `assets` of the prototype road's design set; never a method
+  selection or reason, an acceptance, a disposition or an actual position). The request must have been delivered and still be open. The fill is
   held in the broker (volatile, at most 64 per request); it writes no draft, idea
   or receipt. It returns `{ok, code, request_id, operation, status: "pending",
   write_state: "not_applied", fill_sequence}` and renews the 10-minute answer
@@ -469,7 +503,7 @@ The owned source service projects `agent_generation` (an opaque nonsecret
 polls report connected. The marker grants no authorization. Restart restores
 durable evidence but leaves the agent disconnected until explicit resume.
 
-`proposal_sources` maps Shape, Method and Memory operation names to
+`proposal_sources` maps the Discovery, Exploration, Method and Memory operation names to
 `{available,code,source}`. An available source contains accepted_revision,
 draft_version, typed consumed data and source_digest. Browser requests use these
 server values after saving dirty buffers; they cannot supply their own source
@@ -485,9 +519,9 @@ suggestion acceptance. Old evidence stays inspectable.
 
 Memory results distinguish found, searched_no_preference, unavailable and error.
 Found and completed-search claims require matching immutable evidence from the
-current initiating agent before Method acceptance. This establishes the claim's
+current initiating agent before Methods acceptance. This establishes the claim's
 provenance, not independent verification of external reference content. Manual
-Method choices with unavailable/error and no sources can proceed disconnected.
+Methods choices with unavailable/error and no sources can proceed disconnected.
 Recommendation never supplies the user's Method selection.
 
 Suggestion projection is bounded to 256 KiB and at most 128 records; duplicated
@@ -535,7 +569,7 @@ evicting history. Original Capture uploads never auto-populate an accepted set.
 Assess uses existing `/propose` with operation `assessment`; its response is
 `{assessment,position}` with the existing exact step schema and no caller-supplied
 score. Source data is `{steps,backlog,target}`: steps are current accepted
-Capture/Priorities/Shape; backlog contains revision, actual ordered IDs and one
+Capture, Priorities, Discovery and Exploration; backlog contains revision, actual ordered IDs and one
 validated ratings/latest-assessment comparison per ID; target is null or durable
 partial Assess draft. The specialized canonical assessment digest validates this
 schema; old step-map source digests remain unchanged. Response CAS checks the
@@ -614,19 +648,19 @@ it after the download interaction. Active file contents are never rendered.
 
 ### CP3 archive, recovery and transfer boundaries
 
-Author: an implementer. Archived existing ideas refuse new Capture, Priorities, Method
+Author: an implementer. Archived existing ideas refuse new Capture, Priorities, Methods
 and Assess acceptance with `idea_archived`; initial new Capture remains allowed.
 Browser controls and callbacks require authoritative active status, keep draft
-answers and direct the operator to explicit Shape. The pure Assess handler also
-retains its `archived_revision` refusal; both codes receive a Shape-first notice.
+answers and direct the operator to explicitly redo and accept Exploration. The pure Assess handler also
+retains its `archived_revision` refusal; both codes receive an Exploration-first notice.
 All new Visualize acceptances, including direct generic accept,
-existing/new design sets, Skip and Not applicable, refuse `idea_archived` after
+existing/new design sets and Skip, refuse `idea_archived` after
 archival. Refusal precedes new-set ID generation or publication. Exact historical
-receipts and files remain readable. Shape remains reachable: its explicit
-"Reactivate idea and accept Shape" action creates an active next revision, even
+receipts and files remain readable. Exploration remains reachable: its explicit
+"Reactivate idea and accept Exploration" action creates an active next revision, even
 with unchanged answers, while
 preserving immutable archived plan and asset bytes. Merely opening or editing
-Shape does not reactivate it.
+Exploration does not reactivate it.
 
 JSON requests retain their finite 15-second budget. Upload and attachment byte
 transfers use a separate finite 300000ms default (optional fourth IdeaApi

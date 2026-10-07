@@ -30,7 +30,7 @@ def identifier(prefix, number):
 
 
 def intent(sid, number=1):
-    return dict(schema_version=1,kind='upload-intent',idea_id=KEY,source_revision=6,
+    return dict(schema_version=1,kind='upload-intent',idea_id=KEY,source_revision=7,
         actor=ACTOR,timestamp='2026-10-02T00:00:00Z',upload_id=identifier('upload',number),
         asset_id=identifier('asset',number),session_id=sid,name='Café 💡.png',declared_type='image/png',size=len(DATA))
 
@@ -44,7 +44,7 @@ def completion(sid, number=1):
 
 def design_set(state, sid):
     asset = completion(sid); source = {}
-    for step in ('capture','shape'):
+    for step in ('capture','discovery','exploration'):
         record = state['ideas'][KEY]['workflow']['steps'][step]
         revision = record['acceptance']['accepted_revision']
         source[step] = dict(revision=revision,digest=source_digest(step,revision,{step:record['fields']}))
@@ -187,7 +187,7 @@ class AssetStoreTests(unittest.TestCase):
     def test_complete_cross_intent_identity_and_source_checks(self):
         self.call([intent(self.sid)]); self.blob(); before = self.files()
         changes = dict(upload_id=identifier('upload',2),asset_id=identifier('asset',2),
-            session_id=identifier('session',2),source_revision=5,name='Other.png',declared_type='image/jpeg',size=7)
+            session_id=identifier('session',2),source_revision=6,name='Other.png',declared_type='image/jpeg',size=7)
         for field,value in changes.items():
             with self.subTest(field=field):
                 record = completion(self.sid); record[field] = value

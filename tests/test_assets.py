@@ -68,7 +68,7 @@ class AssetsTests(unittest.TestCase):
             return response.status,(json.loads(raw) if response.getheader('Content-Type')=='application/json' else raw),result_headers
         finally: connection.close()
 
-    def metadata(self,rid='metadata-1',data=PNG,name='Café.png',mime='image/png',revision=6):
+    def metadata(self,rid='metadata-1',data=PNG,name='Café.png',mime='image/png',revision=7):
         return dict(request_id=rid,idea_id=KEY,expected_revision=revision,name=name,declared_type=mime,size=len(data))
 
     def start(self,**kwargs):
@@ -95,9 +95,9 @@ class AssetsTests(unittest.TestCase):
             self.assertEqual(self.start(),first)
         self.assertEqual(self.files(),before)
         self.assertEqual(first['completion_request_id'],'upload-bytes:'+first['upload_id'])
-        status,error,_ = self.request('/api/v1/uploads',self.metadata(rid='stale',revision=5))
+        status,error,_ = self.request('/api/v1/uploads',self.metadata(rid='stale',revision=6))
         self.assertEqual((status,error['code']),(409,'stale_revision'))
-        self.assertEqual(self.inventory()['records'][0]['record']['source_revision'],6)
+        self.assertEqual(self.inventory()['records'][0]['record']['source_revision'],7)
 
     def test_actual_http_upload_download_preserves_accepted_state_and_restart(self):
         with self.store.transaction() as state: original = copy.deepcopy(state['ideas'][KEY])
@@ -197,7 +197,7 @@ class AssetsTests(unittest.TestCase):
             value = fields()['priorities']; value['urgency'] = 9
             state['ideas'][KEY] = accept(state['ideas'][KEY],'priorities',value)['idea']; self.store.commit(state)
         self.assertEqual(self.put(intent)[0],200)
-        self.assertEqual(self.inventory()['records'][-1]['record']['source_revision'],6)
+        self.assertEqual(self.inventory()['records'][-1]['record']['source_revision'],7)
 
     def test_stage_directory_symlink_refuses_without_outside_write(self):
         intent = self.start(); outside = Path(self.temp.name)/'outside'; outside.mkdir()
@@ -392,7 +392,7 @@ class AssetsTests(unittest.TestCase):
         with self.store.transaction() as state: idea = state['ideas'][KEY]
         return dict(request_id=rid,idea_id=KEY,expected_revision=idea['revision'],
             expected_draft_version=idea['workflow']['draft_version'],step='visualize',proposal_id=None,
-            expected_backlog_revision=None,fields=dict(disposition='accepted_set',reason=None,
+            expected_backlog_revision=None,fields=dict(disposition='accepted_set',reason=None,source='claude_design',
             design_set_id=set_id,brief_evidence_id=None),design_set_id=set_id,asset_ids=ids)
 
     def complete_upload(self,rid='metadata-1'):
@@ -497,11 +497,11 @@ class AssetsTests(unittest.TestCase):
         self.assertEqual((status,error['code']),(400,'not_ready')); self.assertEqual(self.files(),before)
         self.assertEqual(self.request('/api/v1/requests/legacy-set')[0],404)
 
-    def test_stale_existing_set_and_same_generic_guard_refuse_after_shape_changes(self):
+    def test_stale_existing_set_and_same_generic_guard_refuse_after_exploration_changes(self):
         upload = self.complete_upload(); created = self.request('/api/v1/visual-set/accept',self.set_payload([upload['asset_id']]))[1]
         with self.store.transaction(write=True) as state:
-            value = fields()['shape']; value['outcome'] = 'Changed accepted Shape'
-            state['ideas'][KEY] = accept(state['ideas'][KEY],'shape',value)['idea']; self.store.commit(state)
+            value = fields()['exploration']; value['outcome'] = 'Changed accepted Exploration'
+            state['ideas'][KEY] = accept(state['ideas'][KEY],'exploration',value)['idea']; self.store.commit(state)
         payload = self.set_payload(set_id=created['design_set_id'],rid='stale-existing'); before = self.files()
         status,error,_ = self.request('/api/v1/visual-set/accept',payload)
         self.assertEqual((status,error['code']),(409,'stale_source')); self.assertEqual(self.files(),before)
@@ -512,7 +512,7 @@ class AssetsTests(unittest.TestCase):
 
     def test_http_disposition_same_reducer_clears_pointer_and_preserves_historical_sets(self):
         upload = self.complete_upload(); self.request('/api/v1/visual-set/accept',self.set_payload([upload['asset_id']]))
-        for disposition in ('skipped','not-applicable'):
+        for disposition in ('skipped',):
             payload = self.set_payload(rid=disposition)
             payload = {key:value for key,value in payload.items() if key not in ('asset_ids','design_set_id')}
             payload['fields'].update(disposition=disposition,reason='No design needed for this slice')
@@ -520,17 +520,20 @@ class AssetsTests(unittest.TestCase):
             self.assertEqual(status,200,result); self.assertEqual(self.request('/api/v1/visual-disposition',payload)[1],result)
             state = self.request('/api/v1/state')[1]
             self.assertIsNone(state['accepted']['visualize']['design_set_id']); self.assertEqual(len(self.inventory()['records']),3)
-        payload['request_id'] = 'no-reason'; payload['fields']['reason'] = '  '
+        # Skip is one click: no reason needed. not-applicable is gone and refused.
+        state = self.request('/api/v1/state')[1]
+        payload.update(request_id='no-reason',expected_revision=state['revision'],expected_draft_version=state['draft_version'])
+        payload['fields'].update(reason=None)
+        status,result,_ = self.request('/api/v1/visual-disposition',payload)
+        self.assertEqual(status,200,result)
+        state = self.request('/api/v1/state')[1]
+        payload.update(request_id='gone',expected_revision=state['revision'],expected_draft_version=state['draft_version'])
+        payload['fields'].update(disposition='not-applicable',reason='Nonvisual')
         before = self.files()
         status,error,_ = self.request('/api/v1/visual-disposition',payload)
-        self.assertEqual((status,error['code']),(409,'stale_revision'))
+        self.assertEqual(status,400,error)
         self.assertEqual(self.files(),before)
-        state = self.request('/api/v1/state')[1]
-        payload.update(expected_revision=state['revision'],expected_draft_version=state['draft_version'])
-        status,error,_ = self.request('/api/v1/visual-disposition',payload)
-        self.assertEqual((status,error['code']),(400,'not_ready'))
-        self.assertEqual(self.files(),before)
-        self.assertEqual(self.request('/api/v1/requests/no-reason')[0],404)
+        self.assertEqual(self.request('/api/v1/requests/gone')[0],404)
 
     def test_archived_visualize_all_new_decisions_refuse_and_exact_receipts_stay_readable(self):
         upload = self.complete_upload(); historical = []
@@ -544,7 +547,7 @@ class AssetsTests(unittest.TestCase):
         generic = self.set_payload(set_id=set_id,rid='before-archive-generic-set')
         generic = {key:value for key,value in generic.items() if key not in ('design_set_id','asset_ids')}
         accepted('/api/v1/accept',generic)
-        for disposition in ('skipped','not-applicable'):
+        for disposition in ('skipped',):
             for endpoint in ('visual-disposition','accept'):
                 payload = self.set_payload(rid='before-archive-'+disposition+'-'+endpoint)
                 payload = {key:value for key,value in payload.items() if key not in ('design_set_id','asset_ids')}
@@ -556,7 +559,7 @@ class AssetsTests(unittest.TestCase):
             ('/api/v1/visual-set/accept',self.set_payload(set_id=set_id,rid='archived-existing-set'))]
         generic = self.set_payload(set_id=set_id,rid='archived-generic-set')
         refused.append(('/api/v1/accept',{key:value for key,value in generic.items() if key not in ('design_set_id','asset_ids')}))
-        for disposition in ('skipped','not-applicable'):
+        for disposition in ('skipped',):
             for endpoint in ('visual-disposition','accept'):
                 payload = self.set_payload(rid='archived-'+disposition+'-'+endpoint)
                 payload = {key:value for key,value in payload.items() if key not in ('design_set_id','asset_ids')}
@@ -625,13 +628,13 @@ class AssetsTests(unittest.TestCase):
             self.assertEqual(state['ideas'][KEY]['assessments'],frozen['ideas'][KEY]['assessments'])
             self.assertEqual(self.store.view_issues(state),[])
 
-    def test_archived_capture_priorities_method_require_shape_first_and_replay_old_receipts(self):
+    def test_archived_capture_priorities_method_require_exploration_first_and_replay_old_receipts(self):
         workspace = Path(self.temp.name)/'Confirmed workspace'; workspace.mkdir()
         values = fields()
         values['capture']['workspace'] = dict(name='Confirmed workspace',path=str(workspace),confirmed=True)
         values['capture']['raw_text'] = 'Explicit current Capture words'
         historical = []
-        for step in ('capture','priorities','shape','method'):
+        for step in ('capture','priorities','method','discovery','exploration'):
             status,selected,_ = self.request('/api/v1/state?idea_id='+KEY)
             self.assertEqual(status,200,selected); self.assertEqual(selected['idea_id'],KEY)
             payload = dict(request_id='before-archive-'+step,idea_id=KEY,step=step,fields=values[step],
@@ -646,10 +649,11 @@ class AssetsTests(unittest.TestCase):
             frozen = copy.deepcopy(state); self.assertEqual(self.store.view_issues(state),[])
         status,selected,_ = self.request('/api/v1/state?idea_id='+KEY)
         self.assertEqual(status,200,selected); self.assertEqual(selected['idea_status'],'archived')
-        for step in ('capture','priorities','method'):
+        for step in ('capture','priorities','method','discovery'):
             value = copy.deepcopy(values[step])
             if step == 'capture': value['raw_text'] = 'Changed words after archive'
             elif step == 'priorities': value['urgency'] = 9
+            elif step == 'discovery': value['problem'] = 'Changed problem after archive'
             else: value['reason'] = 'Changed method rationale after archive'
             payload = dict(request_id='after-archive-'+step,idea_id=KEY,step=step,fields=value,
                 expected_revision=selected['revision'],expected_draft_version=selected['draft_version'],
@@ -667,19 +671,19 @@ class AssetsTests(unittest.TestCase):
         with self.store.transaction() as state:
             self.assertEqual(state,frozen); self.assertEqual(self.store.view_issues(state),[])
 
-    def test_explicit_http_shape_reactivation_preserves_archived_plan_and_asset_bytes(self):
+    def test_explicit_http_exploration_reactivation_preserves_archived_plan_and_asset_bytes(self):
         upload = self.complete_upload()
-        status,created,_ = self.request('/api/v1/visual-set/accept',self.set_payload([upload['asset_id']],rid='archive-shape-set'))
+        status,created,_ = self.request('/api/v1/visual-set/accept',self.set_payload([upload['asset_id']],rid='archive-exploration-set'))
         self.assertEqual(status,200,created)
         self.archive()
         with self.store.transaction() as state: frozen = copy.deepcopy(state)
         before = self.files()
         immutable = {path:raw for path,raw in before.items() if path.startswith(('assets/','archive/','plan-evidence/'))}
-        value = copy.deepcopy(frozen['ideas'][KEY]['workflow']['steps']['shape']['fields'])
+        value = copy.deepcopy(frozen['ideas'][KEY]['workflow']['steps']['exploration']['fields'])
         value.update(outcome='Explicit next active slice',next_slice='Check the next slice')
         state = self.request('/api/v1/state')[1]
-        payload = dict(request_id='explicit-shape-reactivation',idea_id=KEY,expected_revision=state['revision'],
-            expected_draft_version=state['draft_version'],step='shape',fields=value,proposal_id=None,expected_backlog_revision=None)
+        payload = dict(request_id='explicit-exploration-reactivation',idea_id=KEY,expected_revision=state['revision'],
+            expected_draft_version=state['draft_version'],step='exploration',fields=value,proposal_id=None,expected_backlog_revision=None)
         status,result,_ = self.request('/api/v1/accept',payload); self.assertEqual(status,200,result)
         self.assertEqual(self.request('/api/v1/accept',payload)[:2],(200,result))
         with self.store.transaction() as state:
@@ -694,9 +698,9 @@ class AssetsTests(unittest.TestCase):
         self.assertEqual(projected['idea_status'],'active'); self.assertEqual(projected['steps']['visualize']['status'],'review-needed')
         self.assertEqual(self.request('/api/v1/attachments/'+upload['asset_id'])[:2],(200,PNG))
 
-    def test_explicit_http_unchanged_shape_reactivates_once_preserving_archive_assets(self):
+    def test_explicit_http_unchanged_exploration_reactivates_once_preserving_archive_assets(self):
         upload = self.complete_upload()
-        status,created,_ = self.request('/api/v1/visual-set/accept',self.set_payload([upload['asset_id']],rid='unchanged-shape-set'))
+        status,created,_ = self.request('/api/v1/visual-set/accept',self.set_payload([upload['asset_id']],rid='unchanged-exploration-set'))
         self.assertEqual(status,200,created); self.archive()
         with self.store.transaction() as state: frozen = copy.deepcopy(state)
         before = self.files()
@@ -704,9 +708,9 @@ class AssetsTests(unittest.TestCase):
         status,selected,_ = self.request('/api/v1/state?idea_id='+KEY)
         self.assertEqual(status,200,selected); self.assertEqual(selected['idea_id'],KEY)
         self.assertEqual(self.app.context.selected_idea_id,KEY); self.assertEqual(selected['idea_status'],'archived')
-        value = copy.deepcopy(frozen['ideas'][KEY]['workflow']['steps']['shape']['fields'])
-        payload = dict(request_id='explicit-unchanged-shape',idea_id=KEY,expected_revision=selected['revision'],
-            expected_draft_version=selected['draft_version'],step='shape',fields=value,proposal_id=None,expected_backlog_revision=None)
+        value = copy.deepcopy(frozen['ideas'][KEY]['workflow']['steps']['exploration']['fields'])
+        payload = dict(request_id='explicit-unchanged-exploration',idea_id=KEY,expected_revision=selected['revision'],
+            expected_draft_version=selected['draft_version'],step='exploration',fields=value,proposal_id=None,expected_backlog_revision=None)
         status,result,_ = self.request('/api/v1/accept',payload); self.assertEqual(status,200,result)
         with self.store.transaction() as state:
             prior = frozen['ideas'][KEY]; idea = state['ideas'][KEY]
@@ -715,8 +719,8 @@ class AssetsTests(unittest.TestCase):
             for key in ('origin','ratings','assessments','plans','executions'):
                 self.assertEqual(idea[key],prior[key])
             self.assertEqual(state['archives'],frozen['archives'])
-            self.assertEqual(idea['workflow']['steps']['shape']['fields'],value)
-            self.assertEqual(idea['workflow']['steps']['shape']['acceptance']['accepted_revision'],idea['revision'])
+            self.assertEqual(idea['workflow']['steps']['exploration']['fields'],value)
+            self.assertEqual(idea['workflow']['steps']['exploration']['acceptance']['accepted_revision'],idea['revision'])
             self.assertEqual(idea['workflow']['steps']['visualize']['fields']['design_set_id'],created['design_set_id'])
             self.assertEqual(self.store.view_issues(state),[])
             accepted = copy.deepcopy(state)
@@ -759,8 +763,9 @@ class OwnerAssetSetTests(unittest.TestCase):
 
     def test_actual_owner_registry_upload_set_and_generic_visualize_guard(self):
         self.accept_fields('priorities',fields()['priorities'],'priorities')
-        self.accept_fields('shape',fields()['shape'],'shape')
         self.accept_fields('method',fields()['method'],'method')
+        self.accept_fields('discovery',fields()['discovery'],'discovery')
+        self.accept_fields('exploration',fields()['exploration'],'exploration')
         state = self.browser('state'); upload = self.browser('uploads',dict(request_id='metadata',idea_id=self.idea_id,
             expected_revision=state['revision'],name='Owner.png',declared_type='image/png',size=len(PNG)))
         connection = http.client.HTTPConnection('127.0.0.1',self.owner.server.server_port,timeout=10)
@@ -773,7 +778,7 @@ class OwnerAssetSetTests(unittest.TestCase):
         state = self.browser('state')
         payload = dict(request_id='owner-set',idea_id=self.idea_id,expected_revision=state['revision'],
             expected_draft_version=state['draft_version'],step='visualize',proposal_id=None,expected_backlog_revision=None,
-            fields=dict(disposition='accepted_set',reason=None,design_set_id=None,brief_evidence_id=None),
+            fields=dict(disposition='accepted_set',reason=None,source='claude_design',design_set_id=None,brief_evidence_id=None),
             design_set_id=None,asset_ids=[upload['asset_id']])
         result = self.browser('visual-set/accept',payload)
         self.assertEqual(self.browser('visual-set/accept',payload),result)

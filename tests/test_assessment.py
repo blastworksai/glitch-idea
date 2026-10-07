@@ -35,6 +35,12 @@ def state_fixture():
                 ideas={KEY: selected, OTHER: other, THIRD: third})
 
 
+def through_exploration(idea):
+    for step in ('method', 'discovery', 'exploration'):
+        idea = accept(idea, step)['idea']
+    return idea
+
+
 def proposed(source=None, position=2):
     order = [OTHER, KEY, THIRD] if source is None else source['data']['backlog']['order']
     result = fields()['assess']
@@ -57,7 +63,7 @@ class AssessmentHelperTests(unittest.TestCase):
         self.assertEqual(assessment_helpers.ROUTES, ())
         self.assertEqual(set(selected), {'accepted_revision', 'draft_version', 'data'})
         self.assertEqual(set(selected['data']), {'steps', 'backlog', 'target'})
-        self.assertEqual(set(selected['data']['steps']), {'capture', 'priorities', 'shape'})
+        self.assertEqual(set(selected['data']['steps']), {'capture', 'priorities', 'discovery', 'exploration'})
         self.assertEqual(selected['data']['target'], fields()['assess'])
         self.assertEqual(selected['data']['backlog']['order'], [OTHER, KEY, THIRD])
         comparison = selected['data']['backlog']['comparisons'][1]
@@ -71,7 +77,7 @@ class AssessmentHelperTests(unittest.TestCase):
         self.assertEqual(state, before)
 
     def test_target_null_empty_partial_and_accepted_are_distinct(self):
-        idea = accept(accept(captured(), 'priorities')['idea'], 'shape')['idea']
+        idea = through_exploration(accept(captured(), 'priorities')['idea'])
         state = state_fixture(); state['ideas'][KEY] = idea
         source = assessment_helpers.prepare_assessment_source(state, KEY)
         self.assertIsNone(source['data']['target'])
@@ -86,7 +92,7 @@ class AssessmentHelperTests(unittest.TestCase):
         state = state_fixture()
         capture = fields()['capture']; capture['raw_text'] = 'Revised words'
         idea = accept(state['ideas'][KEY], 'capture', capture)['idea']
-        idea = accept(idea, 'shape')['idea']
+        idea = through_exploration(idea)
         state['ideas'][KEY] = idea
         source = assessment_helpers.prepare_assessment_source(state, KEY)
         self.assertEqual(source['data']['steps']['capture']['raw_text'], 'Revised words')
@@ -97,10 +103,12 @@ class AssessmentHelperTests(unittest.TestCase):
             state = state_fixture(); state['ideas'][KEY] = idea
             self.assert_code('not_ready', lambda: assessment_helpers.prepare_assessment_source(state, KEY))
         state = state_fixture(); idea = state['ideas'][KEY]
-        changed = fields()['shape']; changed['outcome'] = 'Unsaved'
-        state['ideas'][KEY] = save_draft(idea, 'shape', changed,
-            expected_revision=idea['revision'], expected_draft_version=0)['idea']
-        self.assert_code('not_ready', lambda: assessment_helpers.prepare_assessment_source(state, KEY))
+        for step, key in (('discovery', 'problem'), ('exploration', 'outcome')):
+            state = state_fixture(); idea = state['ideas'][KEY]
+            changed = fields()[step]; changed[key] = 'Unsaved'
+            state['ideas'][KEY] = save_draft(idea, step, changed,
+                expected_revision=idea['revision'], expected_draft_version=0)['idea']
+            self.assert_code('not_ready', lambda: assessment_helpers.prepare_assessment_source(state, KEY))
 
     def test_canonical_digest_and_separate_draft_cas(self):
         source = assessment_helpers.prepare_assessment_source(state_fixture(), KEY)
@@ -123,7 +131,8 @@ class AssessmentHelperTests(unittest.TestCase):
             value = copy.deepcopy(source); variants.append(value); return value
         variant()['accepted_revision'] += 1
         variant()['data']['steps']['capture']['raw_text'] = 'Changed'
-        variant()['data']['steps']['shape']['next_slice'] = 'Changed'
+        variant()['data']['steps']['discovery']['problem'] = 'Changed'
+        variant()['data']['steps']['exploration']['next_slice'] = 'Changed'
         variant()['data']['backlog']['revision'] += 1
         variant()['data']['backlog']['comparisons'][0]['revision'] += 1
         variant()['data']['backlog']['comparisons'][1]['ratings']['importance'] = 9
@@ -442,7 +451,7 @@ class AssessmentHandlerTests(unittest.TestCase):
     def test_reorder_invalidates_active_neighbor_without_draft_and_preserves_archived_branch(self):
         with self.store.transaction(write=True) as state:
             other = state['ideas'][OTHER]
-            for step in ('capture', 'priorities', 'shape', 'method', 'visualize', 'assess'):
+            for step in ('capture', 'priorities', 'method', 'discovery', 'exploration', 'visualize', 'assess'):
                 other = accept(other, step)['idea']
             state['ideas'][OTHER] = other; self.store.commit(state)
         before = self.domain()

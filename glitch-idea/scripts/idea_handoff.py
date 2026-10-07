@@ -8,7 +8,7 @@ import os
 import stat
 
 import idea_handoff_evidence as codec
-from idea_domain import IdeaError, check_id, digest, integer, require
+from idea_domain import IdeaError, check_id, digest, integer, lifecycle_view, require
 from idea_store import MAX_STORE_FILES, _request_ids, _request_json
 from idea_steps import TrustedRoute
 from idea_bridge import Response
@@ -113,6 +113,11 @@ class HandoffProvider:
         _request_ids(context.session_id,payload['request_id']); check_id(payload['idea_id'])
         for name in ('expected_revision','expected_draft_version','expected_backlog_revision'):
             integer(payload[name],name,1 if name == 'expected_revision' else 0)
+        with self.store.transaction() as state:
+            require(payload['idea_id'] in state['ideas'],'Unknown idea','not_found')
+            info = self.store.lifecycle(payload['idea_id'])
+            if info['lifecycle'] != 'active':
+                raise IdeaError('idea_moved','This idea moved to a workspace; edit its file there',home=info['home'])
         result = self.store.publish_handoff(context.session_id,payload['request_id'],
             dict(operation='handoff',payload=copy.deepcopy(payload)),codec.build_record)
         try:
@@ -130,10 +135,16 @@ class HandoffProvider:
             self.store._read_receipts(context.session_id)
             require(len(state['order']) <= MAX_STORE_FILES, 'Ideas exceed Store capacity','ideas_capacity')
             rows = []
+            views = self.store.lifecycles(state)
             for position,key in enumerate(state['order'],1):
                 idea = state['ideas'][key]
-                view = derive_state(idea); packet = self.project(state,idea,context)
-                if idea['status'] == 'archived':
+                life = lifecycle_view(views[key])
+                view = derive_state(idea)
+                # A moved or delivered idea is a read-only pointer: its file lives in the project, so no packet is projected.
+                packet = self.project(state,idea,context) if life['lifecycle'] == 'active' else None
+                if life['lifecycle'] != 'active':
+                    status = life['lifecycle']
+                elif idea['status'] == 'archived':
                     status = 'archived'
                 elif packet['handoff_status']['available']:
                     status = 'ready-to-plan'
@@ -147,12 +158,16 @@ class HandoffProvider:
                 detail = self.store._safe(key+'.md')
                 # Legacy JSON-only Ideas may not yet have a detail Markdown leaf.
                 detail_path = detail.parent.resolve(strict=True)/detail.name
+                if life['home'] is not None:
+                    detail_path = life['home']['file_path']  # the living file is in the project
                 rows.append(dict(idea_id=key,revision=idea['revision'],position=position,title=title[:200],
                     status=status,method=method['selection'] if method is not None else None,
                     updated=idea['revisions'][-1]['timestamp'],detail_path=str(detail_path),
-                    # Where a resumed wizard opens, and how far it got (the page says "Step N of 7").
+                    # Where a resumed wizard opens, and how far it got (the page says "Step N of M", M being len(STEP_ORDER), currently 8; the count is never a literal).
                     current_step=view['current_step'],
-                    completed_steps=sum(value['status'] in ('saved','skipped','not-applicable') for value in view['steps'].values())))
+                    completed_steps=sum(value['status'] in ('saved','skipped') for value in view['steps'].values()),
+                    lifecycle=life['lifecycle'],home=life['home'],delivered_ref=life['delivered_ref'],
+                    read_only=life['lifecycle'] != 'active'))
             return _bounded(dict(ok=True,code='ok',backlog_revision=state['backlog_revision'],
                                  total=len(rows),ideas=rows),'ideas_capacity')
 
@@ -187,6 +202,9 @@ def idea_markdown(binding,request,payload):
     with app.store.transaction() as state:
         app.store._read_receipts(app.context.session_id)
         require(key in state['ideas'],'Unknown idea','not_found')
+        info = app.store.lifecycle(key)
+        if info['lifecycle'] != 'active':
+            raise IdeaError('idea_moved','This idea moved to a workspace; read its file there',home=info['home'])
         path = app.store._safe(key+'.md')
         try:
             descriptor = os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0))

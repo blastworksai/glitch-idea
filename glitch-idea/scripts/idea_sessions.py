@@ -9,13 +9,17 @@ No Windows privacy guarantee or agent event endpoint is provided here.
 """
 import copy
 from dataclasses import dataclass, field
+import collections
+import hashlib
 import hmac
+import logging
 import math
 import re
 import secrets
 import threading
 import time
 
+from idea_proposals import IDLE
 from idea_bridge import ApplicationBinding, BridgeError, Response, TrustedSessionPolicy, check
 from idea_service import Service
 
@@ -24,6 +28,8 @@ SESSION = re.compile(r'session_[0-9a-f]{32}')
 IDEA = re.compile(r'idea_[0-9a-f]{32}')
 HEX = re.compile(r'[0-9a-f]+')
 AGENT = re.compile(r'agent_[0-9a-f]{32}')
+LOG = logging.getLogger('idea.activity')
+RETIRED_KEEP = 8  # Hashes of superseded browser credentials kept per binding.
 AGENT_BROWSER_HEADERS = ('Cookie', 'Origin', 'X-CSRF-Token', 'X-Idea-Binding', 'X-Idea-Tab')
 
 
@@ -56,6 +62,12 @@ class _Entry:
     attempts: int = 0
     redeemed: bool = False
     transport: dict | None = None
+    retired: collections.deque = field(default_factory=lambda: collections.deque(maxlen=RETIRED_KEEP))
+    activity_count: int = 0
+    activity_touched: int = 0
+    activity_last: float | None = None  # Wall-clock (time.time) of the last accepted activity ping.
+    activity_last_touch: bool | None = None
+    seen: float = 0  # Monotonic time of the human's last pairing, save, selection or typing ping.
 
 
 class SessionPolicy(TrustedSessionPolicy):
@@ -115,9 +127,17 @@ class SessionPolicy(TrustedSessionPolicy):
         check(entry.binding.lock.acquire(timeout=10), 'busy', 503)
         return entry.binding.lock
 
-    def _invalidate(self, entry):
+    @staticmethod
+    def _digest(value):
+        return hashlib.sha256(value.encode('ascii')).digest()
+
+    def _invalidate(self, entry, retire=False):
         generation = entry.agent_generation
         with self._registry:
+            if retire and entry.cookie is not None and entry.tab_secret is not None:
+                # Only hashes are kept: a superseded answer proves a tab's credentials were
+                # replaced by a resume, and the hashes grant nothing.
+                entry.retired.append((self._digest(entry.cookie), self._digest(entry.tab_secret)))
             entry.active = False
             entry.cookie = entry.csrf = entry.tab_secret = entry.agent_token = None
             entry.transport = None
@@ -155,7 +175,7 @@ class SessionPolicy(TrustedSessionPolicy):
         lock = self._locked(entry)
         generation = None
         try:
-            self._invalidate(entry)
+            self._invalidate(entry, retire=resume)
             application = self.factory(copy.deepcopy(record))
             check(isinstance(application,Service) and application.context.actor == actor
                   and application.context.session_id == receipt_session_id
@@ -310,6 +330,39 @@ class SessionPolicy(TrustedSessionPolicy):
                                 'agent_paused' if status=='paused' else 'agent_disconnected'),
                     capabilities=dict(agent=status=='connected',memory=self._memory_capability and status=='connected',uploads=False,handoff=False))
 
+    def in_use(self, binding_id):
+        """Is a tab paired or an agent connected right now? Read-only; an unknown binding is not in use."""
+        with self._registry:
+            entry = self._entries.get(binding_id)
+            if entry is None: return dict(browser=False, agent=False)
+            # A paired tab counts only while a human acted in it within the agent idle window;
+            # the page's own state polling is not a human, exactly as for the agent idle pause.
+            browser = entry.active and self.clock() - entry.seen <= IDLE
+            token, generation = entry.agent_token is not None, entry.agent_generation
+        agent = False
+        if token and self.agent_state is not None:
+            try: agent = self.agent_state(binding_id, generation)['agent_status'] == 'connected'
+            except Exception: agent = True  # Unknown counts as in use: never free what may be live.
+        return dict(browser=browser, agent=agent)
+
+    def discard(self, binding_id, only_if_idle=False):
+        """Owner discard: revoke browser and agent credentials, cancel its generation, drop the slot. Idempotent.
+
+        only_if_idle re-checks in_use under the binding lock (pairing holds it too) and returns False, changing nothing, if live."""
+        check(type(binding_id) is str and BINDING.fullmatch(binding_id), 'invalid_binding', 400)
+        with self._registry:
+            entry = self._entries.get(binding_id)
+        if entry is None: return True  # Nothing live to protect (e.g. a record left by a failed unlink).
+        lock = self._locked(entry)
+        try:
+            if only_if_idle and any(self.in_use(binding_id).values()): return False
+            self._invalidate(entry)
+            with self._registry:
+                if self._entries.get(binding_id) is entry: del self._entries[binding_id]
+            return True
+        finally:
+            lock.release()
+
     def revoke(self, binding_id):
         entry = self._entry(binding_id); lock = self._locked(entry)
         try:
@@ -319,6 +372,24 @@ class SessionPolicy(TrustedSessionPolicy):
 
     def _cookie_name(self, entry):
         return 'gi_' + self.namespace + '_' + entry.record['binding_id'][8:]
+
+    def _current(self, entry, values, tab):
+        return bool(entry.active and len(values) == 1 and entry.cookie is not None and values[0].isascii()
+                    and hmac.compare_digest(values[0], entry.cookie) and type(tab) is str and 0 < len(tab) <= 256
+                    and tab.isascii() and entry.tab_secret is not None and hmac.compare_digest(tab, entry.tab_secret))
+
+    def _was_superseded(self, entry, values, tab):
+        # Caller holds the registry. Either credential of an earlier generation is proof: a
+        # shared cookie jar hands an old tab the NEW cookie, so its old tab secret must count.
+        found = False
+        presented = [self._digest(v) for v in values if type(v) is str and v.isascii() and len(v) <= 256]
+        tab_hash = self._digest(tab) if type(tab) is str and 0 < len(tab) <= 256 and tab.isascii() else None
+        for cookie_hash, tab_secret_hash in entry.retired:
+            for item in presented:
+                found |= hmac.compare_digest(item, cookie_hash)
+            if tab_hash is not None:
+                found |= hmac.compare_digest(tab_hash, tab_secret_hash)
+        return found
 
     def authorize(self, request, *, write=False):
         selector = request.header('X-Idea-Binding')
@@ -334,6 +405,8 @@ class SessionPolicy(TrustedSessionPolicy):
         # Per-tab secret: cookies are not port-scoped, so the cookie alone never authorises.
         tab = request.header('X-Idea-Tab')
         with self._registry:
+            if not self._current(entry, values, tab) and self._was_superseded(entry, values, tab):
+                raise BridgeError('session_superseded', 401)
             check(entry.active and len(values) == 1 and entry.cookie is not None
                   and values[0].isascii() and hmac.compare_digest(values[0], entry.cookie), 'browser_unauthorized', 401)
             check(type(tab) is str and 0 < len(tab) <= 256 and tab.isascii() and entry.tab_secret is not None
@@ -372,9 +445,16 @@ class SessionPolicy(TrustedSessionPolicy):
                     replay = True
                 else:
                     replay = False
-                    expired = not (self.clock() < entry.expires and entry.attempts < self.max_attempts
-                                   and entry.agent_token is not None)
-            if not replay and expired:
+                    locked = entry.attempts >= self.max_attempts or entry.agent_token is None
+                    late = not locked and not self.clock() < entry.expires
+                    if late:
+                        # A code that merely outlived its TTL was never redeemed: no browser
+                        # credential exists and the agent never needed pairing. Retire only the
+                        # challenge so the pane can issue a fresh one; the agent keeps its token.
+                        entry.pairing_code = None
+            if not replay and late:
+                raise BridgeError('pairing_expired_or_locked',401)
+            if not replay and locked:
                 self._invalidate(entry)
                 raise BridgeError('pairing_expired_or_locked',401)
             if replay:
@@ -383,7 +463,7 @@ class SessionPolicy(TrustedSessionPolicy):
             cookie, csrf, tab = self._secret(), self._secret(), self._secret()
             with self._registry:
                 entry.cookie, entry.csrf, entry.tab_secret = cookie, csrf, tab
-                entry.active, entry.redeemed = True, True
+                entry.active, entry.redeemed, entry.seen = True, True, self.clock()
             if self.agent_activity is not None:
                 # A human just paired: the agent opened for them must not idle out first.
                 self.agent_activity(entry.record['binding_id'], entry.agent_generation)
@@ -426,9 +506,31 @@ class SessionPolicy(TrustedSessionPolicy):
 
     def activity(self,binding):
         entry = self._for_binding(binding)
+        with self._registry:
+            entry.seen = self.clock()  # The same human signals that hold off the agent idle pause.
+        touched = None
         if self.agent_activity is not None and entry.agent_token is not None:
-            self.agent_activity(entry.record['binding_id'], entry.agent_generation)
+            touched = self.agent_activity(entry.record['binding_id'], entry.agent_generation) is True
+        with self._registry:
+            entry.activity_count += 1
+            entry.activity_touched += touched is True
+            entry.activity_last, entry.activity_last_touch = time.time(), touched
+            count = entry.activity_count
+        LOG.info('activity binding=%s count=%d agent_clock_moved=%s', entry.record['binding_id'], count,
+                 'n/a' if touched is None else str(touched).lower())
         return dict(ok=True,code='ok')
+
+    def activity_diagnostics(self):
+        """Read-only operator view: per binding, accepted activity pings and agent-clock results.
+
+        agent_clock_moved is True/False from the broker callback, None when no live agent was
+        asked. Counters only; no credential, cookie or tab value is ever included.
+        """
+        with self._registry:
+            return {bid: dict(accepted=e.activity_count, agent_clock_moved=e.activity_touched,
+                              agent_clock_unmoved=e.activity_count - e.activity_touched,
+                              last_seen=e.activity_last, last_agent_clock_moved=e.activity_last_touch)
+                    for bid, e in self._entries.items()}
 
     def after_application(self,binding,result):
         entry = self._for_binding(binding)

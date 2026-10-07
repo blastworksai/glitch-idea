@@ -14,7 +14,8 @@ const copy=value=>structuredClone(value);
 const IDEA='idea_'+'1'.repeat(32),OTHER='idea_'+'2'.repeat(32),SESSION='session_'+'3'.repeat(32),BINDING='binding_'+'4'.repeat(32);
 const HEX='a'.repeat(64),SET='set_'+'5'.repeat(32);
 const CAPTURE={raw_text:'<script>literal capture</script>',workspace:{name:'Explicit',path:'/fixture',confirmed:true}};
-const SHAPE={outcome:'Clear outcome',scope:'small-change',scope_reason:'One field',alternatives:[{route:'Keep it',reason:'Simpler'}],assumptions:[],next_slice:'Check it',learning:[]};
+const DISCOVERY={problem:'Ideas get lost',audience:'Solo founders',workaround:'Notes',evidence:'Interviews',kill_criteria:'No pull',challenges:[]};
+const EXPLORATION={outcome:'Clear outcome',scope:'small-change',scope_reason:'One field',alternatives:[{route:'Keep it',reason:'Simpler'}],assumptions:[],next_slice:'Check it',learning:[],investment:null,experiment:null,sketch:[{title:'First slice',why_next:'Smallest',done_when:'It saves'},{title:'Second slice',why_next:'Next',done_when:'It reads back'}]};
 const METHOD={selection:'bounded-plan',reason:'One result',investment:null,experiment:null,memory:{status:'unavailable',sources:[],rationale:'Fixture'}};
 const fields=(disposition='accepted_set',design_set_id=null,reason=null)=>({disposition,reason,design_set_id,brief_evidence_id:null});
 const id=(kind,n)=>kind+'_'+n.toString(16).padStart(32,'0');
@@ -34,8 +35,8 @@ const element=(tag,text='',className='')=>new Node(tag,text,className);
 const button=(text,action,className='')=>{const node=element('button',text,className);node.type='button';node.addEventListener('click',action);return node;};
 function harness({clipboard=null,uploadsOnly=false}={}) {
   const state={ok:true,code:'ok',idea_id:IDEA,idea_status:'active',session_id:SESSION,revision:4,draft_version:0,backlog_revision:0,current_step:'visualize',agent_status:'disconnected',
-    steps:Object.fromEntries(STEPS.map(({key},index)=>[key,{status:index<4?'saved':key==='visualize'?'current':'todo',accepted_revision:index<4?4:null,evidence_id:index<4?'fixture-'+key:null}])),
-    accepted:{capture:copy(CAPTURE),priorities:{urgency:6,importance:7},shape:copy(SHAPE),method:copy(METHOD)},drafts:{},draft:null,
+    steps:Object.fromEntries(STEPS.map(({key},index)=>[key,{status:index<5?'saved':key==='visualize'?'current':'todo',accepted_revision:index<5?4:null,evidence_id:index<5?'fixture-'+key:null}])),
+    accepted:{capture:copy(CAPTURE),priorities:{urgency:6,importance:7},discovery:copy(DISCOVERY),exploration:copy(EXPLORATION),method:copy(METHOD)},drafts:{},draft:null,
     capabilities:{uploads:true},asset_inventory_status:{available:true,code:'ok'},asset_inventory:{records:[],total:0,projected:0,omitted:0,orphans:{count:0,ids:[]}}};
   const calls=[],receipts=new Map(),faults={},objectUrls=[],revoked=[],deferred=[],deferredDelays=[],anchors=[];let sequence=0,count=0,body,foot,connected=true;
   const sync=()=>{state.asset_inventory.total=state.asset_inventory.projected=state.asset_inventory.records.length;};
@@ -47,7 +48,7 @@ function harness({clipboard=null,uploadsOnly=false}={}) {
     const n=++sequence;return add({...common(),kind:'asset',asset_id:id('asset',n),upload_id:id('upload',n),session_id:SESSION,
       blob_path:'assets/blobs/'+id('asset',n)+'.bin',name,declared_type:type,validated_type:type,size,sha256:HEX});
   };
-  const addSet=(assets,setId=SET)=>add({...common(),kind:'design-set',set_id:setId,session_id:SESSION,source:{capture:{revision:state.steps.capture.accepted_revision,digest:HEX},shape:{revision:state.steps.shape.accepted_revision,digest:HEX}},source_digest:HEX,
+  const addSet=(assets,setId=SET)=>add({...common(),kind:'design-set',set_id:setId,session_id:SESSION,source:{capture:{revision:state.steps.capture.accepted_revision,digest:HEX},discovery:{revision:state.steps.discovery.accepted_revision,digest:HEX},exploration:{revision:state.steps.exploration.accepted_revision,digest:HEX}},source_digest:HEX,
     members:assets.map(asset=>({asset_id:asset.asset_id,name:asset.name,type:asset.validated_type,size:asset.size,sha256:asset.sha256}))});
   const response=(data,status=200)=>({ok:status>=200&&status<300,status,json:async()=>copy(data)});
   const receipt=(requestId,extra={})=>({ok:true,code:'ok',write_state:'applied',request_id:requestId,idea_id:IDEA,...extra});
@@ -139,8 +140,10 @@ test('brief uses accepted current content only, literal text and saved Method',(
   const h=harness();h.flow.buffers.capture.raw_text='Unsaved replacement';
   assert.ok(h.get('visualize-brief').value.includes(CAPTURE.raw_text));assert.ok(!h.get('visualize-brief').value.includes('Unsaved replacement'));
   assert.equal(h.get('visualize-brief').readOnly,true);assert.ok(h.get('visualize-brief').value.includes('Method'));
+  const brief=h.get('visualize-brief').value;assert.ok(brief.includes('1. First slice — done when: It saves'));assert.ok(brief.includes('2. Second slice — done when: It reads back'));
+  assert.ok(brief.includes('Problem: Ideas get lost')&&brief.includes('Who: Solo founders')&&brief.includes('Desired result: Clear outcome')&&brief.includes('Selection: Full Plan Up Front'));
   h.state.steps.method.status='review-needed';h.reload();assert.ok(!h.get('visualize-brief').value.includes('\nMethod\n'));
-  h.state.steps.shape.status='review-needed';h.reload();assert.equal(visualBrief(h.flow),null);assert.equal(h.get('visualize-new-set').disabled,true);
+  h.state.steps.exploration.status='review-needed';h.reload();assert.equal(visualBrief(h.flow),null);assert.equal(h.get('visualize-new-set').disabled,true);
 });
 test('clipboard success and failure retain an accessible manual-copy brief',async()=>{
   const copied=[],h=harness({clipboard:{writeText:async value=>copied.push(value)}});await h.get('visualize-copy').click();assert.equal(copied[0],h.get('visualize-brief').value);
@@ -227,9 +230,9 @@ test('current historical set selection submits opaque equal pointers and asset_i
   assert.equal(writes(h)[0].payload.design_set_id,SET);assert.equal(writes(h)[0].payload.fields.design_set_id,SET);assert.equal(writes(h)[0].payload.asset_ids,null);
 });
 test('stale source and changed member snapshots keep history visible but refuse selection',()=>{
-  const h=harness(),asset=h.addAsset();h.addSet([asset]);h.state.steps.shape.accepted_revision=5;h.state.revision=5;h.reload();
+  const h=harness(),asset=h.addAsset();h.addSet([asset]);h.state.steps.exploration.accepted_revision=5;h.state.revision=5;h.reload();
   assert.equal(h.get('visualize-set-'+SET).disabled,true);assert.match(text(h),/historical/);
-  h.state.steps.shape.accepted_revision=4;h.state.asset_inventory.records.find(item=>item.record.kind==='design-set').record.members[0].sha256='b'.repeat(64);h.reload();
+  h.state.steps.exploration.accepted_revision=4;h.state.asset_inventory.records.find(item=>item.record.kind==='design-set').record.members[0].sha256='b'.repeat(64);h.reload();
   assert.equal(h.get('visualize-set-'+SET).disabled,true);assert.equal(eligibleSet(h.flow,assetInventory(h.flow).sets[0]),false);
 });
 test('design-set projection requires its typed publication session',()=>{
@@ -253,13 +256,12 @@ test('set total size and member count limits remain explicit and do not truncate
   for(const asset of assets.slice(0,5))h.get('visualize-member-'+asset.asset_id).change({checked:false});
   for(const asset of assets)h.get('visualize-member-'+asset.asset_id).change({checked:true});assert.equal(h.get('visualize-accept').disabled,true);assert.equal(writes(h).length,0);
 });
-test('skip and N-A require meaningful reason and clear every hidden set pointer',async()=>{
-  for(const disposition of ['skipped','not-applicable']){
-    const h=harness();h.flow.edit('visualize',fields('accepted_set',SET));h.draw();await h.get('visualize-'+disposition).click();
-    assert.equal(h.get('visualize-accept').disabled,true);h.get('visualize-reason').input('  ');assert.equal(h.get('visualize-accept').disabled,true);
-    h.get('visualize-reason').input('No useful visual result');await h.get('visualize-accept').click();assert.equal(writes(h)[0].route,'/api/v1/visual-disposition');
-    assert.deepEqual(writes(h)[0].payload.fields,fields(disposition,null,'No useful visual result'));assert.equal(h.flow.status('visualize'),disposition);
-  }
+test('skip is one click, needs no reason, clears every hidden set pointer and offers no not-applicable road',async()=>{
+  const h=harness();h.flow.edit('visualize',{...fields('accepted_set',SET),source:'claude_design'});h.draw();
+  assert.equal(h.get('visualize-not-applicable'),undefined);assert.equal(h.get('visualize-reason'),undefined);
+  await h.get('visualize-skipped').click();
+  assert.equal(writes(h).length,1);assert.equal(writes(h)[0].route,'/api/v1/visual-disposition');
+  assert.deepEqual(writes(h)[0].payload.fields,fields('skipped',null,null));assert.equal(h.flow.status('visualize'),'skipped');
 });
 test('lost set ACK recovers via existing Flow; missing receipt keeps exact request for explicit retry',async()=>{
   const h=harness(),asset=h.addAsset();h.reload();await h.get('visualize-new-set').click();h.get('visualize-member-'+asset.asset_id).change({checked:true});h.faults.writeAck=true;
@@ -274,10 +276,10 @@ test('stale refusal preserves buffer and no saved check',async()=>{
 });
 test('busy edit is refused; newer idle answer survives explicit recovery of the original generated pointer',async()=>{
   const h=harness(),asset=h.addAsset();h.reload();await h.get('visualize-new-set').click();h.get('visualize-member-'+asset.asset_id).change({checked:true});
-  const newer=fields('skipped',null,'Newer manual answer');
+  const newer=fields('skipped',null,'Newer manual answer');const generated={...fields(),source:'claude_design'};
   h.faults.afterWrite=()=>{
     assert.equal(h.flow.busy,true);h.flow.edit('visualize',newer);
-    assert.deepEqual(h.flow.buffers.visualize,fields());
+    assert.deepEqual(h.flow.buffers.visualize,generated);
   };
   h.faults.writeAck=true;h.faults.read=true;h.faults.reconcile=true;
   await h.get('visualize-accept').click();assert.equal(h.flow.busy,false);assert.equal(h.flow.pending.ambiguous,true);
@@ -285,7 +287,7 @@ test('busy edit is refused; newer idle answer survives explicit recovery of the 
   h.flow.edit('visualize',newer);h.draw();assert.equal(h.flow.pending.ambiguous,true);assert.deepEqual(h.flow.pending.payload,original);
   h.faults.read=false;h.faults.reconcile=false;h.faults.writeAck=false;
   await h.flow.retry();assert.equal(writes(h).length,1);assert.deepEqual(h.flow.buffers.visualize,newer);
-  assert.equal(h.flow.status('visualize'),'unsaved');assert.equal(h.flow.pending,null);assert.equal(h.get('visualize-reason').value,'Newer manual answer');
+  assert.equal(h.flow.status('visualize'),'unsaved');assert.equal(h.flow.pending,null);
 });
 test('orphan diagnostic opaque IDs remain readable without blocking complete inventory',()=>{
   const h=harness();h.state.asset_inventory.orphans={count:140,ids:[id('asset',90),'stage_'+id('upload',91).slice('upload_'.length)+'_'+'9'.repeat(32)]};h.reload();
@@ -299,9 +301,9 @@ test('noncanonical prefixed, malformed and path-like orphan IDs refuse the inven
   }
 });
 test('pause persists only typed decision draft and navigation; reload restores draft, no bytes or acceptance',async()=>{
-  const h=harness();h.choose([file()]);await h.get('visualize-skipped').click();h.get('visualize-reason').input('Later');assert.equal(h.get('visualize-pause'),undefined);await h.flow.pause();
+  const h=harness();h.choose([file()]);await h.get('visualize-new-set').click();assert.equal(h.get('visualize-pause'),undefined);await h.flow.pause();
   assert.equal(h.flow.paused,true);assert.deepEqual(writes(h).map(call=>call.route),['/api/v1/draft','/api/v1/navigate']);assert.equal(h.flow.status('visualize'),'current');
-  const reloaded=new Flow(h.api,()=> 'reloaded');reloaded.load(h.state);assert.deepEqual(reloaded.buffers.visualize,fields('skipped',null,'Later'));
+  const reloaded=new Flow(h.api,()=> 'reloaded');reloaded.load(h.state);assert.deepEqual(reloaded.buffers.visualize,{...fields(),source:'claude_design'});
   assert.match(text(h),/not local files/);
 });
 test('download uses fixed authenticated API and inert Blob; names remain literal; URL revokes after click',async()=>{
@@ -337,12 +339,12 @@ test('archived full renderer disables all set and disposition controls but prese
   const h=harness(),asset=h.addAsset();h.addSet([asset]);h.reload();
   await h.get('visualize-new-set').click();h.get('visualize-member-'+asset.asset_id).change({checked:true});
   assert.equal(h.get('visualize-accept').disabled,false);h.state.idea_status='archived';h.reload();
-  for(const control of ['visualize-new-set','visualize-member-'+asset.asset_id,'visualize-set-'+SET,'visualize-skipped','visualize-not-applicable','visualize-accept']){
+  for(const control of ['visualize-new-set','visualize-member-'+asset.asset_id,'visualize-set-'+SET,'visualize-skipped','visualize-prototype','visualize-accept']){
     assert.equal(h.get(control).disabled,true,control);await h.get(control).click();
   }
   assert.match(text(h),/Design-set and disposition changes are unavailable/);assert.equal(writes(h).length,0);
   assert.equal(h.get('download-'+asset.asset_id).disabled,false);await h.get('download-'+asset.asset_id).click();assert.equal(h.anchors[0].clicked,true);
-  h.flow.edit('visualize',fields('skipped',null,'Existing reason'));h.draw();assert.equal(h.get('visualize-reason').disabled,true);
+  
 });
 test('typed metadata refusals stop the exact request until explicit removal and reselection',async()=>{
   for(const refusal of [{code:'stale_revision',status:409},{code:'too_large',status:413},{code:'invalid_asset_type',status:415},{code:'receipt_capacity_exhausted',status:503},{code:'idea_archived',status:409}]){
@@ -412,4 +414,143 @@ test('completed queue bytes count toward the 100 MiB cap until explicit local ro
   h.choose(selected);for(let n=1;n<=4;n++)await h.get('upload-action-'+n).click();h.choose([file('next.md')]);
   assert.equal(h.get('upload-action-5'),undefined);assert.match(text(h),/Completed rows to remove: large-completed-0.md/);
   await h.get('upload-remove-1').click();h.choose([file('next.md')]);assert.ok(h.get('upload-action-5'));
+});
+
+test('design-set source witness is capture + discovery + exploration only',()=>{
+  const h=harness(),asset=h.addAsset(),set=h.addSet([asset]);h.reload();assert.ok(assetInventory(h.flow));
+  const rec=h.state.asset_inventory.records.find(item=>item.record.kind==='design-set').record;
+  rec.source={capture:rec.source.capture,shape:{revision:4,digest:HEX}};h.reload();assert.equal(assetInventory(h.flow),null);
+  rec.source={capture:{revision:4,digest:HEX},discovery:{revision:4,digest:HEX}};h.reload();assert.equal(assetInventory(h.flow),null);
+});
+test('disabled Visualize accept says what is missing and enabled accept says nothing',()=>{
+  const h=harness();assert.equal(h.get('visualize-accept').disabled,true);
+  const why=h.get('visualize-accept-reason');assert.ok(why);assert.match(why.className,/accept-reason/);
+  assert.equal(h.get('visualize-accept').title,why.textContent);assert.equal(h.get('visualize-accept')['aria-describedby'],'visualize-accept-reason');
+  const skip=harness();skip.flow.buffers.visualize=fields('skipped',null,'Not needed');skip.reload();
+  assert.equal(skip.get('visualize-accept').disabled,false);assert.equal(skip.get('visualize-accept-reason'),undefined);assert.ok(!skip.get('visualize-accept').title);
+});
+
+test('every disabled Visualize accept states a non-empty reason',async()=>{
+  const reasoned=h=>{assert.equal(h.get('visualize-accept').disabled,true);const r=h.get('visualize-accept-reason');assert.ok(r&&r.textContent.trim().length>0);assert.equal(h.get('visualize-accept').title,r.textContent);};
+  reasoned(harness());
+  const create=harness();create.addAsset();create.reload();await create.get('visualize-new-set').click();reasoned(create);
+  const nobrief=harness();nobrief.state.steps.exploration.status='review-needed';nobrief.flow.buffers.visualize=fields();nobrief.reload();reasoned(nobrief);
+  const stale=harness(),a=stale.addAsset();stale.addSet([a]);stale.state.steps.exploration.accepted_revision=5;stale.state.revision=5;stale.reload();
+  stale.flow.buffers.visualize=fields('accepted_set',SET);stale.reload();reasoned(stale);
+  const archived=harness();archived.state.idea_status='archived';archived.flow.buffers.visualize=fields('skipped',null,'ok');archived.reload();reasoned(archived);
+  const busy=harness();busy.flow.buffers.visualize=fields('skipped',null,'ok');busy.flow.busy=true;busy.reload();reasoned(busy);
+  const paused=harness();paused.flow.buffers.visualize=fields('skipped',null,'ok');paused.flow.paused=true;paused.reload();reasoned(paused);
+  const pending=harness();pending.flow.buffers.visualize=fields('skipped',null,'ok');pending.flow.pending={};pending.reload();reasoned(pending);
+  const noinv=harness();noinv.state.asset_inventory_status={available:false,code:'not_ready'};noinv.flow.buffers.visualize=fields();noinv.reload();reasoned(noinv);
+});
+
+// --- v0.3 three-road choice cards ---
+const connectAgent=h=>{
+  Object.assign(h.state,{agent_status:'connected',agent_generation:'agent_'+'6'.repeat(32),proposals:[],
+    proposal_inventory:{total:0,projected:0,omitted:0,content_omitted:0,index_path:IDEA+'.md'}});
+  Object.defineProperty(h.state,'proposal_sources',{enumerable:true,get:()=>({visual_brief:{available:true,code:'ok',source:{accepted_revision:4,draft_version:h.state.draft_version,data:{},source_digest:HEX}}})});
+  h.sent=[];
+  const original=h.api.write.bind(h.api);
+  h.api.write=async(operation,payload)=>{if(operation!=='propose')return original(operation,payload);h.sent.push({operation,payload});return {ok:true,code:'ok',request_id:payload.request_id,operation:payload.operation,session_id:SESSION,idea_id:IDEA,
+    accepted_revision:4,draft_version:0,source_digest:HEX,status:'pending',write_state:'not_applied'};};
+  h.reload();return h;
+};
+const answer=(h,skill)=>{h.state.proposals=[{proposal_id:'proposal_'+'7'.repeat(32),request_id:h.sent.at(-1).payload.request_id,operation:'visual_brief',accepted_revision:4,draft_version:0,
+  source_digest:HEX,proposal:{prototype_skill:skill},stale:false,stale_reason:null,acceptance_eligible:true,acceptance_reason:null,
+  evidence:{path:'history/'+IDEA+'/metadata/'+HEX+'.md',sha256:HEX},content_omitted:false}];h.state.proposal_inventory.total=h.state.proposal_inventory.projected=1;h.reload();};
+const pngZip=h=>{const zip=h.addAsset('prototype.zip',9,'application/zip'),png=h.addAsset('prototype.png',12,'image/png');return {zip,png};};
+const fillPrototype=(h,files)=>{h.state.conversation={request_id:h.sent.at(-1).payload.request_id,operation:'visual_brief',idea_id:IDEA,accepted_revision:4,
+  fills:[{sequence:1,fields:{source:'prototype',assets:[files.zip.asset_id,files.png.asset_id]}}]};h.reload();};
+const BUILDING='Your terminal is building the prototype — it opens in a second tab';
+const MISSED='The prototype did not reach this page. Ask your terminal to send it again, or choose another road.';
+const reasonOf=h=>{assert.equal(h.get('visualize-accept').disabled,true);const r=h.get('visualize-accept-reason');assert.ok(r&&r.textContent.trim().length>0);assert.equal(h.get('visualize-accept').title,r.textContent);};
+
+test('three equal choice cards carry the owner labels verbatim',()=>{
+  const h=harness(),labels=h.body.all().filter(node=>node.tag==='h2').map(node=>node.textContent);
+  for(const label of ['Visualize in Claude Design and import it back','Prototype Here','Skip visualization'])assert.ok(labels.includes(label),label);
+  assert.equal(h.get('visualize-prototype').textContent,'Prototype Here');assert.equal(h.get('visualize-skipped').textContent,'Skip visualization');
+  assert.ok(h.get('visualize-card-claude')&&h.get('visualize-card-prototype')&&h.get('visualize-card-skip'));
+});
+test('Claude Design road records source claude_design on accept',async()=>{
+  const h=harness(),asset=h.addAsset('design.md');h.reload();await h.get('visualize-new-set').click();h.get('visualize-member-'+asset.asset_id).change({checked:true});
+  await h.get('visualize-accept').click();assert.equal(writes(h)[0].payload.fields.source,'claude_design');assert.equal(h.flow.status('visualize'),'saved');
+});
+test('Prototype Here without a terminal says the terminal is needed and the other roads still work',async()=>{
+  const h=harness();assert.equal(h.get('visualize-prototype').disabled,true);
+  assert.match(h.get('visualize-prototype-needs-terminal').textContent,/needs your terminal/);
+  assert.equal(h.get('visualize-skipped').disabled,false);assert.equal(h.get('visualize-new-set').disabled,false);
+});
+test('Prototype Here sends visual_brief; unavailable skill shows the exact pointer and a safe link',async()=>{
+  const h=connectAgent(harness());assert.equal(h.get('visualize-prototype').disabled,false);
+  await h.get('visualize-prototype').click();assert.equal(h.sent.length,1);assert.equal(h.sent[0].operation,'propose');assert.equal(h.sent[0].payload.operation,'visual_brief');
+  answer(h,'unavailable');const p=h.get('visualize-prototype-skill');assert.ok(p);
+  assert.equal(p.textContent+p.children.map(node=>node.textContent).join(''),"Prototype Here uses Matt Pocock's prototype skill. Get it from https://github.com/mattpocock/skills, install it, then refresh this page.");
+  const link=p.children[0];assert.equal(link.tag,'a');assert.equal(link.href,'https://github.com/mattpocock/skills');assert.equal(link.rel,'noopener noreferrer');assert.equal(link.target,'_blank');
+  assert.equal(h.get('visualize-prototype-status'),undefined);reasonOf(h);
+});
+test('Prototype available shows the status line; the terminal fill shows the screenshot and enables Accept as prototype',async()=>{
+  const h=connectAgent(harness()),files=pngZip(h);h.reload();
+  await h.get('visualize-prototype').click();reasonOf(h);
+  assert.equal(h.get('visualize-prototype-status').textContent,BUILDING);
+  assert.equal(h.get('visualize-prototype-skill'),undefined);reasonOf(h);
+  fillPrototype(h,files);await new Promise(resolve=>setTimeout(resolve,20));h.draw();
+  h.state.conversation=null;answer(h,'available');await new Promise(resolve=>setTimeout(resolve,20));h.draw();
+  assert.deepEqual(h.flow.buffers.visualize.assets,[files.zip.asset_id,files.png.asset_id]);
+  const shot=h.get('visualize-prototype-shot');assert.ok(shot);assert.match(shot.src,/^blob:fixture\//);assert.equal(h.get('visualize-prototype-status'),undefined);
+  assert.equal(h.get('visualize-accept').disabled,false);assert.equal(h.get('visualize-accept-reason'),undefined);
+  await h.get('visualize-accept').click();
+  const request=writes(h).find(call=>call.route==='/api/v1/visual-set/accept').payload;
+  assert.equal(request.fields.source,'prototype');assert.equal(request.fields.disposition,'accepted_set');assert.deepEqual(request.asset_ids,[files.zip.asset_id,files.png.asset_id]);
+});
+test('Prototype fill applied while the request is open stays applied after the available reply and is never auto-accepted',async()=>{
+  const h=connectAgent(harness()),files=pngZip(h);h.reload();
+  await h.get('visualize-prototype').click();
+  assert.equal(h.get('visualize-prototype-status').textContent,'Your terminal is building the prototype — it opens in a second tab');
+  assert.equal(h.get('visualize-prototype-skill'),undefined);
+  fillPrototype(h,files);await new Promise(resolve=>setTimeout(resolve,20));h.draw();
+  assert.ok(h.get('visualize-prototype-shot'));
+  assert.deepEqual(h.flow.buffers.visualize.assets,[files.zip.asset_id,files.png.asset_id]);
+  h.state.conversation=null;answer(h,'available');await new Promise(resolve=>setTimeout(resolve,20));h.draw();
+  assert.deepEqual(h.flow.buffers.visualize.assets,[files.zip.asset_id,files.png.asset_id]);
+  assert.equal(h.get('visualize-accept').disabled,false);assert.equal(writes(h).some(call=>call.route==='/api/v1/visual-set/accept'),false);
+  await h.get('visualize-accept').click();
+  assert.deepEqual(writes(h).find(call=>call.route==='/api/v1/visual-set/accept').payload.asset_ids,[files.zip.asset_id,files.png.asset_id]);
+});
+test('A reply of available with no fill says the prototype did not reach the page, never building',async()=>{
+  const h=connectAgent(harness());await h.get('visualize-prototype').click();h.state.conversation=null;answer(h,'available');
+  assert.equal(h.get('visualize-prototype-status').textContent,MISSED);assert.doesNotMatch(h.get('visualize-prototype-status').textContent,/building/);
+  const r=reasonOf(h)??h.get('visualize-accept-reason');assert.match(r.textContent,/did not reach this page/);
+});
+test('While the request is open the footer and the status line agree that the terminal is building',async()=>{
+  const h=connectAgent(harness());await h.get('visualize-prototype').click();
+  assert.equal(h.get('visualize-prototype-status').textContent,BUILDING);
+  assert.match(h.get('visualize-accept-reason').textContent,/Your terminal is still building the prototype\./);
+  const t=connectAgent(harness());await t.get('visualize-prototype').click();t.state.conversation={request_id:t.sent.at(-1).payload.request_id,operation:'visual_brief',idea_id:IDEA,accepted_revision:4,fills:[]};t.reload();
+  assert.equal(t.get('visualize-prototype-status').textContent,BUILDING);assert.match(t.get('visualize-accept-reason').textContent,/still building/);
+});
+test('Accept is blocked on an accepted set with no source, and a draft without one still saves',async()=>{
+  const h=harness(),asset=h.addAsset('design.md');h.flow.buffers.visualize=fields('accepted_set',null);h.flow.buffers.visualize.assets=[asset.asset_id];h.reload();
+  assert.equal(h.get('visualize-accept').disabled,true);assert.match(h.get('visualize-accept-reason').textContent,/Choose how the design was made: Claude Design or Prototype Here\./);
+  assert.equal((await import(foldsUrl)).visualizeFields(fields('accepted_set',null),true),true);
+});
+test('Prototype with only part of a set filled keeps Accept disabled with a reason',async()=>{
+  const h=connectAgent(harness()),files=pngZip(h);h.reload();await h.get('visualize-prototype').click();answer(h,'available');
+  h.state.conversation={request_id:h.sent.at(-1).payload.request_id,operation:'visual_brief',idea_id:IDEA,accepted_revision:4,fills:[{sequence:1,fields:{source:'prototype',assets:[files.zip.asset_id]}}]};
+  h.reload();reasonOf(h);
+});
+test('Skip is one click with no reason field, and records skipped',async()=>{
+  const h=harness();await h.get('visualize-skipped').click();
+  assert.equal(writes(h).length,1);assert.equal(writes(h)[0].route,'/api/v1/visual-disposition');assert.equal(writes(h)[0].payload.fields.disposition,'skipped');assert.equal(writes(h)[0].payload.fields.reason,null);
+});
+test('visualize.js has no not-applicable road',async()=>{
+  assert.ok(!(await readFile(new URL('steps/visualize.js',web),'utf8')).includes('not-applicable'));
+  assert.equal((await import(foldsUrl)).validVisualize({disposition:'not-applicable',reason:'x',design_set_id:null,brief_evidence_id:null}),false);
+});
+
+test('not-applicable is not a step status: no label, no glyph, no progress credit, and the source names it nowhere',async()=>{
+  const folds=await import(foldsUrl);
+  assert.equal(folds.statusLabel('not-applicable'),'Unavailable');
+  assert.equal(folds.statusGlyph('not-applicable'),'?');
+  assert.ok(!(await readFile(new URL('folds.js',web),'utf8')).includes('not-applicable'));
+  assert.ok(!(await readFile(new URL('steps/review.js',web),'utf8')).includes('not-applicable'));
 });

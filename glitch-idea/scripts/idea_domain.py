@@ -11,6 +11,9 @@ MAX_INPUT = 1024 * 1024
 MAX_STATE = 64 * MAX_INPUT
 MAX_NUMBER = 10**12
 SHAPE_KEYS = {'outcome','scope','scope_reason','alternatives','method','method_reason','assumptions','next_slice','learning'}
+# The one human label per method id (stored ids never change).
+METHOD_LABELS = {'bounded-plan': 'Full Plan Up Front', 'adaptive-slices': 'Vertical Slicing (Agile)',
+                 'appetite-led': 'Fixed Budget, Build what Fits', 'experiment-led': 'Experiment First'}
 ASSESS_KEYS = {'method','version','inputs','basis','assumptions','confidence','provenance'}
 
 
@@ -157,3 +160,34 @@ def receipt(value,idea_id,plan_id):
     strings(value['evidence'],'evidence')
     require(bool(value['evidence']),'Execution evidence must not be empty')
     return value
+
+
+# Lifecycle beyond the stored idea record: a moved idea lives in a workspace, a delivered one is finished.
+LIFECYCLES = ('active', 'moved', 'delivered')
+# The delivered pointer's own reference limit (one line of text).
+DELIVER_REF_MAX = 500
+
+
+def delivery_ref(value):
+    """A delivery reference is one line of visible text; refuse anything else before it is written."""
+    require(type(value) is str and 1 <= len(value) <= DELIVER_REF_MAX and bool(value.strip()),
+            'Delivery reference must be 1 to '+str(DELIVER_REF_MAX)+' characters')
+    require(not any(0xD800 <= ord(c) <= 0xDFFF for c in value), 'Delivery reference contains invalid Unicode')
+    require(not any(ord(c) < 32 or 127 <= ord(c) < 160 or c in '  ' for c in value),
+            'Delivery reference must be one line without control characters')
+    return value
+
+
+def row_status(status, lifecycle):
+    """The status a backlog row shows: moved or delivered override the stored status.
+
+    The stored value (including the mid-wizard 'in-progress') stays unchanged on the wire.
+    """
+    require(lifecycle in LIFECYCLES, 'Unknown lifecycle')
+    return status if lifecycle == 'active' else lifecycle
+
+
+def lifecycle_view(info):
+    """The fields every output adds beside an idea: lifecycle, home, delivered_ref."""
+    delivery = info['delivery']
+    return dict(lifecycle=info['lifecycle'], home=info['home'], delivered_ref=None if delivery is None else delivery['ref'])

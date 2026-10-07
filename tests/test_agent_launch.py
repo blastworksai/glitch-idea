@@ -67,22 +67,32 @@ class AgentLaunchTests(unittest.TestCase):
         status,result,_=self.wire('/api/v1/'+name,payload,headers,timeout=timeout)
         self.assertEqual(status,(200 if ok else 400) if expected_status is None else expected_status,result);return result
 
+    def ready(self):
+        # Workflow v3: every agent operation consumes Priorities (and Discovery also the human's Method),
+        # so the earliest source exists only once those are accepted. Done once per test, by hand.
+        if getattr(self,'_ready',False):return
+        self.install_test_handlers()
+        self.accept_fields('priorities',fields()['priorities'],'ready-priorities')
+        self.accept_fields('method',fields()['method'],'ready-method')
+        self._ready=True
+
     def enqueue(self,request='proposal-1'):
-        state=self.browser('state');source=state['proposal_sources']['shape']['source']
+        self.ready()
+        state=self.browser('state');source=state['proposal_sources']['discovery']['source']
         self.assertTrue(state['capabilities']['agent']);self.assertTrue(state['capabilities']['memory'])
         self.assertRegex(state['agent_generation'],r'^agent_[0-9a-f]{32}$')
         self.browser('propose',dict(request_id=request,idea_id=self.idea_id,
             expected_revision=source['accepted_revision'],expected_draft_version=source['draft_version'],
-            operation='shape',source_digest=source['source_digest']))
+            operation='discovery',source_digest=source['source_digest']))
         event=self.agent.events(timeout=0)['events'][0]
         return {k:v for k,v in event.items() if k not in ('data','sequence')}
 
-    def reply(self,correlation):return dict(correlation,proposal=fields()['shape'])
+    def reply(self,correlation):return dict(correlation,proposal=fields()['discovery'])
 
-    def draft(self,step='shape',value=None,request='draft-1'):
+    def draft(self,step='discovery',value=None,request='draft-1'):
         state=self.browser('state')
         return self.browser('draft',dict(request_id=request,idea_id=self.idea_id,expected_revision=state['revision'],
-            expected_draft_version=state['draft_version'],step=step,fields={'outcome':'Edited buffer'} if value is None else value))
+            expected_draft_version=state['draft_version'],step=step,fields={'problem':'Edited buffer'} if value is None else value))
 
     def test_actual_capture_enqueue_response_replay_and_markdown_proposal_projection(self):
         correlation=self.enqueue();before=self.browser('state')
@@ -101,11 +111,12 @@ class AgentLaunchTests(unittest.TestCase):
         self.assertNotIn(credentials['token'],json.dumps(after));self.assertNotIn(credentials['token'],repr(self.agent))
 
     def test_small_projection_capacity_keeps_current_reply_and_linked_history_readable(self):
-        historical=dict(fields()['shape'],outcome='Historical '+('x'*4096))
-        old=self.operation_reply('shape',historical,'historical-proposal')
+        historical=dict(fields()['discovery'],problem='Historical '+('x'*4096))
+        self.ready()
+        old=self.operation_reply('discovery',historical,'historical-proposal')
         self.opened=self.client.open_binding('resume',self.opened['binding_id']);self.pair()
         self.agent=AgentClient(self.client,self.opened['session_id'])
-        current=self.operation_reply('shape',fields()['shape'],'current-proposal')
+        current=self.operation_reply('discovery',fields()['discovery'],'current-proposal')
         full=self.browser('state')
         self.assertEqual(full['proposal_inventory'],dict(total=2,projected=2,omitted=0,
             content_omitted=0,index_path=self.idea_id+'.md'))
@@ -120,14 +131,14 @@ class AgentLaunchTests(unittest.TestCase):
         self.assertEqual(bounded['proposal_inventory'],budget['proposal_inventory'])
         newest=next(item for item in bounded['proposals'] if item['proposal_id']==current['evidence']['proposal_id'])
         self.assertTrue(newest['acceptance_eligible']);self.assertFalse(newest['content_omitted'])
-        self.assertEqual(newest['proposal'],fields()['shape'])
+        self.assertEqual(newest['proposal'],fields()['discovery'])
         omitted=next(item for item in bounded['proposals'] if item['content_omitted'])
         self.assertEqual(omitted['evidence'],{key:old['evidence'][key] for key in ('path','sha256')})
         self.assertIsNone(omitted['proposal']);self.assertFalse(omitted['acceptance_eligible'])
         self.assertEqual(omitted['acceptance_reason'],'projection_omitted')
         original=(self.store/omitted['evidence']['path']).read_bytes()
         self.assertEqual(hashlib.sha256(original).hexdigest(),omitted['evidence']['sha256'])
-        self.assertIn(historical['outcome'].encode(),original)
+        self.assertIn(historical['problem'].encode(),original)
         with patch.object(source_adapter,'MAX_PROJECTIONS',1):
             one=self.browser('state')
         self.assertEqual(one['proposal_inventory'],dict(total=2,projected=1,omitted=1,
@@ -135,16 +146,20 @@ class AgentLaunchTests(unittest.TestCase):
         self.assertEqual(one['proposals'][0]['proposal_id'],current['evidence']['proposal_id'])
         index=(self.store/one['proposal_inventory']['index_path']).read_text()
         self.assertIn(old['evidence']['path'],index);self.assertIn(current['evidence']['path'],index)
-        self.assertEqual(self.agent.respond(dict(self.enqueue('after-capacity'),proposal=fields()['shape']))['status'],'completed')
+        self.assertEqual(self.agent.respond(dict(self.enqueue('after-capacity'),proposal=fields()['discovery']))['status'],'completed')
 
     def test_large_accepted_capture_plus_actual_stale_reply_remains_http_readable(self):
-        proposal=dict(fields()['shape'],outcome='x'*50000)
-        reply=self.operation_reply('shape',proposal,'large-wire-proposal')
+        proposal=dict(fields()['discovery'],problem='x'*50000)
+        self.ready()
+        reply=self.operation_reply('discovery',proposal,'large-wire-proposal')
         witness={key:reply['evidence'][key] for key in ('path','sha256')}
         immutable=(self.store/witness['path']).read_bytes()
         capture=dict(raw_text='c'*510000,
             workspace=dict(name='Fixture',path=str(self.workspace),confirmed=True))
-        accepted=self.accept_fields('capture',capture,'large-wire-capture',timeout=30)
+        self.accept_fields('capture',capture,'large-wire-capture',timeout=30)
+        # v3: a new Capture invalidates the accepted Priorities and Method it fed, so the human re-accepts them.
+        self.accept_fields('priorities',fields()['priorities'],'large-wire-priorities',timeout=30)
+        accepted=self.accept_fields('method',fields()['method'],'large-wire-method',timeout=30)
         self.agent.events(timeout=0)  # Actual heartbeat after large Markdown IO.
         state=self.browser('state',timeout=30)
         compact=json.dumps(state,ensure_ascii=False,separators=(',',':')).encode()
@@ -152,7 +167,7 @@ class AgentLaunchTests(unittest.TestCase):
         self.assertEqual(state['accepted']['capture'],capture)
         self.assertEqual(state['revision'],accepted['revision'])
         self.assertEqual(state['agent_status'],'connected')
-        self.assertTrue(state['proposal_sources']['shape']['available'])
+        self.assertTrue(state['proposal_sources']['discovery']['available'])
         item=next(item for item in state['proposals'] if item['proposal_id']==reply['evidence']['proposal_id'])
         self.assertTrue(item['stale']);self.assertFalse(item['acceptance_eligible'])
         self.assertFalse(item['content_omitted']);self.assertEqual(item['proposal'],proposal)
@@ -183,12 +198,12 @@ class AgentLaunchTests(unittest.TestCase):
         # Redesign R1a: the agent writes agreed fields; the page applies them; the human accepts.
         correlation=self.enqueue()
         before=self.browser('state')
-        result=self.agent.fill(dict(correlation,fields={'outcome':'Agreed in the terminal','assumptions':['A stated risk']}))
+        result=self.agent.fill(dict(correlation,fields={'problem':'Agreed in the terminal','challenges':[{'challenge':'A stated risk','response':'Checked'}]}))
         self.assertEqual((result['fill_sequence'],result['write_state']),(1,'not_applied'))
         state=self.browser('state')
         talk=state['conversation']
-        self.assertEqual((talk['request_id'],talk['operation'],talk['idea_id']),(correlation['request_id'],'shape',self.idea_id))
-        self.assertEqual(talk['fills'],[dict(sequence=1,fields={'outcome':'Agreed in the terminal','assumptions':['A stated risk']})])
+        self.assertEqual((talk['request_id'],talk['operation'],talk['idea_id']),(correlation['request_id'],'discovery',self.idea_id))
+        self.assertEqual(talk['fills'],[dict(sequence=1,fields={'problem':'Agreed in the terminal','challenges':[{'challenge':'A stated risk','response':'Checked'}]})])
         self.assertEqual((state['revision'],state['draft_version'],state['drafts']),(before['revision'],before['draft_version'],before['drafts']),
                          'a fill never writes the draft or the idea')
         # A field the human owns, or a malformed one, is refused with its own code.
@@ -196,15 +211,15 @@ class AgentLaunchTests(unittest.TestCase):
             self.agent.fill(dict(correlation,fields={'selection':'bounded-plan'}))
         self.assertEqual(caught.exception.code,'invalid_fill')
         # The draft the page saves after applying a fill does not close the conversation.
-        self.draft('shape',{'outcome':'Agreed in the terminal'},request='draft-after-fill')
-        self.assertEqual(self.agent.fill(dict(correlation,fields={'next_slice':'Smallest next step'}))['fill_sequence'],2)
+        self.draft('discovery',{'problem':'Agreed in the terminal'},request='draft-after-fill')
+        self.assertEqual(self.agent.fill(dict(correlation,fields={'workaround':'Smallest next step'}))['fill_sequence'],2)
         self.assertEqual(len(self.browser('state')['conversation']['fills']),2)
         # Once the idea moves to a new accepted revision, that conversation never reaches the page again.
-        self.accept_fields('priorities',{'urgency':6,'importance':7},'accept-after-fill')
+        self.accept_fields('priorities',{'urgency':5,'importance':7},'accept-after-fill')
         self.assertIsNone(self.browser('state')['conversation'])
         # Review fill-r1: a fill for a revision the idea moved past is refused and renews nothing.
         with self.assertRaises(AgentClientError) as caught:
-            self.agent.fill(dict(correlation,fields={'outcome':'Too late'}))
+            self.agent.fill(dict(correlation,fields={'problem':'Too late'}))
         self.assertEqual(caught.exception.code,'stale_source')
 
     def raw_get(self,path,headers):
@@ -312,7 +327,7 @@ class AgentLaunchTests(unittest.TestCase):
         worker.join(3);self.assertFalse(worker.is_alive());self.assertEqual(results[0]['events'],[])
         self.agent.session_close()
         state=self.browser('state');self.assertEqual(state['agent_status'],'disconnected')
-        self.assertEqual(state['drafts']['shape'],{'outcome':'Edited buffer'})
+        self.assertEqual(state['drafts']['discovery'],{'problem':'Edited buffer'})
 
     def test_shutdown_wakes_wait_before_runtime_unlock_and_credentials_getter_is_serialized(self):
         credentials=self.owner.policy.agent_credentials(self.opened['binding_id'])
@@ -350,7 +365,7 @@ class AgentLaunchTests(unittest.TestCase):
     def install_test_handlers(self):
         # Explicit test-only validators qualify provider wiring; no claim about
         # packaged J7 handlers or browser controllers follows from this fixture.
-        self.owner.handlers.update({step:TrustedStepHandler(lambda *args:None) for step in ('shape','method')})
+        self.owner.handlers.update({step:TrustedStepHandler(lambda *args:None) for step in ('method','discovery','exploration')})
         self.opened=self.client.open_binding('resume',self.opened['binding_id']);self.pair()
         self.agent=AgentClient(self.client,self.opened['session_id'])
 
@@ -370,37 +385,38 @@ class AgentLaunchTests(unittest.TestCase):
         payload={k:v for k,v in event.items() if k not in ('data','sequence')}
         return self.agent.respond(dict(payload,proposal=proposal))
 
-    def accept_test_shape(self):
+    def accept_test_priorities(self):
         self.accept_fields('priorities',fields()['priorities'],'accepted-priorities')
-        self.accept_fields('shape',fields()['shape'],'accepted-shape')
 
-    def test_edited_shape_autosave_accepts_current_draft_and_records_proposal_receipt(self):
-        self.install_test_handlers()
-        self.accept_fields('priorities',fields()['priorities'],'accepted-priorities')
-        reply=self.operation_reply('shape',fields()['shape'],'edited-shape-proposal')
+    def test_edited_discovery_autosave_accepts_current_draft_and_records_proposal_receipt(self):
+        self.ready()
+        reply=self.operation_reply('discovery',fields()['discovery'],'edited-discovery-proposal')
         proposal=reply['evidence']['proposal_id']
-        edited=dict(fields()['shape'],outcome='Human edited outcome',next_slice='Human edited next slice')
-        self.draft('shape',edited,'edited-shape-buffer')
-        accepted=self.accept_fields('shape',edited,'edited-shape-accept',proposal)
+        edited=dict(fields()['discovery'],problem='Human edited problem',evidence='Human edited evidence')
+        self.draft('discovery',edited,'edited-discovery-buffer')
+        accepted=self.accept_fields('discovery',edited,'edited-discovery-accept',proposal)
         self.assertEqual(accepted['proposal_id'],proposal)
         state=self.browser('state')
-        self.assertEqual(state['accepted']['shape'],edited)
-        self.assertEqual(state['steps']['shape']['status'],'saved')
-        receipt=self.browser('requests/edited-shape-accept')
+        self.assertEqual(state['accepted']['discovery'],edited)
+        self.assertEqual(state['steps']['discovery']['status'],'saved')
+        receipt=self.browser('requests/edited-discovery-accept')
         self.assertEqual(receipt,accepted)
 
-    def test_human_method_differs_from_recommendation_with_grounded_memory_and_resume_generation(self):
-        self.install_test_handlers();self.accept_test_shape()
-        memory=dict(status='found',sources=['decision:fixture-choice'],rationale='Fixture reports a found preference')
+    def test_human_method_differs_from_preference_with_grounded_memory_and_resume_generation(self):
+        # v3 (R8): the agent only reports memory; the human alone selects the method, and may differ from
+        # the preference the memory found.
+        self.install_test_handlers();self.accept_test_priorities()
+        memory=dict(status='found',sources=['decision:fixture-choice'],rationale='Fixture reports a found preference',
+                    preferred_method='bounded-plan')
         self.operation_reply('memory',memory,'memory-found')
         self.draft('method',{'memory':memory},'memory-method-buffer')
-        recommendation=dict(fields()['method'],memory=memory)
-        reply=self.operation_reply('method',recommendation,'method-recommendation')
-        chosen=dict(recommendation,selection='adaptive-slices',reason='Human chose adaptive delivery')
+        chosen=dict(fields()['method'],memory=memory,selection='adaptive-slices',reason='Human chose adaptive delivery')
         self.draft('method',chosen,'human-method-buffer')
-        accepted=self.accept_fields('method',chosen,'human-method-accept',reply['evidence']['proposal_id'])
-        self.assertEqual(accepted['proposal_id'],reply['evidence']['proposal_id'])
+        # Grounded by the connected agent's own memory evidence (no linked Method proposal here).
+        accepted=self.accept_fields('method',chosen,'human-method-accept')
+        self.assertNotIn('proposal_id',accepted)
         state=self.browser('state');self.assertEqual(state['accepted']['method']['selection'],'adaptive-slices')
+        self.assertNotEqual(state['accepted']['method']['selection'],memory['preferred_method'])
         self.assertEqual(state['accepted']['method']['memory'],memory)
         previous=state['agent_generation']
         self.opened=self.client.open_binding('resume',self.opened['binding_id']);self.pair()
@@ -408,10 +424,22 @@ class AgentLaunchTests(unittest.TestCase):
         self.assertNotEqual(resumed['agent_generation'],previous)
         self.assertEqual(resumed['agent_status'],'connected')
 
+    def test_memory_only_method_proposal_is_projected_to_the_page(self):
+        self.install_test_handlers();self.accept_test_priorities()
+        memory=dict(status='varied',sources=[],rationale=None,preferred_method=None)
+        self.operation_reply('method',{'memory':memory},'method-memory-proposal')
+        state=self.browser('state')
+        self.assertEqual(state['proposals'][0]['proposal'],{'memory':memory})
+
+    def forged_memories(self):
+        for status,refs,preferred in (('found',['note:unverified'],'bounded-plan'),('varied',[],None),
+                                      ('searched_no_preference',[],None)):
+            yield status,dict(fields()['method'],memory=dict(status=status,sources=refs,rationale='Unverified claim',
+                                                              preferred_method=preferred))
+
     def test_forged_memory_refused_and_disconnected_manual_unavailable_accepts(self):
-        self.install_test_handlers();self.accept_test_shape()
-        for status,refs in (('found',['note:unverified']),('searched_no_preference',[])):
-            forged=dict(fields()['method'],memory=dict(status=status,sources=refs,rationale='Unverified claim'))
+        self.install_test_handlers();self.accept_test_priorities()
+        for status,forged in self.forged_memories():
             error=self.accept_fields('method',forged,'forged-'+status,ok=False)
             self.assertEqual(error['code'],'memory_provenance_missing')
         self.agent.session_close()
@@ -421,13 +449,87 @@ class AgentLaunchTests(unittest.TestCase):
         self.assertFalse(state['capabilities']['memory'])
         self.assertEqual(state['accepted']['method']['memory']['status'],'unavailable')
 
+    NOPREF=dict(status='searched_no_preference',sources=[],rationale='No saved preference found',preferred_method=None)
+    FOUND=dict(status='found',sources=['decision:fixture-choice'],rationale='Fixture found preference',preferred_method='bounded-plan')
+    VARIED=dict(status='varied',sources=[],rationale=None,preferred_method=None)
+
+    def method_request(self,request):
+        """The page's own Methods request, delivered to the connected agent; returns its correlation."""
+        state=self.browser('state');source=state['proposal_sources']['method']['source']
+        self.browser('propose',dict(request_id=request,idea_id=self.idea_id,expected_revision=source['accepted_revision'],
+            expected_draft_version=source['draft_version'],operation='method',source_digest=source['source_digest']))
+        event=self.agent.events(timeout=0)['events'][0]
+        return {k:v for k,v in event.items() if k not in ('data','sequence')}
+
+    def method_fields(self,memory):
+        return dict(fields()['method'],memory=memory)
+
+    def fill_only_accepts(self,memory):
+        # The documented protocol answers a Methods request with a memory fill only; Accept must honour it.
+        self.install_test_handlers();self.accept_test_priorities()
+        correlation=self.method_request('method-fill')
+        self.agent.fill(dict(correlation,fields={'memory':memory}))
+        accepted=self.accept_fields('method',self.method_fields(memory),'fill-accept')
+        self.assertEqual(accepted['write_state'],'applied')
+        self.assertEqual(self.browser('state')['accepted']['method']['memory'],memory)
+
+    def test_fill_only_searched_no_preference_accepts(self):self.fill_only_accepts(self.NOPREF)
+    def test_fill_only_found_with_preferred_method_accepts(self):self.fill_only_accepts(self.FOUND)
+    def test_fill_only_varied_accepts(self):self.fill_only_accepts(self.VARIED)
+
+    def test_fill_memory_a_then_accept_memory_b_is_refused_and_last_fill_wins(self):
+        self.install_test_handlers();self.accept_test_priorities()
+        correlation=self.method_request('method-ab')
+        self.agent.fill(dict(correlation,fields={'memory':self.NOPREF}))
+        for request,memory in (('b-found',self.FOUND),('b-varied',self.VARIED),
+                               ('b-other-rationale',dict(self.NOPREF,rationale='Different words'))):
+            error=self.accept_fields('method',self.method_fields(memory),request,ok=False)
+            self.assertEqual(error['code'],'memory_provenance_missing')
+        self.agent.fill(dict(correlation,fields={'memory':self.FOUND}))
+        error=self.accept_fields('method',self.method_fields(self.NOPREF),'first-fill-superseded',ok=False)
+        self.assertEqual(error['code'],'memory_provenance_missing')
+        self.assertEqual(self.accept_fields('method',self.method_fields(self.FOUND),'last-fill')['write_state'],'applied')
+
+    def test_fill_from_an_earlier_generation_or_stale_revision_is_refused(self):
+        self.install_test_handlers();self.accept_test_priorities()
+        correlation=self.method_request('method-old-gen')
+        self.agent.fill(dict(correlation,fields={'memory':self.NOPREF}))
+        previous=self.browser('state')['agent_generation']
+        self.opened=self.client.open_binding('resume',self.opened['binding_id']);self.pair()
+        self.assertNotEqual(self.browser('state')['agent_generation'],previous)
+        error=self.accept_fields('method',self.method_fields(self.NOPREF),'old-generation',ok=False)
+        self.assertEqual(error['code'],'memory_provenance_missing')
+        self.agent=AgentClient(self.client,self.opened['session_id'])
+        correlation=self.method_request('method-stale-rev')
+        self.agent.fill(dict(correlation,fields={'memory':self.NOPREF}))
+        self.accept_fields('priorities',dict(fields()['priorities'],urgency=2),'move-revision')
+        error=self.accept_fields('method',self.method_fields(self.NOPREF),'stale-revision',ok=False)
+        self.assertEqual(error['code'],'memory_provenance_missing')
+
+    def test_fill_does_not_survive_the_request_being_released_or_expiring(self):
+        self.install_test_handlers();self.accept_test_priorities()
+        correlation=self.method_request('method-released')
+        self.agent.fill(dict(correlation,fields={'memory':self.NOPREF}))
+        state=self.browser('state')
+        self.assertEqual(self.owner.broker.release_request(self.opened['binding_id'],state['agent_generation'],self.idea_id,'method'),1)
+        error=self.accept_fields('method',self.method_fields(self.NOPREF),'after-release',ok=False)
+        self.assertEqual(error['code'],'memory_provenance_missing')
+
+    def test_fill_does_not_survive_the_answer_window_expiring(self):
+        self.install_test_handlers();self.accept_test_priorities()
+        correlation=self.method_request('method-expired')
+        self.agent.fill(dict(correlation,fields={'memory':self.NOPREF}))
+        future=time.monotonic()+601
+        self.owner.broker.clock=lambda:future
+        error=self.accept_fields('method',self.method_fields(self.NOPREF),'after-expiry',ok=False,expected_status=503)
+        self.assertEqual(error['code'],'agent_unavailable')
+
     def test_absent_live_context_refuses_memory_claims_and_allows_manual_unavailable(self):
-        self.install_test_handlers();self.accept_test_shape()
+        self.install_test_handlers();self.accept_test_priorities()
         # Test-only provider context represents no authenticated live incarnation.
         # The actual HTTP Service/provider/Store acceptance path still executes.
         self.owner.agent_provider.context=lambda context:None
-        for status,refs in (('found',['note:unverified']),('searched_no_preference',[])):
-            forged=dict(fields()['method'],memory=dict(status=status,sources=refs,rationale='Unverified claim'))
+        for status,forged in self.forged_memories():
             error=self.accept_fields('method',forged,'absent-live-'+status,ok=False,expected_status=503)
             self.assertEqual(error['code'],'agent_unavailable')
         result=self.accept_fields('method',fields()['method'],'absent-live-unavailable')

@@ -25,7 +25,7 @@ class CliServiceTests(unittest.TestCase):
         self.script=SCRIPTS/'idea.py';self.workspace=self.directory/'workspace';self.workspace.mkdir()
         self.store=Store(self.root);self.sid=self.store.create_session()
         self.context=TrustedContext('bound-browser',self.sid)
-        self.browser=Service(self.store,{},self.context,handlers={'shape':TrustedStepHandler(lambda *args:None)})
+        self.browser=Service(self.store,{},self.context,handlers={step:TrustedStepHandler(lambda *args:None) for step in ('method','discovery','exploration')})
         self.sequence=0
 
     def file(self,data,suffix='.json'):
@@ -46,7 +46,7 @@ class CliServiceTests(unittest.TestCase):
         state=self.browser.state()
         return self.browser.accept(dict(request_id=key,idea_id=state['idea_id'],expected_revision=state['revision'],expected_draft_version=state['draft_version'],step=step,fields=answer,proposal_id=None,expected_backlog_revision=None))
 
-    def shape(self):return dict(fields()['shape'],method='bounded-plan',method_reason='Bounded fixture')
+    def exploration(self):return dict(fields()['exploration'],outcome='Bounded fixture')
 
     def assessment(self):return dict(method='wsjf',version='1',inputs=dict(value=8,time_criticality=4,enablement=2,effort=2),basis='Fixture',assumptions=[],confidence='low',provenance='Fixture discussion')
 
@@ -70,18 +70,22 @@ class CliServiceTests(unittest.TestCase):
         self.assertEqual(accepted['revision'],4);self.assertEqual(self.browser.state()['steps']['priorities']['status'],'saved')
         self.assertEqual(self.cli('show',key)['idea']['ratings']['actor'],'bound-browser')
 
-    def test_cli_shape_review_drafts_do_not_fabricate_method_acceptance(self):
+    def test_cli_exploration_review_drafts_do_not_fabricate_method_or_discovery_acceptance(self):
+        # J2a-owned: the CLI verb `exploration` replaces `shape` in CP2.
         captured=self.browser_capture();key=captured['idea_id']
-        self.accept('priorities',dict(urgency=7,importance=8),'priorities')
-        self.accept('shape',fields()['shape'],'shape')
-        revised=self.shape();revised['outcome']='New CLI outcome'
-        result=self.cli('shape',key,'--expected-revision',3,'--file',self.file(revised),'--actor','cli-operator')['idea']
-        self.assertEqual(result['revision'],4)
-        self.assertEqual(result['workflow']['drafts']['shape']['outcome'],'New CLI outcome')
-        self.assertEqual(result['workflow']['drafts']['method']['selection'],'bounded-plan')
-        self.assertIsNone(result['workflow']['steps']['method']['acceptance'])
-        self.assertIn('shape',result['workflow']['steps']['shape']['invalidated_by'])
-        self.assertEqual(self.browser.state()['accepted']['shape']['outcome'],fields()['shape']['outcome'])
+        for step in ('priorities','method','discovery'):self.accept(step,fields()[step],step)
+        self.accept('exploration',fields()['exploration'],'exploration')
+        revised=self.exploration();revised['outcome']='New CLI outcome'
+        result=self.cli('exploration',key,'--expected-revision',5,'--file',self.file(revised),'--actor','cli-operator')['idea']
+        self.assertEqual(result['revision'],6)
+        self.assertEqual(result['workflow']['drafts']['exploration']['outcome'],'New CLI outcome')
+        self.assertNotIn('shape',result['workflow']['steps'])
+        # The CLI drafts only Exploration: the accepted Method and Discovery receipts stay as they were.
+        for step in ('method','discovery'):
+            self.assertIsNotNone(result['workflow']['steps'][step]['acceptance'])
+            self.assertNotIn(step,result['workflow']['drafts'])
+        self.assertIn('exploration',result['workflow']['steps']['exploration']['invalidated_by'])
+        self.assertEqual(self.browser.state()['accepted']['exploration']['outcome'],fields()['exploration']['outcome'])
 
     def test_conflicting_browser_draft_refuses_cli_without_file_changes(self):
         key=self.browser_capture()['idea_id'];self.accept('priorities',dict(urgency=7,importance=8),'priorities')
@@ -108,7 +112,7 @@ class CliServiceTests(unittest.TestCase):
     def test_legacy_complete_cycle_preserves_flags_results_plan_and_execution(self):
         captured=self.cli('capture','--text-file',self.file('Exact words\n','.txt'),'--actor','legacy')['idea'];key=captured['idea_id']
         self.assertNotIn('workflow',captured)
-        current=self.cli('shape',key,'--expected-revision',1,'--file',self.file(self.shape()),'--actor','legacy')['idea']
+        current=self.cli('exploration',key,'--expected-revision',1,'--file',self.file(self.exploration()),'--actor','legacy')['idea']
         current=self.cli('rate',key,'--expected-revision',2,'--urgency',7,'--importance',9,'--actor','legacy')['idea']
         current=self.cli('assess',key,'--expected-revision',3,'--file',self.file(self.assessment()),'--actor','legacy')['idea']
         self.assertEqual(current['revision'],4);self.assertNotIn('workflow',current)
@@ -166,9 +170,11 @@ class CliServiceTests(unittest.TestCase):
         self.assertEqual((self.root/'history'/key/('r'+str(value['revision'])+'.md')).read_bytes(),history)
         self.assertEqual(len(shown['plans']),1);self.assertEqual(shown['status'],'archived')
         self.assertFalse((self.root/'history'/key/('r'+str(value['revision']+1)+'.md')).exists())
-        next_slice=self.cli('shape',key,'--expected-revision',value['revision'],'--file',self.file(shown['shape']),'--actor','operator')['idea']
+        # J2a-owned: an archived idea reopens on Exploration through the CLI `exploration` verb.
+        next_slice=self.cli('exploration',key,'--expected-revision',value['revision'],'--file',self.file(shown['workflow']['steps']['exploration']['fields']),'--actor','operator')['idea']
         self.assertEqual(next_slice['status'],'active')
-        self.assertIn('shape',next_slice['workflow']['steps']['shape']['invalidated_by'])
+        self.assertEqual(next_slice['workflow']['current_step'],'exploration')
+        self.assertIn('exploration',next_slice['workflow']['steps']['exploration']['invalidated_by'])
         self.assertEqual(next_slice['plans'],shown['plans'])
 
     def test_installed_config_relative_store_and_fixed_plan_validator_are_preserved(self):
@@ -181,7 +187,7 @@ class CliServiceTests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stdout)
         configured=json.loads(result.stdout)['idea']['idea_id'];self.assertTrue((package.parent/'durable-ideas'/(configured+'.md')).exists())
         key=self.cli('capture','--text-file',self.file('plan words','.txt'),'--actor','operator')['idea']['idea_id']
-        self.cli('shape',key,'--expected-revision',1,'--file',self.file(self.shape()),'--actor','operator')
+        self.cli('exploration',key,'--expected-revision',1,'--file',self.file(self.exploration()),'--actor','operator')
         self.cli('rate',key,'--expected-revision',2,'--urgency',7,'--importance',8,'--actor','operator')
         self.cli('assess',key,'--expected-revision',3,'--file',self.file(self.assessment()),'--actor','operator')
         plan=self.file('# Plan\n\n## Goal\nGoal.\n\n## Tasks\nTask.\n\n## Validation\nTest.\n\n## Idea trace\nidea_id: '+key+'\nidea_revision: 4\n','.md')

@@ -18,7 +18,7 @@ from idea_sessions import SessionPolicy
 from idea_store import Store
 from idea_steps import TrustedRoute
 from idea_workflow import source_digest
-from test_agent_bridge import SHAPE
+from test_agent_bridge import EXPLORATION
 
 
 class TransportTests(unittest.TestCase):
@@ -113,11 +113,11 @@ class TransportTests(unittest.TestCase):
         self.capture()
         source = dict(accepted_revision=1, draft_version=0, data={'capture': {'raw_text': 'Original words'}})
         envelope = dict(request_id='proposal1', idea_id=self.idea_id, expected_revision=1,
-            expected_draft_version=0, operation='shape', source_digest=source_digest('shape', 1, source['data']))
+            expected_draft_version=0, operation='exploration', source_digest=source_digest('exploration', 1, source['data']))
         self.broker.enqueue(self.bid, self.credentials['generation'], envelope, source)
         status, batch, _ = self.http(self.events_path(), headers=self.agent_headers()); self.assertEqual(status, 200)
         event = batch['events'][0]
-        return dict({k:v for k,v in event.items() if k not in ('data', 'sequence')}, proposal=copy.deepcopy(SHAPE))
+        return dict({k:v for k,v in event.items() if k not in ('data', 'sequence')}, proposal=copy.deepcopy(EXPLORATION))
 
     def draft(self, request_id='draft'):
         return self.http('/api/v1/draft', dict(request_id=request_id, idea_id=self.idea_id,
@@ -265,7 +265,7 @@ class TransportTests(unittest.TestCase):
                 return self.broker.enqueue(self.bid, self.credentials['generation'], payload, source)
             self.server.routes['propose'] = TrustedRoute('propose', propose)
             payload = dict(request_id='over-capacity', idea_id=self.idea_id, expected_revision=1,
-                expected_draft_version=0, operation='shape', source_digest=source_digest('shape', 1, source['data']))
+                expected_draft_version=0, operation='exploration', source_digest=source_digest('exploration', 1, source['data']))
             status, error, _ = self.http('/api/v1/propose', payload, headers=self.browser_headers(True))
         self.assertEqual(status, 503)
         self.assertEqual(error['code'], 'request_capacity')

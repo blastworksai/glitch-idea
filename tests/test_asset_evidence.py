@@ -23,7 +23,8 @@ def fixture(kind='upload-intent'):
     if kind == 'design-set':
         source = {
             'capture': dict(revision=1, digest=workflow_digest('capture', 1, {'capture': {'raw_text': 'Original'}})),
-            'shape': dict(revision=3, digest=workflow_digest('shape', 3, {'shape': {'outcome': 'Clearer page'}})),
+            'discovery': dict(revision=2, digest=workflow_digest('discovery', 2, {'discovery': {'problem': 'Hard to clean'}})),
+            'exploration': dict(revision=3, digest=workflow_digest('exploration', 3, {'exploration': {'outcome': 'Clearer page'}})),
         }
         return dict(common, set_id=identifier('set', 4), session_id=identifier('session', 5), source=source, source_digest=codec.source_digest(source),
                     members=[dict(asset_id=identifier('asset', 3), name='Café 💡.png', type='image/png',
@@ -78,7 +79,7 @@ class AssetEvidenceTests(unittest.TestCase):
         record = fixture('design-set')
         checked = codec.validate_record(record)
         checked['members'][0]['name'] = 'Changed.png'
-        checked['source']['shape']['revision'] = 1
+        checked['source']['exploration']['revision'] = 1
         self.assertEqual(record, fixture('design-set'))
         raw = codec.encode_record(record)
         decoded = codec.decode_record(raw)
@@ -259,11 +260,12 @@ class AssetEvidenceTests(unittest.TestCase):
 
     def test_source_witness_is_exact_and_not_future_or_untyped(self):
         for mutate in (lambda s: s.pop('capture'), lambda s: s.update(method={}),
-                       lambda s: s['shape'].update(extra='bad'), lambda s: s['shape'].update(revision=True),
-                       lambda s: s['shape'].update(digest='A'*64)):
+                       lambda s: s['exploration'].update(extra='bad'), lambda s: s['exploration'].update(revision=True),
+                       lambda s: s['exploration'].update(digest='A'*64), lambda s: s.pop('discovery'),
+                       lambda s: s.update(shape=s['exploration'])):
             source = fixture('design-set')['source']; mutate(source)
             self.assert_refused(lambda: codec.source_digest(source))
-        record = fixture('design-set'); record['source']['shape']['revision'] = 4
+        record = fixture('design-set'); record['source']['exploration']['revision'] = 4
         record['source_digest'] = codec.source_digest(record['source'])
         self.assert_refused(lambda: codec.validate_record(record))
 

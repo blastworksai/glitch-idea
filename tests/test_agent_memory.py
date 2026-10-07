@@ -17,7 +17,8 @@ from test_workflow import accept, complete, fields
 
 KEY=complete()['idea_id']
 FOUND=dict(status='found',sources=['memory:preference-42','Memory/USER.md#planning'],
-           rationale='Recorded preference for bounded investment.')
+           rationale='Recorded preference for bounded investment.',preferred_method='bounded-plan')
+VARIED=dict(status='varied',sources=['memory:preference-42'],rationale='Past choices differed.',preferred_method=None)
 EMPTY=dict(status='searched_no_preference',sources=[],rationale='Bounded search found no preference.')
 UNAVAILABLE=dict(status='unavailable',sources=[],rationale=None)
 ERROR=dict(status='error',sources=[],rationale='Retrieval failed.')
@@ -31,7 +32,7 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(caught.exception.code,code)
 
     def test_four_statuses_preserve_actual_claim_and_detach(self):
-        for value in (FOUND,EMPTY,UNAVAILABLE,ERROR):
+        for value in (FOUND,VARIED,EMPTY,UNAVAILABLE,ERROR):
             before=copy.deepcopy(value)
             checked=memory.validate_result(value)
             self.assertEqual(checked,before)
@@ -50,7 +51,10 @@ class ResultTests(unittest.TestCase):
 
     def test_found_requires_references_and_rationale_unavailable_error_claim_none(self):
         for value in (dict(FOUND,sources=[]),dict(FOUND,rationale=None),dict(FOUND,rationale=''),
-            dict(UNAVAILABLE,sources=['memory:false']),dict(ERROR,sources=['memory:false'])):
+            dict(UNAVAILABLE,sources=['memory:false']),dict(ERROR,sources=['memory:false']),
+            {key:val for key,val in FOUND.items() if key!='preferred_method'},dict(FOUND,preferred_method=None),
+            dict(FOUND,preferred_method='not-a-method'),dict(VARIED,preferred_method='bounded-plan'),
+            dict(EMPTY,preferred_method='bounded-plan')):
             with self.assertRaises(IdeaError):memory.validate_result(value)
 
     def test_safe_reference_and_concise_result_limits(self):
@@ -69,18 +73,21 @@ class ResultTests(unittest.TestCase):
         output=memory.validate_proposal('memory',EMPTY)
         self.assertEqual(set(output),{'status','sources','rationale'})
         self.assertNotIn('selection',output)
-        proposed=fields()['method']; proposed.update(selection='experiment-led',
-            experiment=dict(question='What works?',evidence='One sample',success_criterion='Sample succeeds',stop_rule='Stop after sample'))
-        proposed['memory']=copy.deepcopy(EMPTY)
+        # R8: a method proposal is the memory result only; the agent never selects a method.
+        proposed={'memory':copy.deepcopy(EMPTY)}
         checked=memory.validate_proposal('method',proposed)
         self.assertEqual(checked,proposed)
         checked['memory']['sources'].append('memory:copy')
         self.assertEqual(proposed['memory'],EMPTY)
+        for extra in (dict(selection='experiment-led'),dict(reason='Because')):
+            with self.subTest(extra=extra),self.assertRaises(IdeaError):
+                memory.validate_proposal('method',dict(proposed,**extra))
 
     def test_broker_validation_enforces_safe_memory_inside_method(self):
-        proposed=fields()['method']; proposed['memory']=dict(FOUND,sources=['/absolute/private'])
+        proposed={'memory':dict(FOUND,sources=['/absolute/private'])}
         with self.assertRaises(IdeaError):memory.validate_proposal('method',proposed)
-        self.assertEqual(memory.validate_proposal('shape',fields()['shape']),fields()['shape'])
+        for step in ('discovery','exploration'):
+            self.assertEqual(memory.validate_proposal(step,fields()[step]),fields()[step])
         self.assert_code('operation_unavailable',lambda:memory.validate_proposal('position',{}))
 
 
@@ -101,7 +108,7 @@ class ProvenanceTests(unittest.TestCase):
             selected=source.prepare_source(state,KEY,operation)
             proposed=copy.deepcopy(value)
             if operation=='method':
-                proposed=fields()['method'];proposed['memory']=copy.deepcopy(value)
+                proposed={'memory':copy.deepcopy(value)}
             evidence=dict(binding_id=self.live['binding_id'],generation=self.live['generation'],
                 source=selected,proposal=proposed,correlation=dict(request_id=request,session_id=self.sid,
                     idea_id=KEY,operation=operation,accepted_revision=selected['accepted_revision'],
@@ -147,19 +154,20 @@ class ProvenanceTests(unittest.TestCase):
             changed=dict(FOUND,rationale='Invented new rationale')
             self.assert_code('memory_provenance_missing',lambda:self.validate(state,changed))
 
-    def test_changed_capture_or_shape_draft_is_not_current_memory_grounding(self):
+    def test_changed_capture_or_priorities_draft_is_not_current_memory_grounding(self):
         self.publish()
-        for step in ('capture','shape'):
+        for step,key,changed in (('capture','raw_text','Changed consumed input'),('priorities','urgency',1)):
             with self.store.transaction() as state:
                 idea=state['ideas'][KEY];value=fields()[step]
-                value['raw_text' if step=='capture' else 'next_slice']='Changed consumed input'
+                value[key]=changed
                 state['ideas'][KEY]=save_draft(idea,step,value,expected_revision=idea['revision'],expected_draft_version=0)['idea']
                 self.assert_code('not_ready',lambda:self.validate(state))
 
     def test_new_accepted_revision_refuses_but_keeps_original_evidence(self):
         link=self.publish()
         with self.store.transaction(write=True) as state:
-            state['ideas'][KEY]=accept(state['ideas'][KEY],'priorities',dict(urgency=9,importance=8))['idea']
+            # A step downstream of the method moves the accepted revision without touching memory's inputs.
+            state['ideas'][KEY]=accept(state['ideas'][KEY],'exploration',dict(fields()['exploration'],outcome='Revised outcome'))['idea']
             self.store.commit(state)
         with self.store.transaction() as state:
             self.assert_code('memory_provenance_missing',lambda:self.validate(state))

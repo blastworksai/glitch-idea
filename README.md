@@ -94,6 +94,7 @@ Supported keys, and only these:
 | `validator_timeout_seconds` | Integer from 1 to 120 (default 30). |
 | `runtime_root` | Absolute path of the owner-private runtime directory. No symlink components. |
 | `runtime_python` | Absolute path of the runtime interpreter. |
+| `default_workspace` | Optional `{"name": ..., "path": ...}`: an absolute, existing folder that capture prefills (the field stays editable). A configured folder that does not exist is an `invalid_config` error. |
 
 Unknown keys, a key present with `null` for `runtime_root` or `runtime_python` (omit the key instead), a relative or symlinked `runtime_root`, and over-limit values are refused with an error rather than quietly dropped.
 That validation happens when the installer runs: the helper itself reads only the keys it uses and ignores others, so after editing an installed `config.json` by hand, rerun the installer to validate it.
@@ -173,7 +174,7 @@ The helper returns JSON and a nonzero exit status for rejected requests.
 An explicit `--store /absolute/path` before the subcommand selects an isolated store for a demonstration or test.
 
 Invoke **`$glitch-idea`** (Codex) or **`/glitch-idea`** (Claude Code) in an agent session that has discovered the installed skill.
-The workflow saves the original text first, asks for urgency and importance independently, then helps shape and assess the idea.
+The workflow saves the original text first, asks for urgency and importance independently, then aligns the idea with you in your terminal (Methods, Discovery, Exploration, Visualize, Assess), the A of APIV before /glitch-plan.
 You can stop with an incomplete record and resume by its permanent ID.
 
 The [skill instructions](glitch-idea/SKILL.md), [command reference](glitch-idea/references/commands.md) and [method comparison](glitch-idea/references/methods.md) cover shaping, assessments, ordering, plans and recovery.
@@ -203,6 +204,15 @@ The full operator procedure, including upgrade, pause and resume, migration limi
 Actual `config.json` files, idea stores, execution evidence, environments and caches are ignored by version control.
 There is no built-in backup or network sync service; keep your own backup of the store and durable execution receipts.
 
+## Moving an idea into a project
+
+When a plan is registered for a different workspace, `register-plan` takes `--workspace-name` and `--workspace-path` (both or neither) and moves the idea's living detail file to `<workspace>/ideas/<idea_id>.md`.
+History, metadata and frozen plan evidence stay in the store, with an immutable pointer.
+A moved idea is read-only from glitch-idea; further slices happen in the project.
+`deliver idea_ID --ref TEXT` marks a moved idea delivered, once and permanently.
+The Ideas overview labels these rows "In progress" and "Delivered"; both are hidden by default and show counts.
+`doctor` reports a missing home file or workspace folder, because glitch-idea keeps no copy of it.
+
 ## Where the storage integration will live
 
 The storage and configuration integration in this package (`install.py`'s effective configuration and the helper's `configuration`) is intended to be relocated into the managed Glitch engine in a future engine rebuild.
@@ -217,6 +227,12 @@ python3 -m unittest discover -s tests -v
 Tests use temporary stores and install directories.
 They cover capture, scores, stale and conflicting writes, concurrent writers, plan validation, immutable evidence, recovery, the installer, the browser assets and a real package installation without private config.
 The external Glitch validator integration test skips with a stated reason unless a local `plan_validator_argv` is configured; all other tests run without Glitch.
+
+### Optional external dependency
+
+"Prototype Here" in the Visualize step uses Matt Pocock's `prototype` skill (MIT, https://github.com/mattpocock/skills).
+It is optional, lives in your own skill set, and is not bundled, fetched or installed by this package.
+Without it, the page tells you where to get it and the rest of the workflow is unaffected.
 
 ## License
 

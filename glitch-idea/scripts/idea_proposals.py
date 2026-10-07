@@ -36,10 +36,10 @@ import time
 
 from idea_domain import IdeaError, assessment as check_assessment
 from idea_assessment import assessment_digest, validate_assessment_proposal
-from idea_workflow import source_digest, validate_step_fields
+from idea_workflow import PROTOTYPE_SKILL, STEP_FIELDS, check_memory_preference, source_digest, validate_step_fields
 
 ROUTES = ()
-OPERATIONS = ('shape', 'memory', 'method', 'visual_brief', 'assessment', 'position')
+OPERATIONS = ('discovery', 'exploration', 'memory', 'method', 'visual_brief', 'assessment', 'position')
 CORRELATION = frozenset(('request_id', 'session_id', 'idea_id', 'accepted_revision',
                          'draft_version', 'operation', 'source_digest'))
 ENQUEUE = frozenset(('request_id', 'idea_id', 'expected_revision',
@@ -51,10 +51,14 @@ FILL_BYTES = 256 * 1024  # per request: the fill log also rides in every page st
 # Conversation fills: the fields an agent may write into the page as each is agreed with
 # the human in the terminal. Method selection, budgets and memory claims, and the actual
 # backlog position stay the human's (memory needs persisted evidence: use respond).
-FILL_STEPS = {'shape': 'shape', 'method': 'method', 'assessment': 'assess'}
-FILL_KEYS = {'shape': frozenset(('outcome', 'scope', 'scope_reason', 'alternatives', 'assumptions', 'next_slice', 'learning')),
-             'method': frozenset(('reason',)),
-             'assessment': frozenset(('assessment', 'proposed_position'))}
+FILL_STEPS = {'discovery': 'discovery', 'exploration': 'exploration', 'method': 'method', 'assessment': 'assess',
+              'visual_brief': 'visualize'}
+FILL_KEYS = {'discovery': STEP_FIELDS['discovery'],
+             'exploration': STEP_FIELDS['exploration'],
+             'method': frozenset(('memory',)),
+             'assessment': frozenset(('assessment', 'proposed_position')),
+             # The prototype road's design set only; accepting it (disposition, set pointer) stays the human's.
+             'visual_brief': frozenset(('source', 'assets'))}
 MAX_BINDINGS = 8
 HEARTBEAT = 35
 # Once an events wait has delivered a request, the agent has this long to answer it
@@ -123,10 +127,21 @@ def _default_digest(operation, value):
 
 def _default_proposal(operation, value):
     # Other codecs arrive in their own artifacts. Never infer their schemas.
-    _check(operation in ('shape', 'method', 'assessment'), 'operation_unavailable')
+    _check(operation in ('discovery', 'exploration', 'method', 'assessment', 'visual_brief'), 'operation_unavailable')
     try:
+        if operation == 'visual_brief':
+            # Only the prototype-skill signal travels; a closed enum, never free text.
+            _check(type(value) is dict and set(value) == {'prototype_skill'}
+                   and value['prototype_skill'] in PROTOTYPE_SKILL, 'invalid_proposal')
+            return dict(value)
         if operation == 'assessment':
             return validate_assessment_proposal(value)
+        if operation == 'method':
+            # R8: memory only, never a selection.
+            _check(type(value) is dict and set(value) == {'memory'}, 'invalid_proposal')
+            checked = validate_step_fields('method', value, partial=True)
+            check_memory_preference(checked['memory'])
+            return checked
         return validate_step_fields(operation, value)
     except IdeaError as exc:
         raise IdeaError('invalid_proposal', 'Proposal broker: invalid_proposal') from exc
@@ -138,8 +153,14 @@ def _default_fill(operation, fields):
     _check(type(fields) is dict and fields and set(fields) <= FILL_KEYS[operation]
            and all(value is not None for value in fields.values()), 'invalid_fill')
     try:
+        if operation == 'visual_brief':
+            _check(set(fields) == {'source', 'assets'} and fields['source'] == 'prototype'
+                   and type(fields['assets']) is list and len(fields['assets']) == 2, 'invalid_fill')
         if operation != 'assessment':
-            return validate_step_fields(FILL_STEPS[operation], fields, partial=True)
+            checked = validate_step_fields(FILL_STEPS[operation], fields, partial=True)
+            if operation == 'method':
+                check_memory_preference(checked['memory'])
+            return checked
         checked = {}
         if 'assessment' in fields:
             checked.update(validate_step_fields('assess', {'assessment': fields['assessment']}, partial=True))
@@ -153,7 +174,7 @@ def _default_fill(operation, fields):
 
 
 class Broker:
-    def __init__(self, *, validate_source, persist_proposal,
+    def __init__(self, *, validate_source, persist_proposal, reconcile_source=None,
                  validate_proposal=_default_proposal, source_digest_fn=_default_digest,
                  validate_fill=_default_fill, clock=time.monotonic):
         _check(all(callable(fn) for fn in (validate_source, persist_proposal,
@@ -161,6 +182,8 @@ class Broker:
         self.clock = clock
         self.validate_source = validate_source
         self.persist_proposal = persist_proposal
+        _check(reconcile_source is None or callable(reconcile_source))
+        self.reconcile_source = reconcile_source
         self.validate_fill = validate_fill
         self.validate_proposal = validate_proposal
         self.source_digest_fn = source_digest_fn
@@ -257,6 +280,39 @@ class Broker:
 
     close = cancel
 
+    def discard(self, binding_id):
+        """Owner discard of a whole binding: cancel its open requests, wake any waiting events call, free the slot."""
+        _id(binding_id, 'binding')
+        with self.condition:
+            entry = self.bindings.pop(binding_id, None)
+            if entry is not None:
+                self._retire(entry, 'invalidated')  # Notifies; a waiter's next recheck finds no binding and refuses.
+            return entry is not None
+
+    def release_request(self, binding_id, generation, idea_id, operation, reason='released'):
+        """Hand release: cancel one step's open, unanswered request; the binding stays usable.
+
+        Only a pending request with no pinned reply is cancelled (a reply being persisted
+        or awaiting reconciliation is final). The agent then sees request_cancelled for
+        that request id. Returns the number of requests cancelled; idempotent.
+        """
+        _id(idea_id, 'idea'); _check(type(operation) is str and operation in OPERATIONS)
+        with self.condition:
+            entry = self.bindings.get(binding_id)
+            if entry is None or entry['generation'] != generation:
+                return 0
+            self._expire(entry)
+            count = 0
+            for record in entry['requests'].values():
+                correlation = record['correlation']
+                if (record['state'] == 'pending' and record['response'] is None and
+                        (correlation['operation'], correlation['idea_id']) == (operation, idea_id)):
+                    self._release(entry, record, reason)
+                    count += 1
+            if count:
+                self.condition.notify_all()
+            return count
+
     def status(self, binding_id, generation):
         with self.condition:
             return self._status(self._entry(binding_id, generation))
@@ -288,13 +344,25 @@ class Broker:
         _check(digest == correlation['source_digest'], 'stale_source')
         return checked
 
-    def enqueue(self, binding_id, generation, envelope, source):
+    def _reconcile(self, record):
+        correlation, source = self._callback(self.reconcile_source, record['correlation'], record['source'],
+                                             record['fills'], record['base'])
+        source = _source(source)
+        _check(type(correlation) is dict and set(correlation) == CORRELATION and all(
+            correlation[k] == record['correlation'][k] for k in ('request_id', 'session_id', 'idea_id',
+                                                                 'accepted_revision', 'operation')))
+        _check(source['draft_version'] == correlation['draft_version'] and
+               type(correlation['draft_version']) is int)
+        self._checked_source(correlation, source)
+        return correlation, source
+
+    def enqueue(self, binding_id, generation, envelope, source, base=None):
         _bounded(envelope); envelope=copy.deepcopy(envelope); _exact(envelope, ENQUEUE)
         _id(envelope['request_id']); _id(envelope['idea_id'], 'idea')
         _integer(envelope['expected_revision'], 1); _integer(envelope['expected_draft_version'])
         _check(type(envelope['operation']) is str and envelope['operation'] in OPERATIONS)
         _check(type(envelope['source_digest']) is str and re.fullmatch(r'[0-9a-f]{64}', envelope['source_digest']) is not None)
-        source = _source(source)
+        source = _source(source); base = copy.deepcopy(base); _bounded(base)
         _check(source['accepted_revision'] == envelope['expected_revision'] and
                source['draft_version'] == envelope['expected_draft_version'], 'stale_source')
         fingerprint = _bounded(dict(envelope=envelope, source=source))
@@ -336,9 +404,13 @@ class Broker:
             self.sequence += 1
             entry['requests'][envelope['request_id']] = dict(state='pending', correlation=correlation,
                 source=source, event=event, fingerprint=fingerprint, result=result, response=None,
-                reserved=LIMIT//4, answer_until=None, fills=[], fill_bytes=0)
+                reserved=LIMIT//4, answer_until=None, fills=[], fill_bytes=0, base=base, rebased=None)
             entry['bytes'] += charge+LIMIT//4
             entry['activity'] = self.clock()
+            # A request nobody has polled yet has no answer window to hold the lease, and the one
+            # it just superseded may have held it for minutes: restart the lease so the agent gets
+            # a full HEARTBEAT to poll before a request it has never seen can be retired.
+            entry['heartbeat'] = entry['activity']
             self.condition.notify_all()
             return copy.deepcopy(result)
 
@@ -381,6 +453,24 @@ class Broker:
             self.condition.notify_all()
             return dict(ok=True, code='ok', request_id=payload['request_id'], operation=payload['operation'],
                         status='pending', write_state='not_applied', fill_sequence=sequence)
+
+    def open_request(self, binding_id, generation, request_id, idea_id, revision, operation):
+        """Refuse unless request_id is a delivered, still-open request of this operation for this idea and revision.
+
+        Read-only gate for the asset door: the same codes the fill path names, no lease renewed.
+        """
+        _id(request_id); _id(idea_id, 'idea'); _integer(revision, 1)
+        with self.condition:
+            entry = self._entry(binding_id, generation, True)
+            record = entry['requests'].get(request_id)
+            _check(record is not None, 'request_not_found')
+            correlation = record['correlation']
+            _check(correlation['operation'] == operation and correlation['idea_id'] == idea_id
+                   and correlation['accepted_revision'] == revision, 'response_mismatch')
+            _check(record['state'] == 'pending', 'request_cancelled' if record['state'] == 'cancelled' else
+                   'request_closed' if record['state'] == 'completed' else 'response_busy')
+            _check(record['response'] is None, 'response_busy')
+            _check(record['answer_until'] is not None, 'request_not_delivered')
 
     def conversation(self, binding_id, generation):
         """The delivered, open request and its fills, for the page; never renews a lease."""
@@ -461,13 +551,28 @@ class Broker:
                 try:
                     self._checked_source(record['correlation'], record['source'])
                 except IdeaError as exc:
-                    if exc.code == 'stale_source':
-                        with self.condition:
-                            if record['state']=='responding':
-                                # No sink attempt: keep request bookkeeping but
-                                # release its unused response reservation and fill log.
-                                self._release(entry, record, 'stale_source')
-                    raise
+                    rebased = None
+                    if exc.code == 'stale_source' and self.reconcile_source is not None and record['fills']:
+                        # The page saved this request's own fills as the draft, so the draft moved.
+                        # The callback's exact test: nothing but those recorded fills changed.
+                        try:
+                            rebased = self._reconcile(record)
+                        except IdeaError as inner:
+                            if inner.code != 'stale_source':
+                                raise
+                    if rebased is None:
+                        if exc.code == 'stale_source':
+                            with self.condition:
+                                if record['state']=='responding':
+                                    # No sink attempt: keep request bookkeeping but
+                                    # release its unused response reservation and fill log.
+                                    self._release(entry, record, 'stale_source')
+                        raise
+                    with self.condition:
+                        record['rebased'] = rebased
+            if record['rebased'] is not None:
+                # Evidence records the source the proposal was actually valid against.
+                evidence.update(correlation=record['rebased'][0], source=record['rebased'][1])
             with self.condition:
                 _check(self._entry(binding_id, generation, True) is entry and record['state']=='responding', 'request_cancelled')
             # Pin BEFORE a possibly committing sink, including failed/uncertain

@@ -1,4 +1,4 @@
-# Markdown authority format v2
+# Markdown authority format v2 (workflow v3)
 
 The codec, recoverable publication and core Markdown Store, external-edit
 import, legacy migration and the browser flow (Capture through Review) are
@@ -84,19 +84,19 @@ Status is `active` or `archived`. Origin has exactly `text`, `sha256`, `actor`,
 this immutable origin, separately from the unchanged legacy snapshot. Changing
 both origin text and its hash in detail still fails the history comparison.
 
-Current shape uses the existing nine-field domain schema and vocabulary.
+The `shape` key is retired: a new idea holds `null` there and the file edit contract refuses a change to it.
 Ratings require `urgency`, `importance` (integers 1–10) and `actor`; legacy
 `timestamp` is optional. Assessments require the existing seven input fields
 plus the computed `score`; legacy `assessment_id`, `actor`, `timestamp` metadata
 are optional. Nonfinite scores and a score inconsistent with the validator are
 refused. An unknown partial score remains null; Kano is categorical. Current
-workflow uses the separately validated v2 schema from `idea_workflow.py`,
+workflow uses the separately validated v3 schema from `idea_workflow.py` (eight steps: capture, priorities, method, discovery, exploration, visualize, assess, review, in the order that module derives),
 including its draft version, draft fields, accepted receipts and dependencies.
-Legacy ideas omit workflow; reading them invents no acceptance.
+Legacy ideas omit workflow; reading them invents no acceptance. An idea saved with an older workflow is refused with `unsupported_idea_version` and is captured again, never migrated.
 
 Revision `snapshot` has exactly the existing `revision`, `shape`, `ratings`,
 `assessments`, `actor`, `action`, `timestamp`. A workflow snapshot additionally
-has `schema_version: 2` and `workflow`; legacy snapshots retain their original
+has `schema_version: 3` and `workflow`; legacy snapshots retain their original
 shape. Bulk revisions are never embedded into current detail frontmatter.
 
 Plan links retain the domain `plan_id`, `idea_id`, `idea_revision`, absolute
@@ -133,12 +133,13 @@ between markers; it adds no newline to Notes. A note without a final newline
 therefore immediately precedes the closing marker. Do not normalize the whole
 file with universal-newline reading; pass bytes to the codec.
 
-The external-edit contract supports current shape inputs, the two human rating
+The generated detail summary (before Notes) shows three sections read from the accepted workflow fields: **Discovery** (the five answers and each challenge with its response), **Exploration** (desired result, routes, scope, next slice, the method's own inputs and the numbered sketch, each item with why-next, done-when and an optional inner method) and **Methods** (the chosen method by its human label, and the optional reason). Like the rest of the summary it is regenerated, and a hand edit to it is a `generated_body_conflict`. The four labels are Full Plan Up Front, Vertical Slicing (Agile), Fixed Budget, Build what Fits and Experiment First; the stored ids do not change.
+
+The external-edit contract supports the two human rating
 values, assessment inputs/reasoning, and source fields of already accepted
 workflow steps. It does not turn a file edit into browser acceptance. Imported
 workflow inputs require review; the observer is recorded, not an invented editor.
-Editing both a legacy field and its browser equivalent to contradictory values
-is a conflict. Assessment scores are derived from inputs, not manually assigned.
+Discovery, Exploration and Methods have no legacy twin: their accepted fields in the workflow are the only source, and an edit becomes a review draft. Assessment scores are derived from inputs, not manually assigned.
 
 Keep workflow drafts, navigation, counters, acceptance receipts and invalidation
 records under application control. Placement, visual-set and handoff references
@@ -295,6 +296,15 @@ only through verified before/after images; conflicting edits or missing stages
 are preserved and reported. The frozen JSON is evidence, not an automatic
 rollback over newer ideas. These checks do not claim protection against an
 editor deliberately rewriting or removing every related record together.
+
+## Moved and delivered ideas
+
+Registering a plan with a workspace moves only `<store>/<idea_id>.md` to `<workspace>/ideas/<idea_id>.md`.
+Revisions `history/<id>/rN.md`, metadata and frozen plan evidence stay in the store.
+The store writes an immutable pointer `history/<id>/moved.md` and an `IDEAS.md` extension `glitch_idea_moves`.
+`deliver` writes the immutable `history/<id>/delivered.md` and a `glitch_idea_delivered` index link; the reference is one line of 1 to 500 characters.
+A moved idea is read-only from glitch-idea, and no store file keeps a copy of the home file.
+`doctor` treats a missing home file or workspace folder as unhealthy and an edited home file as a notice; `repair-views` never writes outside the store.
 
 ## Recovery ownership
 

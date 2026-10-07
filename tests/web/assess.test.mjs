@@ -12,7 +12,8 @@ const copy=value=>structuredClone(value);
 const IDEA='idea_'+'1'.repeat(32),OTHER='idea_'+'2'.repeat(32),THIRD='idea_'+'3'.repeat(32);
 const SID='session_'+'4'.repeat(32),GEN='agent_'+'5'.repeat(32),PID='proposal_'+'6'.repeat(32),BINDING='binding_'+'7'.repeat(32);
 const CAPTURE={raw_text:'Fixture only',workspace:{name:'Explicit',path:'/fixture',confirmed:true}};
-const SHAPE={outcome:'Clear draft',scope:'small-change',scope_reason:'One field',alternatives:[{route:'Keep it',reason:'Simpler'}],assumptions:[],next_slice:'Check it',learning:[]};
+const DISCOVERY={problem:'Drafts are unclear',audience:'Owners',workaround:'Rewrite by hand',evidence:'Three complaints',kill_criteria:'Nobody asks again',challenges:[{challenge:'Is it real?',response:'Yes, seen twice'}]};
+const EXPLORATION={outcome:'Clear draft',alternatives:[{route:'Keep it',reason:'Simpler'}],assumptions:[],scope:'small-change',scope_reason:'One field',next_slice:'Check it',learning:[],investment:null,experiment:null,sketch:[{title:'Clear field',why_next:'Smallest step',done_when:'Field reads well',method:null}]};
 const rating={urgency:6,importance:7,actor:'Operator',timestamp:'fixture-only'};
 const assessment=()=>({method:'wsjf',version:'v1',inputs:{value:8,time_criticality:4,enablement:2,effort:2},basis:'Fixture evidence',assumptions:[],confidence:'low',provenance:'Current agent'});
 const proposal=()=>({assessment:assessment(),position:{proposed_position:1,actual_position:1,neighbors:{before:null,after:OTHER},override_reason:null}});
@@ -30,9 +31,9 @@ const element=(tag,text='',className='')=>new Node(tag,text,className);
 const button=(text,action,className='')=>{const node=element('button',text,className);node.type='button';node.addEventListener('click',action);return node;};
 function harness(storage=null){
   const state={ok:true,code:'ok',session_id:SID,idea_id:IDEA,idea_status:'active',revision:4,draft_version:0,backlog_revision:9,current_step:'assess',
-    steps:Object.fromEntries(STEPS.map(({key})=>[key,{status:['capture','priorities','shape','method','visualize'].includes(key)?'saved':key==='assess'?'current':'todo',
-      accepted_revision:['capture','priorities','shape','method','visualize'].includes(key)?4:null,evidence_id:['capture','priorities','shape','method','visualize'].includes(key)?'evidence-'+key:null}])),
-    accepted:{capture:copy(CAPTURE),priorities:{urgency:6,importance:7},shape:copy(SHAPE)},drafts:{},draft:null,
+    steps:Object.fromEntries(STEPS.map(({key})=>[key,{status:['capture','priorities','discovery','exploration','method','visualize'].includes(key)?'saved':key==='assess'?'current':'todo',
+      accepted_revision:['capture','priorities','discovery','exploration','method','visualize'].includes(key)?4:null,evidence_id:['capture','priorities','discovery','exploration','method','visualize'].includes(key)?'evidence-'+key:null}])),
+    accepted:{capture:copy(CAPTURE),priorities:{urgency:6,importance:7},discovery:copy(DISCOVERY),exploration:copy(EXPLORATION)},drafts:{},draft:null,
     agent_status:'connected',agent_generation:GEN,proposal_sources:{},proposals:[],human_ratings:copy(rating),assessment_summary:null,
     backlog_status:{available:true,code:'ok'},backlog:{revision:9,order:[IDEA,OTHER,THIRD],comparisons:[IDEA,OTHER,THIRD].map(idea_id=>
       ({idea_id,revision:idea_id===IDEA?4:1,status:'active',ratings:idea_id===IDEA?copy(rating):null,assessment:null}))}};
@@ -41,7 +42,7 @@ function harness(storage=null){
     const target=state.backlog?.comparisons.find(item=>item.idea_id===IDEA);
     if(target){target.revision=state.revision;target.ratings=copy(state.human_ratings);target.assessment=copy(state.assessment_summary);}
     state.proposal_sources.assessment=state.agent_status==='connected'&&state.backlog_status.available?{available:true,code:'ok',source:{accepted_revision:state.revision,draft_version:state.draft_version,
-      data:{steps:{capture:copy(CAPTURE),priorities:copy(state.accepted.priorities),shape:copy(SHAPE)},backlog:copy(state.backlog),target:copy(state.drafts.assess??state.accepted.assess??null)},source_digest:'a'.repeat(64)}}:
+      data:{steps:{capture:copy(CAPTURE),priorities:copy(state.accepted.priorities),discovery:copy(DISCOVERY),exploration:copy(EXPLORATION)},backlog:copy(state.backlog),target:copy(state.drafts.assess??state.accepted.assess??null)},source_digest:'a'.repeat(64)}}:
       {available:false,code:state.agent_status==='connected'?'source_too_large':'agent_unavailable',source:null};
     state.proposal_inventory={total:state.proposals.length,projected:state.proposals.length,omitted:0,content_omitted:state.proposals.filter(p=>p.content_omitted).length,index_path:IDEA+'.md'};
   };
@@ -107,7 +108,7 @@ test('archived valid Assess refuses acceptance and keeps current draft, readonly
   const fields=copy(h.flow.buffers.assess),writes=h.writes.length,backlog=copy(h.state.backlog),priorities=copy(h.state.human_ratings);
   h.state.idea_status='archived';h.sources();await h.flow.refreshAgent();
   assert.equal(h.get('assess-accept').disabled,true);assert.equal(h.get('assess-idea-status').role,'status');
-  assert.match(h.get('assess-idea-status').textContent,/explicitly redo and accept Shape/);assert.match(h.get('assess-idea-status').textContent,/Archived history is kept/);
+  assert.match(h.get('assess-idea-status').textContent,/explicitly redo and accept Exploration/);assert.match(h.get('assess-idea-status').textContent,/Archived history is kept/);
   await h.get('assess-accept').click();
   await h.get('assess-accept').listeners.click({target:h.get('assess-accept')});
   assert.equal(h.writes.length,writes);assert.equal(h.flow.pending,null);assert.equal(h.state.idea_status,'archived');

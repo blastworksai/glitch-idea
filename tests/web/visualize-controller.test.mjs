@@ -94,9 +94,9 @@ test('existing set uses identical top-level/fields pointer and null member selec
   assert.deepEqual(h.flow.buffers.visualize, fields('accepted_set', SET));
 });
 
-test('skip and not-applicable require explicit reasons and null pointers', async () => {
-  for (const disposition of ['skipped', 'not-applicable']) {
-    const h = harness(); h.flow.edit('visualize', fields(disposition, null, 'No useful design for this slice'));
+test('skip needs no reason, has null pointers, and not-applicable no longer exists', async () => {
+  for (const disposition of ['skipped']) {
+    const h = harness(); h.flow.edit('visualize', fields(disposition, null, null));
     assert.equal(await h.flow.saveVisualize(), true);
     assert.equal(h.writes[0].operation, 'visual-disposition');
     assert.equal(Object.hasOwn(h.writes[0].payload, 'asset_ids'), false);
@@ -104,7 +104,8 @@ test('skip and not-applicable require explicit reasons and null pointers', async
     assert.equal(h.flow.status('visualize'), disposition);
     assert.equal(h.flow.current, 'assess');
   }
-  for (const invalid of [fields('skipped', null, ' '), fields('not-applicable', SET, 'Reason'),
+  assert.equal(validVisualize(fields('skipped', null, null)), true);
+  for (const invalid of [fields('not-applicable', null, 'Reason'), fields('skipped', SET, 'Reason'),
       {...fields('skipped', null, 'Reason'), brief_evidence_id: 'evidence-invented'}]) assert.equal(validVisualize(invalid), false);
 });
 
@@ -181,8 +182,8 @@ test('Visualize foreign state never loads or changes the submitted idea scope', 
   assert.deepEqual(h.flow.buffers.visualize, fields()); assert.equal(h.writes.length, 1);
 });
 
-test('Visualize skip and N-A receipts with non-null design set stay uncertain', async () => {
-  for (const disposition of ['skipped', 'not-applicable']) {
+test('Visualize skip receipts with non-null design set stay uncertain', async () => {
+  for (const disposition of ['skipped']) {
     const h = harness(); h.faults.badReceipt = result => ({...result, design_set_id: SET});
     const submitted = fields(disposition, null, 'Explicit reason'); h.flow.edit('visualize', submitted);
     assert.equal(await h.flow.saveVisualize(), false);

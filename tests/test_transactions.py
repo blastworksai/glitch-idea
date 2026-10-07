@@ -409,4 +409,167 @@ class TransactionTests(unittest.TestCase):
         self.assertFalse((self.root/tx.JOURNAL).exists())
 
 
+MOVED = 'history/idea_' + '1' * 32 + '/moved.md'
+
+
+def moved_pointer(detail=b'detail before'):
+    """A valid moved pointer for IDEA recording the exact bytes being removed."""
+    import idea_markdown as md
+    from idea_domain import snapshot
+    key = IDEA[:-3]
+    words = 'idea words'
+    value = dict(idea_id=key, revision=1, status='archived', origin=dict(text=words, sha256=digest(words.encode()), actor='a', timestamp='t'),
+                 shape=None, ratings=None, assessments=[], proposals=[], executions=[],
+                 plans=[dict(plan_id='plan_' + '3' * 32, idea_id=key, idea_revision=1, path='/s/p.md', source_path='/w/p.md',
+                             sha256='a' * 64, actor='a', timestamp='t', validation={})])
+    return md.encode_moved(key, idea_revision=1, plan_id='plan_' + '3' * 32, workspace=dict(name='W', path='/w'),
+                           home_path='/w/ideas/' + IDEA, moved_sha256=digest(detail), actor='a', timestamp='t',
+                           frozen=dict(idea=value, extensions={}))
+
+
+class MoveOutManifestTests(TransactionTests):
+    """move-out removes one idea detail file, only beside its own pointer and the index."""
+
+    def move_changes(self, pointer=None):
+        return {MOVED: moved_pointer() if pointer is None else pointer, 'IDEAS.md': b'index after'}
+
+    def move_expected(self):
+        return {MOVED: None, 'IDEAS.md': digest(b'index before')}
+
+    def move(self, **kwargs):
+        return self.publish(self.move_changes(), self.move_expected(), move_out=IDEA, **kwargs)
+
+    def stop_move_at(self, phase):
+        def callback(actual):
+            if actual == phase:
+                raise Stop(actual)
+        with self.assertRaises(Stop):
+            self.move(_checkpoint=callback)
+
+    def test_move_out_publishes_pointer_and_index_before_removing_the_detail_file(self):
+        phases = []
+        self.move(_checkpoint=phases.append).raise_for_error()
+        published = [p for p in phases if p.startswith('published:')]
+        self.assertEqual(published[-2:], ['published:IDEAS.md', 'published:' + IDEA])
+        self.assertFalse((self.root / IDEA).exists())
+        self.assertEqual((self.root / 'IDEAS.md').read_bytes(), b'index after')
+        self.assertEqual((self.root / MOVED).read_bytes(), moved_pointer())
+        self.assertEqual(os.listdir(self.root / tx.JOURNAL), [])
+
+    def test_crash_at_every_checkpoint_recovers_to_before_or_fully_moved(self):
+        phases = []
+        self.move(_checkpoint=phases.append).raise_for_error()
+        self.assertGreater(len(phases), 8)
+        for crash, phase in enumerate(phases):
+            with self.subTest(phase=phase):
+                self.setUp()
+                for leftover in (self.root / MOVED, ):
+                    if leftover.exists():
+                        leftover.unlink()
+                seen = []
+                def callback(actual):
+                    seen.append(actual)
+                    if len(seen) == crash + 1:
+                        raise Stop(actual)
+                with self.assertRaises(Stop):
+                    self.move(_checkpoint=callback)
+                self.recover().raise_for_error()
+                moved = not (self.root / IDEA).exists()
+                # Reaching 'prepared' commits the transaction; earlier never moved.
+                self.assertEqual(moved, phases.index('prepared') <= crash)
+                if moved:
+                    self.assertEqual((self.root / 'IDEAS.md').read_bytes(), b'index after')
+                    self.assertEqual((self.root / MOVED).read_bytes(), moved_pointer())
+                else:
+                    self.assertEqual((self.root / IDEA).read_bytes(), b'detail before')
+                    self.assertEqual((self.root / 'IDEAS.md').read_bytes(), b'index before')
+                    self.assertFalse((self.root / MOVED).exists())
+                self.assertEqual(os.listdir(self.root / tx.JOURNAL), [])
+
+    def test_publish_refuses_move_out_without_pointer_index_or_matching_hash(self):
+        for changes, expected, move_out in (
+                ({'IDEAS.md': b'index after'}, {'IDEAS.md': digest(b'index before')}, IDEA),
+                ({MOVED: moved_pointer(b'other bytes'), 'IDEAS.md': b'index after'}, self.move_expected(), IDEA),
+                ({MOVED: b'not a pointer', 'IDEAS.md': b'index after'}, self.move_expected(), IDEA),
+                (self.move_changes(), self.move_expected(), 'IDEAS.md'),
+                (self.move_changes(), self.move_expected(), 'history/idea_' + '1' * 32 + '/r1.md'),
+                (self.move_changes(), self.move_expected(), 'idea_bad.md'),
+                (dict(self.move_changes(), **{IDEA: b'x'}), dict(self.move_expected(), **{IDEA: digest(b'detail before')}), IDEA),
+                ({MOVED: moved_pointer()}, {MOVED: None}, IDEA)):
+            with self.subTest(move_out=move_out, paths=sorted(changes)):
+                with self.assertRaises(IdeaError):
+                    self.publish(changes, expected, move_out=move_out)
+        self.assertEqual((self.root / IDEA).read_bytes(), b'detail before')
+        self.assertFalse((self.root / tx.JOURNAL).exists())
+
+    def test_move_out_is_refused_with_migration(self):
+        legacy = b'legacy'
+        (self.root / 'state.json').write_bytes(legacy)
+        changes = dict(self.move_changes(), **{tx.FROZEN: legacy, tx.RECEIPT: b'r'})
+        expected = dict(self.move_expected(), **{tx.FROZEN: None, tx.RECEIPT: None})
+        with self.assertRaises(IdeaError):
+            self.publish(changes, expected, freeze_legacy=True, legacy_sha256=digest(legacy), move_out=IDEA)
+
+    def test_prepared_manifest_rules_refuse_every_other_deletion(self):
+        self.stop_move_at('prepared')
+        path, original = self.manifest()
+        def entry(value, name):
+            return next(e for e in value['entries'] if e['path'] == name)
+        def drop_pointer(m):
+            m['entries'] = [e for e in m['entries'] if e['path'] != MOVED]
+        def drop_index(m):
+            m['entries'] = [e for e in m['entries'] if e['path'] != 'IDEAS.md']
+        def second_move(m):
+            extra = copy.deepcopy(entry(m, IDEA))
+            extra['path'] = 'idea_' + '2' * 32 + '.md'
+            m['entries'].append(extra)
+        mutations = {
+            'no pointer': drop_pointer,
+            'no index': drop_index,
+            'two moves': second_move,
+            'index deletion': lambda m: entry(m, 'IDEAS.md').update(operation='move-out', after=None, after_size=0, immutable=False),
+            'evidence deletion': lambda m: entry(m, MOVED).update(operation='move-out', after=None, after_size=0, immutable=False),
+            'move with after': lambda m: entry(m, IDEA).update(after=digest(b'x'), after_size=1),
+            'move without before': lambda m: entry(m, IDEA).update(before=None, before_size=0),
+            'unknown operation': lambda m: entry(m, IDEA).update(operation='delete'),
+            'migration flag': lambda m: m.update(migration=True),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label):
+                value = copy.deepcopy(original)
+                mutate(value)
+                path.write_bytes(encoded(value))
+                with self.assertRaises(IdeaError):
+                    self.recover()
+                self.assertEqual((self.root / IDEA).read_bytes(), b'detail before')
+                self.assertEqual((self.root / 'IDEAS.md').read_bytes(), b'index before')
+
+    def test_recovery_refuses_a_pointer_whose_recorded_hash_is_not_the_removed_file(self):
+        self.stop_move_at('prepared')
+        path, original = self.manifest()
+        value = copy.deepcopy(original)
+        forged = moved_pointer(b'some other file')
+        n = next(i for i, e in enumerate(value['entries']) if e['path'] == MOVED)
+        value['entries'][n].update(after=digest(forged), after_size=len(forged))
+        (path.parent / (str(n) + '.after')).unlink()
+        (path.parent / (str(n) + '.after')).write_bytes(forged)
+        path.write_bytes(encoded(value))
+        with self.assertRaises(IdeaError) as caught:
+            self.recover()
+        self.assertEqual(caught.exception.code, 'recovery_conflict')
+        self.assertEqual((self.root / IDEA).read_bytes(), b'detail before')
+
+    def test_recovery_refuses_an_edited_detail_file(self):
+        self.stop_move_at('prepared')
+        (self.root / IDEA).write_bytes(b'edited meanwhile')
+        with self.assertRaises(IdeaError):
+            self.recover()
+        self.assertEqual((self.root / IDEA).read_bytes(), b'edited meanwhile')
+
+
+# Inherited publication tests run once, in TransactionTests.
+for _name in [n for n in dir(TransactionTests) if n.startswith('test_')]:
+    setattr(MoveOutManifestTests, _name, None)
+
+
 if __name__=='__main__': unittest.main()

@@ -109,10 +109,10 @@ idea_tool=/absolute/path/to/skills/glitch-idea/scripts/idea.py
 
 Observed on Linux: exit 0 and a JSON object with `ok`, `origin` (`http://127.0.0.1:<port>/`), `binding_id`, `session_id`, `selected_idea_id` and a one-time `pairing_code`.
 The first call starts the service in the background; later calls reuse it.
-Open the origin in a browser and enter the pairing code within 60 seconds.
+Open the origin in a browser and enter the pairing code within 60 seconds (this is the manual road; `browser-open` pairs the tab itself).
 The code is single-use, with a small attempt limit.
 
-`browser-open --browser system` does the same and also opens a tab with the operating system's browser.
+`browser-open --browser system` does the same and also opens a tab with the operating system's browser at `<origin>/#pair=<code>`; the page redeems the code from the fragment and the operator types nothing. The result carries `pairing_code` and a `fallback_line` to type the code only if the tab did not open paired; if the code expired, `session-open --resume binding_ID` issues a fresh one.
 On a machine with no usable browser it returns `system_browser_unavailable` together with the new `binding_id`, `session_id` and `resume_required: true`, but no origin; run `session-open --resume binding_ID` to get the origin and a fresh pairing code.
 
 Other flags on `browser-open` and `session-open`: `--runtime-root`, `--runtime-python`, `--readiness-timeout` (greater than 0 and at most 5 seconds), `--resume binding_ID`, `--idea-id idea_ID`.
@@ -198,7 +198,8 @@ In this release Option 2 is configured and tested only: ideas are still saved in
   It carries no text and saves nothing; it only keeps a connected agent from pausing.
   The agent pauses after 600 seconds with no saves, pairing or pings.
 - At most eight bindings are kept per store.
-  A full store refuses a new one rather than evicting another binding, so resume an existing binding.
+  When a new one needs room, a binding whose idea reached Review and that has no open tab or agent is freed automatically, the least recently used first.
+  Otherwise the new one is refused with `binding_capacity` and a list of the sessions, so resume an existing binding or discard one with `session-discard`.
 - `session-close --session session_ID` revokes only the agent's access.
   The paired browser and saved drafts stay.
 - To stop the service now, interrupt a foreground `serve` (`serve --runtime-root /absolute/path/to/runtime`), which drains active saves before releasing ownership.
@@ -209,7 +210,7 @@ In this release Option 2 is configured and tested only: ideas are still saved in
 
 Each idea is `idea_<id>.md` with YAML frontmatter between `---` lines, plus a body.
 
-- You may edit the supported frontmatter inputs (shape, the two human ratings, assessment inputs and reasoning, and source fields of steps already accepted in the browser) and the text between the two Notes markers:
+- You may edit the supported frontmatter inputs (the two human ratings, assessment inputs and reasoning, and source fields of steps already accepted in the browser) and the text between the two Notes markers:
   `<!-- glitch-idea:notes:start -->` and `<!-- glitch-idea:notes:end -->`.
 - Do not edit identity, origin, hashes, history, plan links, counters, generated tables or `IDEAS.md` order.
 - YAML comments in frontmatter block rewriting (`yaml_comments`); move them into Notes.

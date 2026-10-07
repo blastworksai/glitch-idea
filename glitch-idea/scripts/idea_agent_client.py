@@ -9,9 +9,10 @@ import math
 import re
 import socket
 import time
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from idea_bridge import BridgeError, decode_json
+from idea_asset_evidence import MAX_FILE
 from idea_domain import IdeaError
 from idea_proposals import CORRELATION, LIMIT, OPERATIONS, _bounded
 from idea_runtime import Runtime
@@ -23,7 +24,12 @@ AGENT_REFUSALS = frozenset(('agent_unavailable', 'agent_unauthorized', 'wrong_ge
                             'request_not_found', 'request_cancelled', 'request_closed', 'request_not_delivered',
                             'response_mismatch', 'response_conflict', 'response_busy', 'response_capacity',
                             'invalid_fill', 'invalid_proposal', 'fill_capacity', 'stale_source',
-                            'proposal_commit_uncertain', 'operation_unavailable', 'busy'))
+                            'proposal_commit_uncertain', 'operation_unavailable', 'busy',
+                            'unsupported_asset_type', 'too_large', 'stale_revision', 'request_conflict', 'not_found',
+                            'idea_archived', 'invalid_input'))
+
+# Raw-body asset door: type -> accepted leading bytes (the service checks the same).
+ASSET_MAGIC = {'image/png': (b'\x89PNG\r\n\x1a\n',), 'application/zip': (b'PK\x03\x04', b'PK\x05\x06')}
 
 
 class AgentClientError(Exception):
@@ -142,6 +148,30 @@ class AgentClient:
                and _integer(value['fill_sequence'], 1))
         return value
 
+    def asset(self, *, idea_id, revision, request_id, name, mime, data):
+        """Upload one PNG or ZIP the agent made; the service stores it through the one asset path."""
+        _check(_identifier(idea_id, 'idea') and _integer(revision, 1) and type(request_id) is str
+               and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', request_id) is not None
+               and type(name) is str and 0 < len(name) <= 255 and type(mime) is str and mime in ASSET_MAGIC
+               and type(data) is bytes and 0 < len(data) <= MAX_FILE
+               and any(data.startswith(m) for m in ASSET_MAGIC[mime]), 'invalid_agent_input')
+        extra = {'Content-Type': mime, 'X-Idea-Session': self.__channel._session_id, 'X-Idea-Id': idea_id,
+                 'X-Idea-Revision': str(revision), 'X-Idea-Request-Id': request_id,
+                 'X-Idea-Asset-Name': quote(name, safe='')}
+        try:
+            value = self.__request('asset', raw=data, extra=extra, timeout=60)
+            _check(set(value) == {'ok','code','idea_id','asset_id','asset_ids','upload_id','size','sha256'}
+                   and value['idea_id'] == idea_id and type(value['asset_id']) is str
+                   and value['asset_ids'] == [value['asset_id']] and type(value['upload_id']) is str
+                   and _integer(value['size'], 1) and type(value['sha256']) is str
+                   and re.fullmatch(r'[0-9a-f]{64}', value['sha256']))
+            return value
+        except AgentClientError as exc:
+            # A named service refusal is a definite no; anything else may have stored the bytes.
+            if exc.write_state is None and exc.code not in AGENT_REFUSALS | {'invalid_agent_input', 'agent_closed'}:
+                exc.write_state = 'committed_uncertain'
+            raise
+
     def session_close(self):
         value = self.__request('session-close', raw=json.dumps(
             dict(session_id=self.__channel._session_id), separators=(',', ':')).encode())
@@ -150,7 +180,7 @@ class AgentClient:
         self.__closed = True
         return value
 
-    def __request(self, operation, *, query=None, raw=None, timeout=5):
+    def __request(self, operation, *, query=None, raw=None, timeout=5, extra=None):
         _check(not self.__closed, 'agent_closed')
         channel = self.__channel
         path = '/agent/v1/' + operation + ('?' + query if query is not None else '')
@@ -158,6 +188,7 @@ class AgentClient:
         headers = {'Host': '127.0.0.1:' + str(channel._port), 'Connection': 'close', **channel._headers()}
         if raw is not None:
             headers.update({'Content-Type': 'application/json', 'Content-Length': str(len(raw))})
+            headers.update(extra or {})
         request = (method + ' ' + path + ' HTTP/1.0\r\n' + ''.join(
             name + ': ' + value + '\r\n' for name, value in headers.items()) + '\r\n').encode('ascii')
         deadline = time.monotonic() + timeout

@@ -7,7 +7,7 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'glitch-idea/scripts'))
-from idea_domain import IdeaError, SHAPE_KEYS, encoded
+from idea_domain import IdeaError, encoded
 from idea_workflow import (STEP_ORDER, acceptance_source, accept_step,
                            capture_workflow, dependent_steps, derive_state,
                            empty_workflow, import_workflow, invalidate_external,
@@ -22,11 +22,20 @@ def fields():
     return {
         'capture': {'raw_text': '  Café 💡\r\n', 'workspace': {'name': 'fixture', 'path': '/example/fixture', 'confirmed': True}},
         'priorities': {'urgency': 7, 'importance': 8},
-        'shape': {'outcome': 'Easier cleaning', 'scope': 'small-change', 'scope_reason': 'One lid',
-                  'alternatives': [{'route': 'Clean existing lid', 'reason': 'Simpler'}],
-                  'assumptions': [], 'next_slice': 'Check lid', 'learning': []},
-        'method': {'selection': 'bounded-plan', 'reason': 'Known change', 'investment': None,
-                   'experiment': None, 'memory': {'status': 'unavailable', 'sources': [], 'rationale': None}},
+        'method': {'selection': 'bounded-plan', 'reason': 'Known change',
+                   'memory': {'status': 'unavailable', 'sources': [], 'rationale': None}},
+        'discovery': {'problem': 'Lids are hard to clean', 'audience': 'Home cooks', 'workaround': 'Scrub by hand',
+                      'evidence': 'Three complaints', 'kill_criteria': 'Nobody cleans lids',
+                      'challenges': [{'challenge': 'Is this a real pain?', 'response': 'Reported three times'}],
+                      'prior_art': [{'name': 'Lid brush', 'link': 'https://example.invalid/brush',
+                                     'does': 'Scrubs lids', 'differs': 'Ours needs no scrubbing',
+                                     'licence': 'Not stated'}],
+                      'prior_art_none': False, 'prior_art_searched': ''},
+        'exploration': {'outcome': 'Easier cleaning', 'alternatives': [{'route': 'Clean existing lid', 'reason': 'Simpler'}],
+                        'assumptions': [], 'scope': 'small-change', 'scope_reason': 'One lid',
+                        'next_slice': 'Check lid', 'learning': [], 'investment': None, 'experiment': None,
+                        'sketch': [{'title': 'Check the lid', 'why_next': 'Cheapest test', 'done_when': 'Lid is checked',
+                                    'method': None}]},
         'visualize': {'disposition': 'skipped', 'reason': 'No design needed', 'design_set_id': None, 'brief_evidence_id': None},
         'assess': {'assessment': {'method': 'wsjf', 'version': 'fixture-v1',
                     'inputs': {'value': 3, 'time_criticality': None, 'enablement': 2, 'effort': 1},
@@ -66,7 +75,7 @@ def accept(idea, step, value=None, extra_dependencies=()):
 
 def complete():
     idea = captured()
-    for step in ('priorities', 'shape', 'method', 'visualize', 'assess'):
+    for step in ('priorities', 'method', 'discovery', 'exploration', 'visualize', 'assess'):
         idea = accept(idea, step)['idea']
     return idea
 
@@ -103,25 +112,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(accepted['revision'], 2)
         self.assertEqual(derive_state(accepted)['steps']['capture']['status'], 'saved')
 
-    def test_legacy_known_values_import_only_as_partial_drafts(self):
+    def test_legacy_import_maps_no_old_shape_or_method_data(self):
         idea = complete()
         del idea['workflow']
-        # A CLI-only baseline has legacy snapshots, not inferred v2 evidence.
+        # A CLI-only baseline has legacy snapshots, not inferred workflow evidence.
         for snapshot in idea['revisions']:
             snapshot.pop('workflow', None)
             snapshot.pop('schema_version', None)
+        idea['shape'] = {'outcome': 'Old shape', 'method': 'bounded-plan', 'method_reason': 'Old reason'}
         before = encoded(idea)
         result = import_workflow(idea)
-        drafts = result['workflow']['drafts']
-        self.assertEqual(drafts['priorities'], {'urgency': 7, 'importance': 8})
-        self.assertEqual(drafts['method'], {'selection': 'bounded-plan', 'reason': 'Known change'})
-        self.assertNotIn('memory', drafts['method'])
-        self.assertNotIn('position', drafts['assess'])
-        self.assertNotIn('visualize', drafts)
-        self.assertNotIn('review', drafts)
+        self.assertEqual(result['workflow']['schema_version'], 3)
+        for step in ('method', 'discovery', 'exploration'):
+            self.assertNotIn(step, result['workflow']['drafts'])
         self.assertEqual(result['revisions'], idea['revisions'])
         self.assertEqual(encoded(idea), before)
-        self.assertTrue(all(r['acceptance'] is None for r in result['workflow']['steps'].values()))
 
     def test_draft_changes_only_draft_version_and_partial_rating_survives(self):
         idea = captured()
@@ -169,21 +174,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result['invalidated'], [])
         self.assertEqual(len(result['idea']['revisions']), idea['revision'])
 
-    def test_unchanged_shape_is_active_no_op_but_explicitly_reactivates_archive(self):
+    def test_unchanged_exploration_is_active_no_op_but_explicitly_reactivates_archive(self):
         idea = complete(); before = encoded(idea)
-        active = accept(idea,'shape')
+        active = accept(idea,'exploration')
         self.assertFalse(active['changed']); self.assertFalse(active['accepted_changed'])
         self.assertEqual(active['invalidated'],[]); self.assertEqual(encoded(active['idea']),before)
         idea['status'] = 'archived'; archived_before = encoded(idea)
-        result = accept(idea,'shape'); updated = result['idea']
+        result = accept(idea,'exploration'); updated = result['idea']
         self.assertTrue(result['changed']); self.assertTrue(result['accepted_changed'])
         self.assertEqual(updated['status'],'active'); self.assertEqual(updated['revision'],idea['revision']+1)
         self.assertEqual(updated['revisions'][:-1],idea['revisions'])
         for key in ('origin','ratings','assessments','plans','executions'):
             self.assertEqual(updated[key],idea[key])
-        self.assertEqual(updated['workflow']['steps']['shape']['fields'],idea['workflow']['steps']['shape']['fields'])
-        self.assertEqual(updated['workflow']['steps']['shape']['acceptance']['accepted_revision'],updated['revision'])
-        self.assertEqual(result['invalidated'],['method','visualize','assess'])
+        self.assertEqual(updated['workflow']['steps']['exploration']['fields'],idea['workflow']['steps']['exploration']['fields'])
+        self.assertEqual(updated['workflow']['steps']['exploration']['acceptance']['accepted_revision'],updated['revision'])
+        self.assertEqual(result['invalidated'],['visualize','assess'])
         for step in result['invalidated']:
             self.assertEqual(updated['workflow']['steps'][step]['acceptance'],idea['workflow']['steps'][step]['acceptance'])
             self.assertEqual(derive_state(updated)['steps'][step]['status'],'review-needed')
@@ -192,9 +197,12 @@ class WorkflowTests(unittest.TestCase):
 
     def test_all_declared_transitive_invalidations_and_revision_atomicity(self):
         expected = {
-            'capture': ('shape', 'method', 'visualize', 'assess', 'review'),
-            'priorities': ('assess', 'review'), 'shape': ('method', 'visualize', 'assess', 'review'),
-            'method': ('review',), 'visualize': ('review',), 'assess': ('review',),
+            'capture': ('method', 'discovery', 'exploration', 'visualize', 'assess', 'review'),
+            'priorities': ('method', 'discovery', 'exploration', 'visualize', 'assess', 'review'),
+            'method': ('discovery', 'exploration', 'visualize', 'assess', 'review'),
+            'discovery': ('exploration', 'visualize', 'assess', 'review'),
+            'exploration': ('visualize', 'assess', 'review'),
+            'visualize': ('review',), 'assess': ('review',),
         }
         for step, downstream in expected.items():
             with self.subTest(step=step):
@@ -207,7 +215,9 @@ class WorkflowTests(unittest.TestCase):
                     value['workspace']['path'] = '/example/other'
                 elif step == 'priorities':
                     value['importance'] = 9
-                elif step == 'shape':
+                elif step == 'discovery':
+                    value['problem'] = 'Lids are hard to clean after oil'
+                elif step == 'exploration':
                     value['next_slice'] = 'Check the second lid'
                 elif step == 'method':
                     value['selection'] = 'adaptive-slices'
@@ -243,17 +253,17 @@ class WorkflowTests(unittest.TestCase):
         value = fields()['capture']
         value['workspace']['name'] = 'other fixture'
         changed = accept(idea, 'capture', value)['idea']
-        stale_receipt = copy.deepcopy(changed['workflow']['steps']['shape']['acceptance'])
-        shape_fields = copy.deepcopy(changed['workflow']['steps']['shape']['fields'])
-        result = accept(changed, 'shape', shape_fields)
+        stale_receipt = copy.deepcopy(changed['workflow']['steps']['method']['acceptance'])
+        method_fields = copy.deepcopy(changed['workflow']['steps']['method']['fields'])
+        result = accept(changed, 'method', method_fields)
         updated = result['idea']
-        receipt = updated['workflow']['steps']['shape']['acceptance']
+        receipt = updated['workflow']['steps']['method']['acceptance']
         self.assertTrue(result['changed'])
         self.assertEqual(updated['revision'], changed['revision']+1)
         self.assertNotEqual(receipt['source_digest'], stale_receipt['source_digest'])
         self.assertEqual(receipt['source_revision'], changed['revision'])
-        self.assertEqual(derive_state(updated)['steps']['shape']['status'], 'saved')
-        self.assertEqual(derive_state(updated)['steps']['method']['status'], 'review-needed')
+        self.assertEqual(derive_state(updated)['steps']['method']['status'], 'saved')
+        self.assertEqual(derive_state(updated)['steps']['discovery']['status'], 'review-needed')
         self.assertEqual(updated['workflow']['steps']['visualize']['acceptance'], idea['workflow']['steps']['visualize']['acceptance'])
         self.assertEqual(updated['workflow']['steps']['visualize']['fields'], fields()['visualize'])
 
@@ -262,26 +272,26 @@ class WorkflowTests(unittest.TestCase):
         value = fields()['capture']
         value['raw_text'] = 'Different'
         changed = accept(idea, 'capture', value)['idea']
-        self.assert_error('not_ready', lambda: accept(changed, 'method'))
+        self.assert_error('not_ready', lambda: accept(changed, 'discovery'))
         self.assert_error('not_ready', lambda: accept(changed, 'assess'))
-        shaped = accept(changed, 'shape')['idea']
-        self.assertEqual(derive_state(accept(shaped, 'method')['idea'])['steps']['method']['status'], 'saved')
+        methodical = accept(changed, 'method')['idea']
+        self.assertEqual(derive_state(accept(methodical, 'discovery')['idea'])['steps']['discovery']['status'], 'saved')
 
     def test_changed_draft_blocks_downstream_without_mutating_receipts_then_undo_restores(self):
         idea = complete()
-        value = fields()['shape']
-        value['next_slice'] = 'Unsaved next slice'
-        edited = save_draft(idea, 'shape', value, expected_revision=idea['revision'], expected_draft_version=0)['idea']
+        value = fields()['method']
+        value['reason'] = 'Unsaved reason'
+        edited = save_draft(idea, 'method', value, expected_revision=idea['revision'], expected_draft_version=0)['idea']
         self.assertEqual(edited['revisions'], idea['revisions'])
         self.assertEqual(edited['workflow']['steps'], idea['workflow']['steps'])
         view = derive_state(edited)
-        self.assertEqual(view['steps']['shape']['status'], 'unsaved')
-        for step in ('method', 'visualize', 'assess'):
+        self.assertEqual(view['steps']['method']['status'], 'unsaved')
+        for step in ('discovery', 'exploration', 'visualize', 'assess'):
             self.assertEqual(view['steps'][step]['status'], 'review-needed')
-        self.assert_error('not_ready', lambda: accept(edited, 'method'))
-        restored = save_draft(edited, 'shape', fields()['shape'], expected_revision=edited['revision'], expected_draft_version=1)['idea']
-        self.assertEqual(derive_state(restored)['steps']['shape']['status'], 'saved')
+        self.assert_error('not_ready', lambda: accept(edited, 'discovery'))
+        restored = save_draft(edited, 'method', fields()['method'], expected_revision=edited['revision'], expected_draft_version=1)['idea']
         self.assertEqual(derive_state(restored)['steps']['method']['status'], 'saved')
+        self.assertEqual(derive_state(restored)['steps']['discovery']['status'], 'saved')
 
     def test_extra_consumed_dependency_extends_transitive_graph_and_is_retained(self):
         idea = complete()
@@ -294,7 +304,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('priorities', renewed['workflow']['steps']['method']['acceptance']['dependencies'])
         self.assertEqual(derive_state(renewed)['steps']['method']['status'], 'saved')
         self.assert_error('invalid_input', lambda: acceptance_source(idea, 'method', fields()['method'], ('assess',)))
-        self.assert_error('invalid_input', lambda: acceptance_source(idea, 'shape', fields()['shape'], ('shape',)))
+        self.assert_error('invalid_input', lambda: acceptance_source(idea, 'discovery', fields()['discovery'], ('discovery',)))
 
     def test_revision_and_draft_cas_reject_stale_and_bool_inputs_before_mutation(self):
         idea = complete()
@@ -320,38 +330,37 @@ class WorkflowTests(unittest.TestCase):
 
     def test_canonical_digest_is_compact_sorted_utf8_and_includes_operation_revision(self):
         sources = {'capture': fields()['capture'], 'priorities': {'importance': 8, 'urgency': 7}}
-        payload = {'operation': 'shape', 'source_revision': 3, 'fields': sources}
+        payload = {'operation': 'exploration', 'source_revision': 3, 'fields': sources}
         expected = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
                                              separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
-        self.assertEqual(source_digest('shape', 3, sources), expected)
+        self.assertEqual(source_digest('exploration', 3, sources), expected)
         reordered = dict(reversed(tuple(sources.items())))
         reordered['capture'] = dict(reversed(tuple(sources['capture'].items())))
-        self.assertEqual(source_digest('shape', 3, reordered), expected)
-        self.assertNotEqual(source_digest('shape', 4, sources), expected)
+        self.assertEqual(source_digest('exploration', 3, reordered), expected)
+        self.assertNotEqual(source_digest('exploration', 4, sources), expected)
         self.assertNotEqual(source_digest('method', 3, sources), expected)
         self.assertNotEqual(expected, hashlib.sha256(sources['capture']['raw_text'].encode('utf-8')).hexdigest())
-        self.assert_error('invalid_input', lambda: source_digest('shape', True, sources))
-        self.assert_error('invalid_input', lambda: source_digest('shape', 3, {'priorities': {'urgency': float('nan')}}))
+        self.assert_error('invalid_input', lambda: source_digest('exploration', True, sources))
+        self.assert_error('invalid_input', lambda: source_digest('exploration', 3, {'priorities': {'urgency': float('nan')}}))
 
     def test_cli_external_invalidation_retains_old_evidence_and_legacy_noop(self):
         legacy = original_idea()
-        self.assertEqual(invalidate_external(legacy, ('shape',))['idea'], legacy)
-        self.assertNotIn('workflow', invalidate_external(legacy, ('shape',))['idea'])
+        self.assertEqual(invalidate_external(legacy, ('exploration',))['idea'], legacy)
+        self.assertNotIn('workflow', invalidate_external(legacy, ('exploration',))['idea'])
         idea = complete()
         before = encoded(idea)
-        result = invalidate_external(idea, ('shape',))
+        result = invalidate_external(idea, ('exploration',))
         updated = result['idea']
-        self.assertEqual(result['invalidated'], ['shape', 'method', 'visualize', 'assess'])
+        self.assertEqual(result['invalidated'], ['exploration', 'visualize', 'assess'])
         self.assertEqual(updated['revision'], idea['revision'])
         self.assertEqual(updated['revisions'], idea['revisions'])
-        self.assertEqual(updated['workflow']['steps']['shape']['acceptance'], idea['workflow']['steps']['shape']['acceptance'])
-        self.assertEqual(derive_state(updated)['steps']['shape']['status'], 'review-needed')
+        self.assertEqual(updated['workflow']['steps']['exploration']['acceptance'], idea['workflow']['steps']['exploration']['acceptance'])
+        self.assertEqual(derive_state(updated)['steps']['exploration']['status'], 'review-needed')
         self.assertEqual(encoded(idea), before)
 
-    def test_legacy_mirrors_do_not_expand_shape_keys_or_change_human_ratings(self):
+    def test_legacy_mirrors_never_write_shape_or_change_human_ratings(self):
         idea = complete()
-        self.assertEqual(set(idea['shape']), SHAPE_KEYS)
-        self.assertEqual(idea['shape']['method'], 'bounded-plan')
+        self.assertIsNone(idea['shape'])
         self.assertEqual(idea['assessments'][-1]['score'], None)
         ratings = copy.deepcopy(idea['ratings'])
         value = fields()['assess']
@@ -360,11 +369,11 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(updated['assessments'][-1]['score'], 9)
         self.assertEqual(updated['ratings'], ratings)
         value = fields()['method']
-        value.update(selection='appetite-led', investment={'cap': 2, 'unit': 'sessions', 'boundary': 'Fixture'})
+        value.update(selection='appetite-led')
         updated = accept(updated, 'method', value)['idea']
-        self.assertEqual(set(updated['shape']), SHAPE_KEYS)
-        self.assertNotIn('investment', updated['shape'])
-        self.assertEqual(updated['shape']['method'], 'appetite-led')
+        self.assertIsNone(updated['shape'])
+        self.assertEqual(updated['workflow']['steps']['method']['fields']['selection'], 'appetite-led')
+        self.assertEqual(derive_state(updated)['steps']['exploration']['status'], 'review-needed')
 
     def test_review_is_derived_current_packet_with_no_domain_mutation(self):
         idea = complete()
@@ -385,23 +394,23 @@ class WorkflowTests(unittest.TestCase):
 
     def test_accepted_fields_and_drafts_are_detached_and_current_panel_is_independent(self):
         idea = complete()
-        idea['workflow']['current_step'] = 'shape'
-        value = fields()['shape']
+        idea['workflow']['current_step'] = 'exploration'
+        value = fields()['exploration']
         value['outcome'] = 'New draft'
-        idea = save_draft(idea, 'shape', value, expected_revision=idea['revision'], expected_draft_version=0)['idea']
+        idea = save_draft(idea, 'exploration', value, expected_revision=idea['revision'], expected_draft_version=0)['idea']
         view = derive_state(idea)
-        self.assertEqual(view['current_step'], 'shape')
-        self.assertEqual(view['steps']['shape']['status'], 'unsaved')
-        self.assertEqual(view['accepted']['shape']['outcome'], 'Easier cleaning')
-        self.assertEqual(view['drafts']['shape']['outcome'], 'New draft')
-        view['accepted']['shape']['outcome'] = 'Modified returned value'
-        view['drafts']['shape']['outcome'] = 'Another modification'
-        self.assertEqual(idea['workflow']['steps']['shape']['fields']['outcome'], 'Easier cleaning')
-        self.assertEqual(idea['workflow']['drafts']['shape']['outcome'], 'New draft')
+        self.assertEqual(view['current_step'], 'exploration')
+        self.assertEqual(view['steps']['exploration']['status'], 'unsaved')
+        self.assertEqual(view['accepted']['exploration']['outcome'], 'Easier cleaning')
+        self.assertEqual(view['drafts']['exploration']['outcome'], 'New draft')
+        view['accepted']['exploration']['outcome'] = 'Modified returned value'
+        view['drafts']['exploration']['outcome'] = 'Another modification'
+        self.assertEqual(idea['workflow']['steps']['exploration']['fields']['outcome'], 'Easier cleaning')
+        self.assertEqual(idea['workflow']['drafts']['exploration']['outcome'], 'New draft')
 
-    def test_visual_set_and_not_applicable_statuses_require_persisted_evidence(self):
-        for value, expected in (({'disposition': 'accepted_set', 'reason': None, 'design_set_id': 'set-fixture', 'brief_evidence_id': 'brief-fixture'}, 'saved'),
-                                 ({'disposition': 'not-applicable', 'reason': 'Nonvisual fixture', 'design_set_id': None, 'brief_evidence_id': None}, 'not-applicable')):
+    def test_visual_set_and_skipped_statuses_require_persisted_evidence(self):
+        for value, expected in (({'disposition': 'accepted_set', 'reason': None, 'design_set_id': 'set-fixture', 'brief_evidence_id': 'brief-fixture', 'source': 'claude_design'}, 'saved'),
+                                 ({'disposition': 'skipped', 'reason': None, 'design_set_id': None, 'brief_evidence_id': None}, 'skipped')):
             idea = complete()
             updated = accept(idea, 'visualize', value)['idea']
             view = derive_state(updated)
@@ -410,21 +419,44 @@ class WorkflowTests(unittest.TestCase):
             pending = save_draft(idea, 'visualize', value, expected_revision=idea['revision'], expected_draft_version=0)['idea']
             self.assertEqual(derive_state(pending)['steps']['visualize']['status'], 'unsaved')
 
+    def test_not_applicable_is_not_a_step_status(self):
+        import idea_workflow
+        self.assertNotIn('not-applicable', idea_workflow.STEP_STATUSES)
+        self.assertEqual(idea_workflow.VISUAL_DISPOSITIONS, ('accepted_set', 'skipped'))
+        src = open(idea_workflow.__file__, encoding='utf-8').read()
+        self.assertNotIn('not-applicable', src.replace("# 'not-applicable' is gone; an old value is simply invalid", ''))
+
+    def test_visualize_dispositions_source_and_optional_reason(self):
+        from idea_workflow import validate_step_fields
+        base = {'disposition': 'skipped', 'reason': None, 'design_set_id': None, 'brief_evidence_id': None}
+        self.assertEqual(validate_step_fields('visualize', base)['disposition'], 'skipped')  # no reason needed
+        for bad in (dict(base, disposition='not-applicable', reason='Nonvisual'),
+                    dict(base, disposition='accepted_set', design_set_id='set-fixture'),  # source missing
+                    dict(base, disposition='accepted_set', design_set_id='set-fixture', source='figma'),
+                    dict(base, disposition='accepted_set', design_set_id='set-fixture', source=None)):
+            with self.subTest(bad=bad), self.assertRaises(IdeaError): validate_step_fields('visualize', bad)
+        for source in ('claude_design', 'prototype'):
+            ok = dict(base, disposition='accepted_set', design_set_id='set-fixture', source=source)
+            self.assertEqual(validate_step_fields('visualize', ok)['source'], source)
+        proto = dict(base, disposition='accepted_set', design_set_id='set-fixture', source='prototype',
+                     assets=['asset_'+'a'*32, 'asset_'+'b'*32])
+        self.assertEqual(validate_step_fields('visualize', proto)['assets'], proto['assets'])
+
     def test_pause_resume_uses_selected_draft_and_acceptance_frontier(self):
         idea = complete()
         self.assertEqual(idea['workflow']['current_step'], 'review')
-        value = fields()['shape']
+        value = fields()['exploration']
         value['next_slice'] = 'Pause here'
-        draft = save_draft(idea, 'shape', value, expected_revision=idea['revision'], expected_draft_version=0)['idea']
-        self.assertEqual(derive_state(draft)['current_step'], 'shape')
+        draft = save_draft(idea, 'exploration', value, expected_revision=idea['revision'], expected_draft_version=0)['idea']
+        self.assertEqual(derive_state(draft)['current_step'], 'exploration')
         self.assertEqual(derive_state(draft)['draft']['fields'], value)
-        result = accept(draft, 'shape', value)
+        result = accept(draft, 'exploration', value)
         self.assertTrue(result['accepted_changed'])
-        self.assertEqual(result['idea']['workflow']['current_step'], 'method')
-        self.assertEqual(result['idea']['revisions'][-1]['workflow']['current_step'], 'method')
+        self.assertEqual(result['idea']['workflow']['current_step'], 'visualize')
+        self.assertEqual(result['idea']['revisions'][-1]['workflow']['current_step'], 'visualize')
         fresh = captured()
         fresh = accept(fresh, 'priorities')['idea']
-        self.assertEqual(fresh['workflow']['current_step'], 'shape')
+        self.assertEqual(fresh['workflow']['current_step'], 'method')
 
     def test_revert_draft_by_accepting_same_data_is_only_draft_change(self):
         idea = complete()

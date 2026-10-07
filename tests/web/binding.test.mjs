@@ -152,7 +152,11 @@ test('binding and selected idea coexist with strict duplicate/type/query rejecti
 test('app pins URL selector and preserves pending on re-pair state reload without persistent secrets',()=>{
   assert.match(appSource,/api\.pinBinding\(initialBinding\)/);
   assert.match(appSource,/Boolean\(flow\.pending\) \|\| flow\.dirty\.size > 0/);
-  assert.doesNotMatch(appSource,/localStorage|sessionStorage/);
+  // The only storage the page may touch is the theme word, under its one fixed key; never sessionStorage, never a secret.
+  const storageLines=appSource.split('\n').filter(line=>/localStorage/.test(line));
+  assert.equal(storageLines.length,2);assert.ok(storageLines.every(line=>line.includes('THEME_KEY')));
+  assert.match(appSource,/const THEME_KEY = 'glitch-idea-theme';/);
+  assert.doesNotMatch(appSource.split('\n').filter(line=>!/localStorage/.test(line)).join('\n'),/localStorage|sessionStorage/);
 });
 
 test('actual startApp render preserves binding after Capture and reload restores its session',async()=>{
@@ -202,11 +206,11 @@ test('actual startApp render preserves binding after Capture and reload restores
 
 // Real app error panel and public Flow operations, with deterministic API faults.
 // These fixtures do not substitute for server/browser or native qualification.
-async function diagnosticApp(run) {
+async function diagnosticApp(run, initialFaults = {}) {
   const names=['document','location','history','addEventListener','setTimeout','clearTimeout'];
   const saved=new Map(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]));
   let doc,currentUrl=new URL('http://127.0.0.1:1234/?binding='+A+'&idea_id='+IDEA),timerId=0;
-  const timers=new Map(),events={},writes=[],pings=[],faults={},receipts=new Map();
+  const timers=new Map(),events={},writes=[],pings=[],faults={...initialFaults},receipts=new Map();
   const SET='set_'+'3'.repeat(32),OTHER_SET='set_'+'4'.repeat(32),ASSET='asset_'+'5'.repeat(32);
   class Node {
     constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.listeners={};this.dataset={};this.disabled=false;this.value='';this.textContent='';this.scrollTop=0;this.scrollLeft=0;}
@@ -224,7 +228,7 @@ async function diagnosticApp(run) {
   }
   const roots=new Map(['announcement','identity','progress','save-status','agent-status','compact-nav','columns','connection'].map(id=>{const node=new Node();node.id=id;return [id,node];}));
   const find=(node,id)=>node.id===id?node:node.children.map(child=>find(child,id)).find(Boolean);
-  doc={body:new Node('body'),activeElement:null,hidden:true,createElement:tag=>new Node(tag),getElementById:id=>[...roots.values()].map(node=>find(node,id)).find(Boolean)??null};
+  doc={body:new Node('body'),activeElement:null,hidden:true,addEventListener:(name,cb)=>{if(name==='visibilitychange')doc.vis=cb;},visibilitychange:()=>doc.vis?.(),createElement:tag=>new Node(tag),getElementById:id=>[...roots.values()].map(node=>find(node,id)).find(Boolean)??null};
   doc.activeElement=doc.body;globalThis.document=doc;
   Object.defineProperty(globalThis,'location',{configurable:true,get:()=>currentUrl});
   globalThis.history={replaceState:(_state,_title,url)=>{currentUrl=new URL(url,currentUrl);}};
@@ -232,17 +236,17 @@ async function diagnosticApp(run) {
   globalThis.setTimeout=(callback,delay)=>{const timer={id:++timerId,unref(){}};timers.set(timer,{callback,delay});return timer;};
   globalThis.clearTimeout=timer=>timers.delete(timer);
   const state={ok:true,code:'ok',session_id:SA,idea_id:IDEA,idea_status:'active',revision:4,draft_version:0,backlog_revision:0,current_step:'visualize',agent_status:'disconnected',
-    steps:Object.fromEntries(STEPS.map(({key},index)=>[key,{status:index<4?'saved':key==='visualize'?'current':'todo',accepted_revision:index<4?4:null,evidence_id:index<4?'fixture-'+key:null}])),
+    steps:Object.fromEntries(STEPS.map(({key},index)=>[key,{status:index<5?'saved':key==='visualize'?'current':'todo',accepted_revision:index<5?4:null,evidence_id:index<5?'fixture-'+key:null}])),
     accepted:{capture:{raw_text:'Preserved Capture',workspace:{name:'Explicit',path:'/fixture',confirmed:true}}},drafts:{},draft:null};
   const fields={disposition:'accepted_set',reason:null,design_set_id:null,brief_evidence_id:null};
   const clone=value=>structuredClone(value);
-  const api={bindingId:A,pinBinding:binding=>assert.equal(binding,A),session:async()=>META(),state:async()=>clone(state),
+  const api={bindingId:A,pinBinding:binding=>assert.equal(binding,A),session:async()=>{if(faults.session)throw Object.assign(new Error(faults.session.code),faults.session);return META();},state:async()=>{if(faults.state)throw Object.assign(new Error(faults.state.code),faults.state);return clone(state);},
     reconcile:async requestId=>{
       if(faults.reconcile)throw Object.assign(new Error('connection_lost'),{code:'connection_lost',uncertain:true});
       return {result:clone(receipts.get(requestId)??null),state:clone(state)};
     },write:async(operation,payload)=>{
       if(operation==='transport')return {ok:true,code:'ok'};
-      if(operation==='activity'){pings.push(payload);return {ok:true,code:'ok'};}
+      if(operation==='activity'){if(faults.ping)throw Object.assign(new Error(faults.ping.code),faults.ping);pings.push(payload);return {ok:true,code:'ok'};}
       writes.push({operation,payload:clone(payload)});
       if(faults.code)throw Object.assign(new Error(faults.code),{code:faults.code,status:faults.status??409,uncertain:faults.uncertain===true});
       const result={ok:true,code:'ok',write_state:'applied',request_id:payload.request_id,idea_id:IDEA};
@@ -300,17 +304,17 @@ test('ambiguous stale code still permits only result checking rather than an uns
   });
 });
 
-test('actual app archive refusals explain explicit Shape reactivation and reload preserved answers without retry',async()=>{
+test('actual app archive refusals explain explicit Exploration reactivation and reload preserved answers without retry',async()=>{
   for(const code of ['archived_revision','idea_archived'])await diagnosticApp(async h=>{
     h.faults.code=code;h.flow.edit('visualize',h.fields);assert.equal(await h.flow.saveVisualize([h.ASSET]),false);
     const answers=cloneForDiagnostic(h.flow.buffers.visualize);
     h.state.idea_status='archived';
     assert.equal(h.flow.pending.ambiguous,false);assert.equal(h.get('retry-save'),null);assert.ok(h.get('reload-state'));
-    assert.match(h.alerts(),/This idea is archived/);assert.match(h.alerts(),/explicitly redo and accept Shape/);
+    assert.match(h.alerts(),/This idea is archived/);assert.match(h.alerts(),/explicitly redo and accept Exploration/);
     assert.match(h.alerts(),/Archived history is kept/);assert.doesNotMatch(h.alerts(),/Could not save|Try again/);
     await h.get('reload-state').click();assert.deepEqual(h.flow.buffers.visualize,answers);
     assert.equal(h.flow.pending,null);assert.equal(h.flow.state.idea_status,'archived');assert.equal(h.writes.length,1);
-    assert.equal(h.flow.canOpen('shape'),true);
+    assert.equal(h.flow.canOpen('exploration'),true);
   });
 });
 
@@ -411,7 +415,7 @@ test('a save that falls due while another write is in flight is retried, never d
   });
 });
 
-test('actual app Capture and Priorities require Shape first for persisted archived or unknown ideas',async()=>{
+test('actual app Capture and Priorities require Exploration first for persisted archived or unknown ideas',async()=>{
   for(const key of ['capture','priorities'])for(const status of ['archived',null])await diagnosticApp(async h=>{
     await h.get('compact-'+key).click();
     const fields=key==='capture'?cloneForDiagnostic(h.state.accepted.capture):{urgency:6,importance:7};
@@ -422,11 +426,11 @@ test('actual app Capture and Priorities require Shape first for persisted archiv
     await h.get(key+'-accept').click();assert.equal(h.writes.length,0);
     assert.deepEqual(h.flow.buffers[key],fields);assert.equal(h.flow.pending,null);
     assert.equal(h.get(key+'-idea-status').role,'status');
-    if(status==='archived')assert.match(h.get(key+'-idea-status').textContent,/first explicitly redo and accept Shape/);
+    if(status==='archived')assert.match(h.get(key+'-idea-status').textContent,/first explicitly redo and accept Exploration/);
     else assert.match(h.get(key+'-idea-status').textContent,/status is unavailable/);
     if(key==='capture'){assert.equal(h.get('idea-text').value,fields.raw_text);assert.ok(h.get('capture-attachments'));}
     else{assert.equal(h.get('urgency-6')['aria-pressed'],'true');assert.equal(h.get('importance-7')['aria-pressed'],'true');}
-    assert.equal(h.flow.canOpen('shape'),true);assert.equal(h.get('compact-shape').disabled,false);
+    assert.equal(h.flow.canOpen('exploration'),true);assert.equal(h.get('compact-exploration').disabled,false);
   });
 });
 
@@ -465,4 +469,107 @@ test('per-tab secret: api.js uses sessionStorage only, never localStorage or doc
   const api=await source('api.js');
   assert.match(api,/globalThis\.sessionStorage/);
   assert.doesNotMatch(api,/localStorage|document\.cookie|console\./);
+});
+
+// Superseded tab and keep-alive (owner rulings). Fake clock: Date.now plus the harness timer map.
+const SUPERSEDED='This tab was replaced by a newer one. Switch to the newest Glitch idea tab.';
+const tick=()=>new Promise(r=>setImmediate(r));
+const fire=(h,delay)=>{const due=[...h.timers].filter(([,v])=>v.delay===delay);for(const [timer,{callback}] of due){h.timers.delete(timer);callback();}return due.length;};
+const connectionText=h=>h.get('connection').all().map(n=>n.textContent).join('|');
+const pingTimers=h=>[...h.timers.values()].filter(v=>v.delay===30000).length;
+
+test('session_superseded from the poll shows the one sentence, no pairing form, and stops polling',async()=>{
+  await diagnosticApp(async h=>{
+    document.hidden=false;
+    h.faults.state={code:'session_superseded',status:401};
+    assert.equal(h.flow.polling,true);
+    assert.equal(fire(h,2000)>0,true);await tick();await tick();
+    assert.equal(h.get('connection').hidden,false);
+    assert.match(connectionText(h),/This tab was replaced by a newer one\. Switch to the newest Glitch idea tab\./);
+    assertSupersededPanel(h);
+    assert.doesNotMatch(connectionText(h),/fresh/i);
+    assert.equal(h.flow.polling,false);
+    assert.equal([...h.timers.values()].filter(v=>v.delay===2000).length,0,'no poll timer left');
+  });
+});
+const WARNING='ONLY CLICK THIS IF YOU LOST THE TAB';
+const assertSupersededPanel=h=>{
+  assert.match(connectionText(h),/This tab was replaced by a newer one\. Switch to the newest Glitch idea tab\./);
+  assert.match(connectionText(h),new RegExp(WARNING));
+  const warn=h.get('connection').all().find(n=>n.textContent===WARNING);
+  assert.ok(warn,'warning line present');assert.match(warn.className,/superseded-warning/);
+  const link=h.get('connection').all().find(n=>n.tagName==='A');
+  assert.ok(link,'link present');
+  assert.equal(link.textContent,'Open Glitch idea in a new tab');
+  assert.equal(link.href,'http://127.0.0.1:1234/');assert.ok(!link.href.includes('#')&&!link.href.includes('?'));
+  assert.equal(link.target,'_blank');assert.equal(link.rel,'noopener');
+  assert.equal(h.get('pairing-code'),null);
+  assert.doesNotMatch(connectionText(h),/Connect this browser|pairing code/i);
+};
+test('a freshly loaded tab whose credentials were retired by a resume gets the replaced sentence, the red warning and a link, not the pairing form',async()=>{
+  // Owner ruling 07/10: option 2, a clickable link to the newest tab, big red letters.
+  await diagnosticApp(async h=>{
+    await tick();await tick();
+    assert.equal(h.get('connection').hidden,false);
+    assertSupersededPanel(h);
+    assert.equal(h.flow.polling,false);
+  },{session:{code:'session_superseded',status:401}});
+});
+test('any other 401 still shows the pairing form',async()=>{
+  await diagnosticApp(async h=>{
+    document.hidden=false;
+    h.faults.state={code:'browser_unauthorized',status:401};
+    fire(h,2000);await tick();await tick();
+    assert.ok(h.get('pairing-code'));assert.match(connectionText(h),/Connect this browser/);
+    assert.doesNotMatch(connectionText(h),/replaced by a newer one/);
+  });
+});
+test('an unsaved field with no keystrokes pings on the 30 s timer, and stops when hidden or saved',async()=>{
+  const realNow=Date.now;let clock=5_000_000;Date.now=()=>clock;
+  try{
+    await diagnosticApp(async h=>{
+      document.hidden=false;
+      await h.get('compact-capture').click();
+      h.get('idea-text').input('a');await tick();assert.equal(h.pings.length,1,'the keystroke ping');
+      assert.equal(pingTimers(h),1,'timer armed');
+      clock+=30_000;fire(h,30000);await tick();assert.equal(h.pings.length,2,'timer ping, no keystroke');
+      clock+=30_000;fire(h,30000);await tick();assert.equal(h.pings.length,3);
+      document.hidden=true;document.visibilitychange?.();
+      // a hidden page: a still-pending timer fires into nothing
+      clock+=30_000;fire(h,30000);await tick();assert.equal(h.pings.length,3,'hidden: no ping');
+      assert.equal(pingTimers(h),0,'hidden: no timer left');
+    });
+    await diagnosticApp(async h=>{
+      document.hidden=false;
+      await h.get('compact-capture').click();
+      h.get('idea-text').input('a');await tick();assert.equal(pingTimers(h),1);
+      h.flow.dirty.clear();h.flow.onChange();
+      assert.equal(pingTimers(h),0,'saved: timer stopped');
+      clock+=30_000;fire(h,30000);await tick();assert.equal(h.pings.length,1);
+    });
+  }finally{Date.now=realNow;}
+});
+test('a failed ping is counted and warned once per failure with its code',async()=>{
+  const realNow=Date.now,realWarn=console.warn;let clock=9_000_000;Date.now=()=>clock;
+  const warnings=[];console.warn=(...a)=>warnings.push(a.join(' '));
+  try{
+    await diagnosticApp(async h=>{
+      document.hidden=false;
+      await h.get('compact-capture').click();
+      h.faults.ping={code:'connection_lost',status:0};
+      h.get('idea-text').input('a');await tick();
+      clock+=30_000;fire(h,30000);await tick();
+      const mine=warnings.filter(w=>/activity ping failed/.test(w));
+      assert.equal(mine.length,2);assert.match(mine[0],/connection_lost/);assert.match(mine[1],/failure 2/);
+      assert.equal(h.pings.length,0);
+    });
+    warnings.length=0;
+    await diagnosticApp(async h=>{
+      document.hidden=false;
+      await h.get('compact-capture').click();
+      h.faults.ping={code:'session_superseded',status:401};
+      h.get('idea-text').input('a');await tick();
+      assert.match(connectionText(h),/replaced by a newer one/);assert.equal(h.get('pairing-code'),null);assert.equal(h.flow.polling,false);
+    });
+  }finally{Date.now=realNow;console.warn=realWarn;}
 });

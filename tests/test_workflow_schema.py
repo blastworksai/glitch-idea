@@ -28,11 +28,17 @@ def fixtures():
     return {
         'capture': {'raw_text': '  Café 💡\r\n\n', 'workspace': {'name': 'fixture', 'path': '/example/fixture', 'confirmed': True}},
         'priorities': {'urgency': 7, 'importance': 8},
-        'shape': {'outcome': 'Easier cleaning', 'scope': 'small-change', 'scope_reason': 'One lid',
-                  'alternatives': [{'route': 'Clean existing lid', 'reason': 'Simpler'}],
-                  'assumptions': [], 'next_slice': 'Check lid', 'learning': []},
-        'method': {'selection': 'bounded-plan', 'reason': 'Known change', 'investment': None,
-                   'experiment': None, 'memory': {'status': 'unavailable', 'sources': [], 'rationale': None}},
+        'method': {'selection': 'bounded-plan', 'reason': 'Known change',
+                   'memory': {'status': 'unavailable', 'sources': [], 'rationale': None}},
+        'discovery': {'problem': 'Lids are hard to clean', 'audience': 'Home cooks', 'workaround': 'Scrub by hand',
+                      'evidence': 'Three complaints', 'kill_criteria': 'Nobody cleans lids',
+                      'challenges': [{'challenge': 'Is this a real pain?', 'response': 'Reported three times'}],
+                      'prior_art': [], 'prior_art_none': True, 'prior_art_searched': 'Web search'},
+        'exploration': {'outcome': 'Easier cleaning', 'alternatives': [{'route': 'Clean existing lid', 'reason': 'Simpler'}],
+                        'assumptions': [], 'scope': 'small-change', 'scope_reason': 'One lid',
+                        'next_slice': 'Check lid', 'learning': [], 'investment': None, 'experiment': None,
+                        'sketch': [{'title': 'Check the lid', 'why_next': 'Cheapest test', 'done_when': 'Lid is checked',
+                                    'method': None}]},
         'visualize': {'disposition': 'skipped', 'reason': 'No design needed', 'design_set_id': None, 'brief_evidence_id': None},
         'assess': {'assessment': assessment_fields(), 'position': {'proposed_position': 1, 'actual_position': 1,
                     'neighbors': {'before': None, 'after': None}, 'override_reason': None}},
@@ -47,8 +53,10 @@ def receipt(revision=2):
 
 
 def legacy_snapshot():
-    shaped = fixtures()['shape']
-    shaped.update(method='bounded-plan', method_reason='Known change')
+    shaped = {'outcome': 'Easier cleaning', 'scope': 'small-change', 'scope_reason': 'One lid',
+              'alternatives': [{'route': 'Clean existing lid', 'reason': 'Simpler'}],
+              'assumptions': [], 'next_slice': 'Check lid', 'learning': [],
+              'method': 'bounded-plan', 'method_reason': 'Known change'}
     return {'revision': 2, 'shape': shaped, 'ratings': {'urgency': 7, 'importance': 8, 'actor': 'operator'},
             'assessments': [assessment(assessment_fields())], 'actor': 'Operator',
             'action': 'shape', 'timestamp': '2026-10-01T12:00:00+00:00'}
@@ -61,7 +69,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         if code:
             self.assertEqual(caught.exception.code, code)
 
-    def test_all_seven_exact_frozen_field_sets_and_detached_results(self):
+    def test_all_eight_exact_frozen_field_sets_and_detached_results(self):
         self.assertEqual(tuple(fixtures()), STEP_ORDER)
         for step, fields in fixtures().items():
             with self.subTest(step=step):
@@ -108,65 +116,82 @@ class WorkflowSchemaTests(unittest.TestCase):
             self.assert_rejected(lambda: validate_step_fields('review', {'source_revision': bad}, partial=True))
             self.assert_rejected(lambda: validate_step_fields('assess', {'position': {'actual_position': bad}}, partial=True))
 
-    def test_shape_requires_real_alternative_and_next_slice(self):
-        value = fixtures()['shape']
+    def test_exploration_requires_real_alternative_and_next_slice(self):
+        value = fixtures()['exploration']
         value['alternatives'] = []
-        self.assertIn('alternatives', step_requirements('shape', value))
+        self.assertIn('alternatives', step_requirements('exploration', value))
         value['alternatives'] = [{'route': ' ', 'reason': None}]
-        self.assertIn('alternatives.0.route', step_requirements('shape', value))
-        self.assertIn('alternatives.0.reason', step_requirements('shape', value))
+        self.assertIn('alternatives.0.route', step_requirements('exploration', value))
+        self.assertIn('alternatives.0.reason', step_requirements('exploration', value))
         value['next_slice'] = None
-        self.assertIn('next_slice', step_requirements('shape', value))
+        self.assertIn('next_slice', step_requirements('exploration', value))
         value['method'] = 'bounded-plan'
-        self.assert_rejected(lambda: validate_step_fields('shape', value, partial=True))
+        self.assert_rejected(lambda: validate_step_fields('exploration', value, partial=True))
 
-    def test_all_method_conditional_fields_and_unused_nulls(self):
+    def test_exploration_conditional_fields_follow_the_accepted_method(self):
         for selected in ('bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led'):
-            value = fixtures()['method']
-            value['selection'] = selected
+            value = fixtures()['exploration']
             if selected == 'appetite-led':
                 value['investment'] = {'cap': 2, 'unit': 'sessions', 'boundary': 'Fixture only'}
             if selected == 'experiment-led':
                 value['experiment'] = {'question': 'Will this fit?', 'evidence': 'Measure fit',
                                        'success_criterion': 'Fits one lid', 'stop_rule': 'Stop after one test'}
             with self.subTest(method=selected):
-                self.assertEqual(validate_step_fields('method', value), value)
+                self.assertEqual(validate_step_fields('exploration', value, method_selection=selected), value)
                 if selected == 'appetite-led':
                     value['investment']['boundary'] = ' '
                 elif selected == 'experiment-led':
                     value['experiment']['stop_rule'] = None
                 else:
                     value['investment'] = {'cap': 2, 'unit': 'sessions', 'boundary': 'Stale hidden field'}
-                self.assertTrue(step_requirements('method', value))
-                self.assert_rejected(lambda: validate_step_fields('method', value), 'not_ready')
+                self.assertTrue(step_requirements('exploration', value, selected))
+                self.assert_rejected(lambda: validate_step_fields('exploration', value, method_selection=selected), 'not_ready')
+
+    def test_method_reason_is_optional_and_carries_no_investment(self):
+        value = fixtures()['method']
+        value['reason'] = None
+        self.assertEqual(step_requirements('method', value), ())
+        self.assertEqual(validate_step_fields('method', value), value)
+        self.assert_rejected(lambda: validate_step_fields('method', dict(value, investment=None)))
 
     def test_investment_is_positive_finite_not_boolean(self):
         for bad in (True, 0, -2, float('nan'), float('inf'), 10**400):
-            self.assert_rejected(lambda: validate_step_fields('method', {'investment': {'cap': bad}}, partial=True))
+            self.assert_rejected(lambda: validate_step_fields('exploration', {'investment': {'cap': bad}}, partial=True))
 
     def test_memory_found_requires_sources_and_rationale(self):
         value = fixtures()['method']
-        for status in ('found', 'searched_no_preference', 'unavailable', 'error'):
-            value['memory'] = {'status': status, 'sources': [], 'rationale': None}
+        for status in ('found', 'varied', 'searched_no_preference', 'unavailable', 'error'):
+            value['memory'] = {'status': status, 'sources': [], 'rationale': None, 'preferred_method': None}
             if status == 'found':
                 self.assertIn('memory.sources', step_requirements('method', value))
                 self.assertIn('memory.rationale', step_requirements('method', value))
-                value['memory'].update(sources=['saved-decision-fixture'], rationale='Fixture source preference')
+                self.assertIn('memory.preferred_method', step_requirements('method', value))
+                value['memory'].update(sources=['saved-decision-fixture'], rationale='Fixture source preference',
+                                       preferred_method='bounded-plan')
             self.assertEqual(validate_step_fields('method', value), value)
+            if status != 'found':
+                # A preferred method is only ever claimed by a found memory.
+                value['memory']['preferred_method'] = 'bounded-plan'
+                self.assertIn('memory.preferred_method', step_requirements('method', value))
+                self.assert_rejected(lambda: validate_step_fields('method', value), 'not_ready')
         value['memory']['sources'] = ['invented preference']
         self.assert_rejected(lambda: validate_step_fields('method', value), 'not_ready')
 
-    def test_visual_dispositions_require_set_or_meaningful_reason(self):
-        for disposition in ('skipped', 'not-applicable'):
-            value = fixtures()['visualize']
-            value['disposition'] = disposition
-            self.assertEqual(validate_step_fields('visualize', value), value)
-            value['reason'] = None
-            self.assert_rejected(lambda: validate_step_fields('visualize', value), 'not_ready')
-            value['reason'] = 'No designs'
-            value['design_set_id'] = 'set-fixture'
-            self.assert_rejected(lambda: validate_step_fields('visualize', value), 'not_ready')
+    def test_visual_dispositions_require_set_and_source_or_skip(self):
+        value = fixtures()['visualize']
+        value['disposition'] = 'skipped'
+        self.assertEqual(validate_step_fields('visualize', value), value)
+        value['reason'] = None  # skip is one click: a reason is optional
+        self.assertEqual(validate_step_fields('visualize', value), value)
+        value['reason'] = 'No designs'
+        value['design_set_id'] = 'set-fixture'
+        self.assert_rejected(lambda: validate_step_fields('visualize', value), 'not_ready')
+        value = fixtures()['visualize']
+        value['disposition'] = 'not-applicable'  # removed: an old value is simply invalid
+        self.assertRaises(IdeaError, lambda: validate_step_fields('visualize', value))
         value = {'disposition': 'accepted_set', 'reason': None, 'design_set_id': 'set-fixture', 'brief_evidence_id': 'brief-fixture'}
+        self.assert_rejected(lambda: validate_step_fields('visualize', value), 'not_ready')  # source required
+        value['source'] = 'prototype'
         self.assertEqual(validate_step_fields('visualize', value), value)
         value['design_set_id'] = None
         self.assert_rejected(lambda: validate_step_fields('visualize', value), 'not_ready')
@@ -204,9 +229,9 @@ class WorkflowSchemaTests(unittest.TestCase):
 
     def test_unsupported_fields_bad_unicode_and_collection_types(self):
         self.assert_rejected(lambda: validate_step_fields('unknown', {}, partial=True))
-        self.assert_rejected(lambda: validate_step_fields('shape', {'outcome': '\ud800'}, partial=True))
-        self.assert_rejected(lambda: validate_step_fields('shape', {'assumptions': 'not a list'}, partial=True))
-        self.assert_rejected(lambda: validate_step_fields('shape', {'alternatives': [{'route': 'x', 'reason': 'y', 'shell': 'x'}]}, partial=True))
+        self.assert_rejected(lambda: validate_step_fields('exploration', {'outcome': '\ud800'}, partial=True))
+        self.assert_rejected(lambda: validate_step_fields('exploration', {'assumptions': 'not a list'}, partial=True))
+        self.assert_rejected(lambda: validate_step_fields('exploration', {'alternatives': [{'route': 'x', 'reason': 'y', 'shell': 'x'}]}, partial=True))
         self.assert_rejected(lambda: validate_step_fields('visualize', {'design_set_id': '../file'}, partial=True))
         self.assert_rejected(lambda: validate_step_fields('capture', {'workspace': {'name': 'x', 'path': '/x', 'confirmed': True, 'actor': 'fake'}}, partial=True))
 
@@ -237,9 +262,9 @@ class WorkflowSchemaTests(unittest.TestCase):
         value['steps']['visualize']['fields'] = fixtures()['visualize']
         self.assert_rejected(lambda: validate_workflow(value))
         value['steps']['visualize']['acceptance'] = receipt()
-        value['steps']['visualize']['invalidated_by'] = ['shape']
+        value['steps']['visualize']['invalidated_by'] = ['method']
         self.assertEqual(validate_workflow(value), value)
-        value['steps']['visualize']['invalidated_by'] = ['shape', 'shape']
+        value['steps']['visualize']['invalidated_by'] = ['method', 'method']
         self.assert_rejected(lambda: validate_workflow(value))
 
     def test_legacy_snapshot_unchanged_exact_shape_and_no_fabricated_acceptance(self):
@@ -291,7 +316,7 @@ class WorkflowSchemaTests(unittest.TestCase):
         for step in ('visualize', 'assess'):
             workflow['steps'][step] = {'fields': fixtures()[step], 'acceptance': receipt(), 'invalidated_by': []}
         result = adapt_snapshot(value, workflow)
-        self.assertEqual(result['schema_version'], 2)
+        self.assertEqual(result['schema_version'], 3)
         self.assertEqual(validate_snapshot(result), result)
         self.assertEqual(result['shape'], value['shape'])
         self.assertEqual(result['assessments'], value['assessments'])
@@ -300,14 +325,14 @@ class WorkflowSchemaTests(unittest.TestCase):
         self.assert_rejected(lambda: validate_snapshot(result))
 
     def test_version_and_snapshot_score_tampering_fail_closed(self):
-        for bad in (True, 1, 3, '2'):
+        for bad in (True, 1, 4, '3'):
             value = empty_workflow()
             value['schema_version'] = bad
             self.assert_rejected(lambda: validate_workflow(value))
         value = legacy_snapshot()
         value['assessments'][0]['score'] = 0
         self.assert_rejected(lambda: validate_snapshot(value))
-        value = dict(legacy_snapshot(), schema_version=2)
+        value = dict(legacy_snapshot(), schema_version=3)
         self.assert_rejected(lambda: validate_snapshot(value))
         value = legacy_snapshot()
         value['revision'] = True

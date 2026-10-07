@@ -20,10 +20,12 @@ def proposal(number=1, idea_id=KEY):
     return dict(schema_version=1, kind='agent-proposal', proposal_id='proposal_'+format(number, '032x'),
         binding_id='binding_'+'2'*32, generation='agent_'+'3'*32, actor='Operator',
         timestamp='2026-10-02T00:00:00Z', request_id='request-'+str(number), session_id='session_'+'4'*32,
-        idea_id=idea_id, accepted_revision=1, draft_version=0, operation='shape',
-        source_digest=source_digest('shape', 1, data), data=data,
+        idea_id=idea_id, accepted_revision=1, draft_version=0, operation='exploration',
+        source_digest=source_digest('exploration', 1, data), data=data,
         proposal=dict(outcome='Useful outcome '+str(number), scope='small-change', scope_reason='One field',
-            alternatives=[dict(route='Keep current', reason='Lower cost')], assumptions=[], next_slice='Check input', learning=[]))
+            alternatives=[dict(route='Keep current', reason='Lower cost')], assumptions=[], next_slice='Check input', learning=[],
+            investment=None, experiment=None,
+            sketch=[dict(title='Check input', why_next='Cheapest test', done_when='Input is checked', method=None)]))
 
 
 def linked_state(state=None, numbers=(1,), *, notes='User notes\r\n', user=None):

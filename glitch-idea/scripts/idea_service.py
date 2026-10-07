@@ -9,23 +9,27 @@ from dataclasses import dataclass
 import copy
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
 
 from idea_domain import (IdeaError, MAX_INPUT, MAX_STATE, check_id, digest, identity, integer,
-                         now, require, snapshot, text, assessment, ready, receipt, shape, decode)
+                         now, require, snapshot, text, assessment, ready, receipt, shape, decode,
+                         delivery_ref, lifecycle_view)
 from idea_store import Store, read_bytes
 from idea_assessment import (assessment_digest, backlog_projection,
                              validate_assessment_proposal)
 from idea_workflow import (STEP_ORDER, acceptance_source, accept_step,
                            capture_workflow, derive_state, empty_workflow,
                            save_draft, navigate_step, source_digest, validate_step_fields,
-                           invalidate_external, adapt_snapshot, STEP_FIELDS)
+                           invalidate_external, adapt_snapshot, set_hand, HAND_STEPS,
+                           check_memory_preference)
 
-ADVANCED_STEPS = frozenset(('shape','method','visualize','assess'))
-AGENT_OPERATIONS = frozenset(('shape', 'memory', 'method', 'assessment'))
+# Steps accepted through a trusted handler: every step but the two manual ones and the derived Review.
+ADVANCED_STEPS = frozenset(step for step in STEP_ORDER if step not in ('capture','priorities','review'))
+AGENT_OPERATIONS = frozenset(('discovery', 'exploration', 'memory', 'method', 'visual_brief', 'assessment'))
 AGENT_REASONS = frozenset(('wrong_generation', 'wrong_session', 'agent_unavailable',
                           'stale_revision', 'stale_source', 'supporting_evidence'))
 STATE_RESPONSE_BYTES = 2 * MAX_STATE + 2 * MAX_INPUT  # Bridge's inherited read bound.
@@ -223,11 +227,21 @@ def _agent_overlay(value, live, idea):
         if not omitted:
             if operation == 'memory':
                 validate_step_fields('method', {'memory': proposal['proposal']}, partial=True)
+            elif operation == 'visual_brief':
+                require(type(proposal['proposal']) is dict and set(proposal['proposal']) == {'prototype_skill'}
+                        and proposal['proposal']['prototype_skill'] in ('available', 'unavailable'),
+                        'Invalid visual brief projection', 'invalid_agent_provider')
             elif operation == 'assessment':
                 try:
                     validate_assessment_proposal(proposal['proposal'])
                 except IdeaError as exc:
                     raise IdeaError('invalid_agent_provider', 'Invalid assessment proposal projection') from exc
+            elif operation == 'method':
+                # A v3 method proposal is memory-only (R8): never the full step, never a selection.
+                require(type(proposal['proposal']) is dict and set(proposal['proposal']) == {'memory'},
+                        'Invalid method proposal projection', 'invalid_agent_provider')
+                checked = validate_step_fields('method', proposal['proposal'], partial=True)
+                check_memory_preference(checked['memory'])
             else:
                 validate_step_fields(operation, proposal['proposal'])
         for flag, reason, positive in (('stale', 'stale_reason', False),
@@ -243,6 +257,27 @@ def _agent_overlay(value, live, idea):
     require(inventory['content_omitted'] == sum(item['content_omitted'] for item in proposals),
             'Proposal omitted-body count differs', 'invalid_agent_provider')
     return copy.deepcopy(value)
+
+
+def default_workspace(value):
+    """Validate the optional trusted default_workspace setting: None, or dict(name, path).
+
+    The path must be absolute and an existing folder; anything else is a plain config error.
+    Nothing here picks a folder: the owner names it in config.json.
+    """
+    if value is None:
+        return None
+    bad = lambda why: IdeaError('invalid_config', 'default_workspace '+why)
+    if type(value) is not dict or set(value) != {'name', 'path'}:
+        raise bad('must be an object with exactly name and path')
+    name, path = value['name'], value['path']
+    if type(name) is not str or not 1 <= len(name) <= 100 or not name.strip() or '\n' in name or '\r' in name:
+        raise bad('name must be one line of 1 to 100 characters')
+    if type(path) is not str or not path or '\0' in path or not os.path.isabs(path):
+        raise bad('path must be an absolute folder path')
+    if not Path(path).is_dir():
+        raise bad('path must be an existing folder: '+path)
+    return dict(name=name, path=path)
 
 
 class Service:
@@ -280,7 +315,7 @@ class Service:
         agent_generation=live.generation or None is a nonsecret
         incarnation marker that lets browser proposal waits detect a fast resume.
         validate_acceptance(state,idea,payload,source,context,live) runs for
-        Shape/Method/Assess before the packaged handler, under Store mutation lock.
+        Exploration/Method/Assess before the packaged handler, under Store mutation lock.
         These last two callbacks are pure: no policy/binding acquisition, wait,
         publication or I/O. They receive the active transaction state/idea for
         Store's memory-only inventory accessor; other inputs are detached.
@@ -325,6 +360,14 @@ class Service:
         require(idea_id in state['ideas'], 'Unknown idea', 'not_found')
         return state['ideas'][idea_id]
 
+    def _live_idea(self,state,idea_id):
+        """The idea for a browser write: a moved or delivered idea lives in its project, so it is refused first."""
+        idea = self._idea(state,idea_id)
+        info = self.store.lifecycle(idea_id)
+        if info['lifecycle'] != 'active':
+            raise IdeaError('idea_moved','This idea moved to a workspace; edit its file there',home=info['home'])
+        return idea
+
     def _mutate(self,operation,payload,callback):
         result = self.store.mutate(self.context.session_id,payload['request_id'],dict(operation=operation,payload=payload),callback)
         if result.get('idea_id') is not None: self.context.selected_idea_id = result['idea_id']
@@ -365,7 +408,7 @@ class Service:
             else:
                 idea = None
                 workflow = empty_workflow()
-                projection = dict(revision=0,draft_version=0,current_step='capture',
+                projection = dict(revision=0,draft_version=0,hand={name:False for name in HAND_STEPS},current_step='capture',
                     steps={step:dict(status='current' if step=='capture' else 'todo',accepted_revision=None,evidence_id=None) for step in STEP_ORDER},
                     accepted={step:None for step in STEP_ORDER},drafts=workflow['drafts'],draft=None)
             result = dict(ok=True,code='ok',session_id=self.context.session_id,idea_id=selected,
@@ -374,6 +417,10 @@ class Service:
                           capabilities=dict(agent=False,memory=False,uploads=False,handoff=self.handoff_provider is not None),
                           resume=dict(required=True,reason='agent_disconnected'),**projection)
             result.update(copy.deepcopy(handoff_view))
+            result.update(default_workspace=copy.deepcopy(self.config.get('default_workspace')),
+                          lifecycle=None, home=None, delivered_ref=None)
+            if idea is not None:
+                result.update(lifecycle_view(self.store.lifecycle(idea['idea_id'])))
             result.update(backlog=None, backlog_status=dict(available=False, code='no_selection'),
                           human_ratings=None, assessment_summary=None)
             if idea is not None:
@@ -458,11 +505,40 @@ class Service:
     def draft(self,payload):
         payload = self._edit_payload(payload)
         def mutate(state):
-            idea = self._idea(state,payload['idea_id'])
+            idea = self._live_idea(state,payload['idea_id'])
             reduced = save_draft(idea,payload['step'],payload['fields'],expected_revision=payload['expected_revision'],expected_draft_version=payload['expected_draft_version'])
             state['ideas'][idea['idea_id']] = reduced['idea']
             return dict(idea_id=idea['idea_id'])
         return self._mutate('draft',payload,mutate)
+
+    def release(self,payload):
+        """Hand release (R3): the human takes a terminal-guided step by hand.
+
+        Cancels only that step's open agent request (the binding stays usable) and persists
+        the draft meta flag. After the step is accepted this is a no-op.
+        """
+        _bounded_object(payload)
+        _exact(payload,('step',),'release')
+        step = payload['step']
+        require(type(step) is str and step in HAND_STEPS, 'Only discovery or exploration can be taken by hand', 'invalid_input')
+        idea_id = self.context.selected_idea_id
+        require(idea_id is not None, 'No idea selected', 'invalid_input')
+        live = self._agent_context()
+        with self.store.transaction(write=True) as state:
+            idea = self._live_idea(state,idea_id)
+            reduced = set_hand(idea,step)
+            changed = reduced['changed']
+            if changed:
+                state['ideas'][idea_id] = reduced['idea']
+                self.store.commit(state)
+            accepted = idea.get('workflow',{}).get('steps',{}).get(step,{}).get('acceptance') is not None
+            revision, draft_version = idea['revision'], reduced['idea']['workflow']['draft_version']
+        released = 0
+        release = getattr(self.agent_provider,'release',None)
+        if not accepted and live is not None and callable(release):
+            released = release(live,idea_id,step)
+        return dict(ok=True,code='ok',idea_id=idea_id,step=step,hand=not accepted,released=released,
+                    write_state='applied' if changed else 'no_op',revision=revision,draft_version=draft_version)
 
     def navigate(self,payload):
         """Persist explicit Pause through the same durable request seam."""
@@ -474,7 +550,7 @@ class Service:
         require(type(payload['step']) is str and payload['step'] in STEP_ORDER, 'Unknown workflow step')
         payload = copy.deepcopy(payload)
         def mutate(state):
-            idea = self._idea(state,payload['idea_id'])
+            idea = self._live_idea(state,payload['idea_id'])
             reduced = navigate_step(idea,payload['step'],expected_revision=payload['expected_revision'],
                                     expected_draft_version=payload['expected_draft_version'])
             state['ideas'][idea['idea_id']] = reduced['idea']
@@ -500,7 +576,7 @@ class Service:
         payload = copy.deepcopy(payload)
         actor = self.context.actor
         def mutate(state):
-            idea = self._idea(state,payload['idea_id'])
+            idea = self._live_idea(state,payload['idea_id'])
             require(idea['status'] == 'active','Archived ideas keep their place','idea_archived')
             require(payload['expected_backlog_revision'] == state['backlog_revision'],'Stale backlog revision','stale_backlog')
             require(payload['position'] <= len(state['order']),'Position is outside the backlog')
@@ -531,7 +607,7 @@ class Service:
             if payload['step'] == 'capture':
                 # Inherited Capture resolver/filesystem checks stay outside the
                 # reducer and inside receipt replay, after idea/draft CAS.
-                idea = self._idea(state,payload['idea_id'])
+                idea = self._live_idea(state,payload['idea_id'])
                 require(payload['expected_revision'] == idea['revision'],'Stale idea revision','stale_revision')
                 require(payload['expected_draft_version'] == idea.get('workflow',empty_workflow())['draft_version'],
                         'Stale draft version','stale_draft_version')
@@ -555,10 +631,10 @@ class Service:
         Store or file capability.
         """
         payload = validated_payload
-        step = payload['step']; idea = self._idea(state,payload['idea_id'])
+        step = payload['step']; idea = self._live_idea(state,payload['idea_id'])
         require(step != 'review','Review is derived from a verified handoff packet','derived_step')
-        if step != 'shape':
-            require(idea['status'] == 'active','Archived ideas require explicit Shape acceptance first','idea_archived')
+        if step != 'exploration':
+            require(idea['status'] == 'active','Archived ideas require explicit Exploration acceptance first','idea_archived')
         require(payload['expected_revision'] == idea['revision'],'Stale idea revision','stale_revision')
         draft_version = idea.get('workflow',empty_workflow())['draft_version']
         require(payload['expected_draft_version'] == draft_version,'Stale draft version','stale_draft_version')
@@ -579,7 +655,7 @@ class Service:
         if step == 'visualize':
             handler_context = copy.deepcopy(self.context)
             handler_context.asset_inventory = self.store.asset_inventory(state,idea['idea_id'])
-        if self.agent_provider is not None and step in ('shape', 'method', 'assess'):
+        if self.agent_provider is not None and step in ('discovery', 'exploration', 'method', 'assess'):
             self._agent_pure('validate_acceptance', state, idea, checked_payload, source, self.context, live)
         if handler:
             before = copy.deepcopy(state)
@@ -670,15 +746,19 @@ def validate_plan(path,raw,idea,config):
 def _legacy_sources(idea,command):
     if command == 'rate':
         return {'priorities': {key:idea['ratings'][key] for key in ('urgency','importance')} if idea['ratings'] else None}
-    if command == 'shape':
-        value = idea['shape']
-        return {'shape':{key:value[key] for key in STEP_FIELDS['shape']} if value else None,
-                'method':{'selection':value['method'],'reason':value['method_reason']} if value else None}
     if command == 'assess':
         value = idea['assessments'][-1] if idea['assessments'] else None
         from idea_domain import ASSESS_KEYS
         return {'assess':{'assessment':{key:value[key] for key in ASSESS_KEYS}} if value else None}
     return {}
+
+
+def _ready_legacy(idea):
+    """Planning readiness for a pre-workflow idea: ratings, an assessment and a complete exploration."""
+    ready(idea)
+    shaped=idea['shape']
+    require(shaped is not None and all(shaped[k] for k in ('outcome','scope','scope_reason','alternatives','next_slice')),
+            'Complete Exploration before planning','not_ready')
 
 
 def _legacy_review(idea,prior,updates):
@@ -689,7 +769,7 @@ def _legacy_review(idea,prior,updates):
     for step,fields in updates.items():
         old_fields = prior['workflow']['steps'][step]['fields']
         existing = prior['workflow']['drafts'].get(step)
-        command = 'shape' if step in ('shape','method') else 'rate' if step == 'priorities' else 'assess'
+        command = 'rate' if step == 'priorities' else 'assess'
         mirrored = _legacy_sources(prior,command).get(step)
         unchanged_mirror = (mirrored is not None and existing is not None and set(mirrored) <= set(existing)
             and all(existing[key] == value for key,value in mirrored.items())
@@ -698,8 +778,6 @@ def _legacy_review(idea,prior,updates):
                 'Browser draft conflicts with CLI '+step+' edit; resolve the draft before retrying', 'draft_conflict')
         draft = copy.deepcopy(old_fields or {})
         draft.update(fields)
-        if step == 'method' and draft.get('selection') != (old_fields or {}).get('selection'):
-            draft['investment'] = None; draft['experiment'] = None
         reduced = save_draft(idea,step,draft,expected_revision=idea['revision'],expected_draft_version=workflow['draft_version'])
         idea = reduced['idea']; workflow = idea['workflow']
     workflow['current_step'] = selected
@@ -721,7 +799,7 @@ def _invalidate_placement(state,before_order,actor,reason,*,exclude=(),refresh_d
     for key,idea in list(state['ideas'].items()):
         if key in exclude or key not in before_order: continue
         # Archived Assess describes frozen historical evidence. Reordering does
-        # not start a new slice; only explicit Shape may reactivate that idea.
+        # not start a new slice; only explicit Exploration acceptance may reactivate that idea.
         if idea['status'] == 'archived': continue
         if 'workflow' not in idea or idea['workflow']['steps']['assess']['acceptance'] is None: continue
         before = _placement_position(before_order,key)
@@ -752,9 +830,37 @@ def _append_capture(state,idea,actor):
                           exclude=(idea['idea_id'],),refresh_draft=False)
 
 
+MOVED_REFUSED=frozenset(('handoff','exploration','rate','assess','propose','place','record-execution'))
+
+
+def _moved_health(store,state):
+    """Health of ideas whose living file is in a workspace: (issues, notices). Reads only; writes nothing."""
+    import idea_markdown as md
+    issues,notices=[],[]
+    for key,info in store.lifecycles(state).items():
+        home=info['home']
+        if home is None:
+            continue
+        if not Path(home['workspace_path']).is_dir():
+            issues.append('Workspace folder is gone: '+home['workspace_path'])
+            continue
+        try:
+            current=read_bytes(home['file_path'],MAX_STATE)
+        except (OSError,IdeaError) as exc:
+            absent=isinstance(exc,FileNotFoundError) or (isinstance(exc,IdeaError) and exc.code=='missing_artifact')
+            issues.append(('Moved idea file is missing: ' if absent else 'Moved idea file is unreadable: ')+home['file_path'])
+            continue
+        pointer=md.decode_moved(read_bytes(store.path/md.pointer_path(key,'moved'),MAX_STATE))
+        if digest(current)!=pointer['moved_sha256']:
+            notices.append('Moved idea file changed since the move: '+home['file_path'])
+    return issues,notices
+
+
 def run_legacy(args,config):
-    store=Store(args.store or config['store_path'])
     command=args.command
+    if command=='shape':
+        raise IdeaError('unsupported_command','The shape verb is retired; use exploration to reopen Exploration for the next slice')
+    store=Store(args.store or config['store_path'])
     write=command not in ('list','show','handoff','doctor')
     if hasattr(args,'actor'):
         text(args.actor,'actor',200)
@@ -762,12 +868,20 @@ def run_legacy(args,config):
         check_id(args.idea_id)
     with store.transaction(write=write) as state:
         if command=='list':
-            return dict(backlog_revision=state['backlog_revision'],order=state['order'],ideas=[state['ideas'][key] for key in state['order']])
+            views=store.lifecycles(state)
+            return dict(backlog_revision=state['backlog_revision'],order=state['order'],ideas=[state['ideas'][key] for key in state['order']],
+                        lifecycles={key:lifecycle_view(views[key]) for key in state['order']})
         if command in ('doctor','repair-views'):
+            # Repair only ever rewrites views inside the store; a moved idea's home file is never touched.
             issues=store.view_issues(state,repair=command=='repair-views')+store.artifact_issues(state)
+            moved_issues,notices=_moved_health(store,state)
+            issues+=moved_issues
             if issues:
                 raise IdeaError('unhealthy_store','Store health checks failed',issues=issues)
-            return dict(healthy=True,ideas=len(state['ideas']),transaction_revision=state['transaction_revision'])
+            result=dict(healthy=True,ideas=len(state['ideas']),transaction_revision=state['transaction_revision'])
+            if notices:
+                result['notices']=notices
+            return result
         if command=='capture':
             raw=read_bytes(resolve_file(args.text_file))
             try:
@@ -782,24 +896,38 @@ def run_legacy(args,config):
             return dict(idea=idea,backlog_revision=state['backlog_revision'])
         require(args.idea_id in state['ideas'],'Unknown idea: '+args.idea_id,'not_found')
         idea=state['ideas'][args.idea_id]
+        if command=='deliver':
+            delivery_ref(args.ref)
+            result=store.deliver(state,idea['idea_id'],ref=args.ref,actor=args.actor)
+            view=lifecycle_view(store.lifecycle(idea['idea_id']))
+            return dict(dict(idea=state['ideas'][idea['idea_id']],delivery=result['delivery'],**view),**(dict(repeated=True) if result['repeated'] else {}))
+        info=store.lifecycle(idea['idea_id'])
+        view=lifecycle_view(info)
         if command=='show':
-            return dict(idea=idea)
+            return dict(idea=idea,**view)
+        if command in MOVED_REFUSED and info['lifecycle']!='active':
+            raise IdeaError('idea_moved','This idea moved to a workspace; edit its file there',home=info['home'])
         if command=='handoff':
             if 'workflow' in idea:
                 # Same pure eligibility and trusted host evidence as publication.
                 store.handoff_observations(state,idea['idea_id'])
             else:
-                ready(idea,complete_shape=True)
-                require(idea['status']=='active','Shape the next slice before a new handoff','archived_revision')
+                _ready_legacy(idea)
+                require(idea['status']=='active','Reopen Exploration for the next slice before a new handoff','archived_revision')
             return dict(idea_id=idea['idea_id'],idea_revision=idea['revision'],trace_block='## Idea trace\nidea_id: '+idea['idea_id']+'\nidea_revision: '+str(idea['revision']),origin=idea['origin'],shape=idea['shape'],ratings=idea['ratings'],assessments=idea['assessments'],plans=idea['plans'],executions=idea['executions'])
         if hasattr(args,'expected_revision'):
             integer(args.expected_revision,'expected revision',1)
             require(args.expected_revision==idea['revision'],'Stale idea revision; show current idea before retrying','stale_revision')
-        if command in ('shape','rate','assess'):
-            require(command=='shape' or idea['status']=='active','Archived revision is immutable; shape the next slice first','archived_revision')
+        if command in ('exploration','rate','assess'):
+            require(command=='exploration' or idea['status']=='active','Archived revision is immutable; reopen Exploration for the next slice first','archived_revision')
             prior = copy.deepcopy(idea)
-            if command=='shape':
-                idea['shape']=shape(read_json(args.file))
+            if command=='exploration':
+                explored=validate_step_fields('exploration',read_json(args.file))
+                if 'workflow' not in idea:
+                    # A pre-workflow idea has no drafts: its retired shape record carries the exploration.
+                    idea['shape']=shape(dict(outcome=explored['outcome'],scope=explored['scope'],scope_reason=explored['scope_reason'],
+                        alternatives=copy.deepcopy(explored['alternatives']),method=None,method_reason=None,
+                        assumptions=list(explored['assumptions']),next_slice=explored['next_slice'],learning=list(explored['learning'])))
                 idea['status']='active'
             elif command=='rate':
                 integer(args.urgency,'urgency',1,10)
@@ -811,10 +939,13 @@ def run_legacy(args,config):
                 idea['assessments'].append(value)
             previous_sources, current_sources = _legacy_sources(prior,command), _legacy_sources(idea,command)
             updates = {step:fields for step,fields in current_sources.items() if fields != previous_sources[step]}
-            if command == 'shape' and prior['status'] == 'archived':
-                # Explicit next-slice intent must review even identical inputs.
-                updates['shape'] = current_sources['shape']
+            if command == 'exploration':
+                # Explicit next-slice intent: the exploration becomes the draft and reopens the step,
+                # even on identical inputs. Accepted receipts stay verbatim.
+                updates['exploration'] = explored
             idea = _legacy_review(idea,prior,updates)
+            if command=='exploration' and prior['status']=='archived' and 'workflow' in idea:
+                idea['workflow']['current_step']='exploration'  # the next slice opens where the human works on it
             idea['revision']+=1
             idea['revisions'].append(adapt_snapshot(snapshot(idea,args.actor,command),idea.get('workflow')))
             state['ideas'][idea['idea_id']] = idea
@@ -845,12 +976,30 @@ def run_legacy(args,config):
             store.commit(state)
             return dict(placement=choice,backlog_revision=state['backlog_revision'],order=order)
         if command=='register-plan':
+            name,wpath=getattr(args,'workspace_name',None),getattr(args,'workspace_path',None)
+            require((name is None)==(wpath is None),'--workspace-name and --workspace-path must be given together or not at all')
+            moving=name is not None
+            if moving:
+                text(name,'workspace name',100)
+                text(wpath,'workspace path',4096)
+                chosen=config.get('default_workspace')
+                if chosen is not None and os.path.isabs(wpath) and os.path.realpath(wpath)==os.path.realpath(chosen['path']):
+                    raise IdeaError('same_workspace','The target is the default workspace; an idea only moves to a different workspace',workspace_path=chosen['path'])
+            if info['lifecycle']!='active':
+                # Replaying the exact move is repeated; anything else on a moved idea is refused.
+                path=resolve_file(args.path)
+                home=info['home']
+                prior=next((p for p in idea['plans'] if p['source_path']==str(path) and p['idea_revision']==idea['revision']),None)
+                if moving and prior is not None and home['workspace_name']==name and home['workspace_path']==str(Path(wpath)):
+                    verify_current(prior)
+                    return dict(plan=prior,idea=idea,repeated=True,**view)
+                raise IdeaError('idea_moved','This idea moved to a workspace; edit its file there',home=home)
             if 'workflow' not in idea:
-                ready(idea,complete_shape=True)
+                _ready_legacy(idea)
             path=resolve_file(args.path)
             raw=read_bytes(path)
             hashed=digest(raw)
-            for prior in idea['plans']:
+            for prior in ([] if moving else idea['plans']):
                 if prior['source_path']==str(path):
                     verify_current(prior)
                     require(prior['idea_revision']==idea['revision'],'A plan file already links a different revision; use a new file','link_conflict')
@@ -858,7 +1007,7 @@ def run_legacy(args,config):
                     issues=store.view_issues(state)
                     if issues:
                         raise IdeaError('archive_view_failed','Plan already registered; repair archive views',committed=True,issues=issues,plan=prior)
-                    return dict(plan=prior,idea=idea,repeated=True)
+                    return dict(plan=prior,idea=idea,repeated=True,**view)
             if 'workflow' in idea:
                 # Exact immutable replay above remains valid after archival or
                 # workspace drift; only a new plan needs current eligibility.
@@ -868,6 +1017,13 @@ def run_legacy(args,config):
             plan_id=identity('plan')
             frozen_path=store.path/'plan-evidence'/(plan_id+'.md')
             plan=dict(plan_id=plan_id,idea_id=idea['idea_id'],idea_revision=idea['revision'],path=str(frozen_path),source_path=str(path),content=raw.decode('utf-8'),sha256=hashed,actor=args.actor,timestamp=now(),validation=validation)
+            if moving:
+                moved=store.move_out(state,idea['idea_id'],expected_revision=args.expected_revision,plan=plan,workspace_name=name,workspace_path=wpath,actor=args.actor)
+                issues=store.view_issues(state,repair=True)
+                if issues:
+                    raise IdeaError('archive_view_failed','Plan committed and idea moved; archive materialization needs repair-views',committed=True,issues=issues,plan=plan)
+                return dict(plan=plan,idea=state['ideas'][idea['idea_id']],moved_sha256=moved['moved_sha256'],resumed=moved['resumed'],
+                            **lifecycle_view(store.lifecycle(idea['idea_id'])))
             idea['plans'].append(plan)
             idea['status']='archived'
             key=idea['idea_id']+'/r'+str(idea['revision'])+'.json'

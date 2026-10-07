@@ -209,7 +209,7 @@ class Probe:
             self.pending = dict(request_id=key, session_id=self.session_id,
                                 idea_id=self.fixture['idea_id'],
                                 accepted_revision=self.fixture['accepted_revision'],
-                                draft_version=self.fixture['draft_version'], operation='shape',
+                                draft_version=self.fixture['draft_version'], operation='discovery',
                                 source_digest=hashlib.sha256(self.fixture['raw_text'].encode()).hexdigest())
             self.events.append(dict(self.pending, sequence=self.sequence,
                                     data={'raw_text': self.fixture['raw_text']}))

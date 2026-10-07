@@ -16,12 +16,18 @@ from idea_proposal_evidence import validate_record
 from idea_assessment import (assessment_digest, prepare_assessment_source,
     validate_assessment_source, validate_data as validate_assessment_data,
     validate_assessment_proposal, validate_actual_position)
-from idea_workflow import (MEMORY_STATUSES, acceptance_source as final_source,
-    derive_state, import_workflow, source_digest, validate_step_fields)
+from idea_workflow import (DISCOVERY_BEFORE_METHODS, MEMORY_STATUSES, acceptance_source as final_source,
+    check_memory_preference, derive_dependencies, derive_state, import_workflow, source_digest,
+    validate_step_fields)
 
-OPERATIONS = ('shape', 'memory', 'method', 'assessment')
-INPUTS = {'shape': ('capture',), 'memory': ('capture', 'shape'),
-          'method': ('capture', 'shape')}
+OPERATIONS = ('discovery', 'exploration', 'memory', 'method', 'visual_brief', 'assessment')
+# Consumed inputs come from the workflow's one dependency table, never a second hand-kept order.
+_DEPENDENCIES = derive_dependencies(DISCOVERY_BEFORE_METHODS)
+INPUTS = {'discovery': _DEPENDENCIES['discovery'], 'exploration': _DEPENDENCIES['exploration'],
+          'memory': _DEPENDENCIES['method'], 'method': _DEPENDENCIES['method'],
+          'visual_brief': _DEPENDENCIES['visualize']}
+# Steps whose own draft rides along in the source as the editable target.
+TARGETS = ('discovery', 'exploration', 'method')
 CORRELATION = frozenset(('request_id', 'session_id', 'idea_id', 'accepted_revision',
                          'draft_version', 'operation', 'source_digest'))
 SOURCE_KEYS = frozenset(('accepted_revision', 'draft_version', 'data'))
@@ -82,10 +88,10 @@ def _data(operation, data):
         return
     require(type(data) is dict, 'Source data must be a step map')
     required = set(INPUTS[operation])
-    optional = {operation} if operation in ('shape', 'method') else set()
+    optional = {operation} if operation in TARGETS else set()
     require(required <= set(data) <= required | optional, 'Unexpected consumed source steps')
     for step, fields in data.items():
-        validate_step_fields(step, fields, partial=step in optional)
+        validate_step_fields(step, fields, partial=step in optional, legacy=True)
 
 
 def _source(operation, source, idea_id=None):
@@ -134,7 +140,7 @@ def prepare_source(state, idea_id, operation):
     for step in INPUTS[operation]:
         require(statuses[step]['status'] == 'saved', 'Current acceptance required for '+step, 'not_ready')
         data[step] = copy.deepcopy(workflow['steps'][step]['fields'])
-    if operation in ('shape', 'method'):
+    if operation in TARGETS:
         if operation in workflow['drafts']:
             data[operation] = copy.deepcopy(workflow['drafts'][operation])
         elif workflow['steps'][operation]['fields'] is not None:
@@ -162,15 +168,134 @@ def validate_source(state, correlation, source):
     return copy.deepcopy(source)
 
 
+# The workflow step each fillable operation's page buffer (and so its saved draft) belongs to.
+FILL_STEP = {'discovery': 'discovery', 'exploration': 'exploration', 'method': 'method',
+             'assessment': 'assess', 'visual_brief': 'visualize'}
+
+
+def own_fill_base(state, idea_id, operation):
+    """The target draft as it stands when a request is enqueued (None: no saved draft yet).
+
+    Captured by the trusted launch path from the Store state, never from the agent: it is the
+    base the request's own fills are later applied to when a reply is reconciled.
+    """
+    step = FILL_STEP.get(operation)
+    if step is None or idea_id not in state['ideas']:
+        return None
+    drafts = _idea(state, idea_id)['workflow']['drafts']
+    return copy.deepcopy(drafts[step]) if step in drafts else None
+
+
+def _blank(value):
+    """An untouched page default: nothing a human typed or chose."""
+    if value is None or value is False or value == '' or value == [] or value == {}:
+        return True
+    return type(value) is dict and all(_blank(item) for item in value.values())
+
+
+def _merge_fills(fills):
+    merged = {}
+    for item in fills:
+        merged.update(copy.deepcopy(item['fields']))
+    return merged
+
+
+def _differs():
+    return IdeaError('stale_source', 'Target draft differs from the request\'s own fills')
+
+
+def _assessment_is_base_plus_fills(draft, base, merged):
+    # The page keeps a position beside the assessment: the proposed position is the fill; the actual
+    # position only follows it while it was empty (the human decides it otherwise).
+    position, before = draft.get('position'), base.get('position') or {}
+    if type(position) is not dict or not set(draft) <= {'assessment', 'position'}:
+        raise _differs()
+    if 'assessment' in merged:
+        good = draft.get('assessment') == merged['assessment']
+    else:
+        good = draft.get('assessment') == base.get('assessment') or (
+            'assessment' not in base and _blank(draft.get('assessment')))
+    if 'proposed_position' in merged:
+        good = good and position.get('proposed_position') == merged['proposed_position']
+        if before.get('actual_position') is None:
+            good = good and position.get('actual_position') in (None, merged['proposed_position'])
+        else:
+            good = good and all(position.get(k) == before.get(k) for k in ('actual_position', 'neighbors'))
+        good = good and position.get('override_reason') == before.get('override_reason')
+    elif before:
+        good = good and all(position.get(k) == before.get(k) for k in
+                            ('proposed_position', 'actual_position', 'neighbors', 'override_reason'))
+    else:
+        good = good and _blank(position)
+    if not good:
+        raise _differs()
+
+
+def _draft_is_base_plus_fills(operation, draft, base, fills):
+    """Exact content test: the draft is the enqueue-time base with this request's fills applied."""
+    if type(draft) is not dict:
+        raise _differs()
+    base = base if type(base) is dict else {}
+    merged = _merge_fills(fills)
+    if operation == 'assessment':
+        return _assessment_is_base_plus_fills(draft, base, merged)
+    if not all(key in draft for key in set(merged) | set(base)):
+        raise _differs()
+    for key, value in draft.items():
+        if key in merged:
+            good = value == merged[key]
+        elif key in base:
+            good = value == base[key]
+        else:
+            good = _blank(value)
+        if not good:
+            raise _differs()
+
+
+def reconcile_own_fills(state, correlation, source, fills, base):
+    """A reply is not stale merely because this request's own fills moved the draft.
+
+    Returns (correlation, source) re-pinned to the current state when, and only when, the accepted
+    revision and every consumed input are unchanged and the target draft is exactly the enqueue-time
+    base with the Broker's recorded fills applied. A human edit, a revision change or any other
+    difference raises stale_source. The fills come from the Broker, never from the agent's reply.
+    """
+    _correlation(correlation); operation = correlation['operation']
+    _source(operation, source, correlation['idea_id'])
+    require(operation in FILL_STEP and fills, 'No fills to reconcile', 'stale_source')
+    idea_id = correlation['idea_id']
+    require(proposal_source_digest(operation, source, idea_id=idea_id) == correlation['source_digest'],
+            'Original source digest differs', 'stale_source')
+    try:
+        current = prepare_source(state, idea_id, operation)
+    except IdeaError as exc:
+        if exc.code != 'not_ready':
+            raise
+        raise IdeaError('stale_source', 'Consumed inputs are no longer current') from exc
+    require(current['accepted_revision'] == source['accepted_revision'] == correlation['accepted_revision'],
+            'Accepted revision changed', 'stale_source')
+    target = 'target' if operation == 'assessment' else operation
+    require(all(current['data'].get(key) == source['data'].get(key)
+                for key in set(current['data']) | set(source['data']) if key != target),
+            'Consumed inputs changed', 'stale_source')
+    drafts = _idea(state, idea_id)['workflow']['drafts']
+    _draft_is_base_plus_fills(operation, drafts.get(FILL_STEP[operation]), base, fills)
+    return (dict(correlation, draft_version=current['draft_version'],
+                 source_digest=proposal_source_digest(operation, current, idea_id=idea_id)), current)
+
+
 def validate_memory(proposal):
     """Typed safe-memory result only; the later adapter grounds retrieval."""
-    _bounded(proposal); _exact(proposal, ('status', 'sources', 'rationale'), 'memory proposal')
+    _bounded(proposal)
+    require(type(proposal) is dict and {'status', 'sources', 'rationale'} <= set(proposal)
+            <= {'status', 'sources', 'rationale', 'preferred_method'}, 'Invalid memory proposal fields')
     validate_step_fields('method', {'memory': proposal}, partial=True)
     require(type(proposal['status']) is str and proposal['status'] in MEMORY_STATUSES, 'Invalid memory status')
     require(type(proposal['sources']) is list and
             all(type(value) is str and value.strip() for value in proposal['sources']), 'Invalid memory references')
     if proposal['rationale'] is not None:
         text(proposal['rationale'], 'memory rationale')
+    check_memory_preference(proposal, 'memory')
     if proposal['status'] == 'found':
         require(bool(proposal['sources']) and type(proposal['rationale']) is str
                 and bool(proposal['rationale'].strip()), 'Found memory requires references and rationale')
@@ -186,10 +311,18 @@ def validate_proposal(operation, proposal, *, source=None, idea_id=None):
             return validate_memory(proposal)
         if operation == 'assessment':
             return validate_assessment_proposal(proposal, source=source, idea_id=idea_id)
-        result = validate_step_fields(operation, proposal)
+        if operation == 'visual_brief':
+            require(type(proposal) is dict and set(proposal) == {'prototype_skill'}
+                    and type(proposal['prototype_skill']) is str
+                    and proposal['prototype_skill'] in ('available', 'unavailable'), 'Invalid visual brief proposal')
+            return copy.deepcopy(proposal)
         if operation == 'method':
+            # R8: the agent never recommends; a method proposal is its memory result only.
+            require(type(proposal) is dict and set(proposal) == {'memory'}, 'Method proposal carries memory only')
+            result = validate_step_fields('method', proposal, partial=True)
             validate_memory(result['memory'])
-        return result
+            return result
+        return validate_step_fields(operation, proposal)
     except IdeaError as exc:
         if exc.code == 'too_large':
             raise
@@ -283,6 +416,8 @@ def _acceptance_reason(state, record, final_fields=None):
     for step in INPUTS[operation]:
         if _bounded(record['data'][step]) != _bounded(current['data'][step]):
             return 'stale_source'
+    if operation == 'visual_brief':
+        return None
     if operation == 'method':
         original_target = record['data'].get('method', {})
         if 'memory' in original_target:
@@ -331,7 +466,7 @@ class SourceAdapter:
                 current = acceptance_reason = 'stale_source'
             live_reason = _incarnation_reason(checked, live_binding)
             acceptance_reason = live_reason or acceptance_reason
-            if checked['operation'] == 'memory' and acceptance_reason is None:
+            if checked['operation'] in ('memory', 'visual_brief') and acceptance_reason is None:
                 acceptance_reason = 'supporting_evidence'
             stale_reason = live_reason or current
             summary = dict(proposal_id=checked['proposal_id'], request_id=checked['request_id'],
@@ -375,7 +510,7 @@ class SourceAdapter:
         _bounded(payload); _live(live_binding)
         require(idea is state['ideas'].get(idea.get('idea_id')), 'Acceptance requires current idea', 'invalid_handler')
         step = payload.get('step')
-        require(step in ('shape', 'method', 'assess'), 'Unsupported proposal acceptance', 'operation_unavailable')
+        require(step in ('discovery', 'exploration', 'method', 'assess'), 'Unsupported proposal acceptance', 'operation_unavailable')
         fields = validate_step_fields(step, payload.get('fields'))
         require(payload.get('idea_id') == idea['idea_id'], 'Acceptance idea differs', 'stale_source')
         integer(payload.get('expected_revision'), 'expected revision', 1)

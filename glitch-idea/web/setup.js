@@ -1,6 +1,9 @@
 // Setup pane: where ideas live. One question, two stores. The API key is write-only:
 // it is typed here, sent once, cleared at once, and never read back, rendered or stored by the page.
-const WHERE = {native: 'Glitch native — Markdown files in this Glitch store', api: 'Your own workflow — through its API'};
+const WHERE = {
+  native: ['Glitch native', 'Markdown files in this Glitch store. Nothing to configure.'],
+  api: ['Your own workflow', 'Through its API. Needs an address and a key your system minted for you.'],
+};
 const SAVE_REFUSALS = {
   insecure_url: 'Plain http is only allowed to this computer. Use an https address for any other system.',
   invalid_url: 'That API address is not valid. Give the full address, starting with https, with no sign-in details or query.',
@@ -41,7 +44,8 @@ export function render(ctx) {
   if (!ui.loaded && !ui.loading && connected()) { load(); }
 
   const back = button('Return to current idea', () => { ui.key = ''; if (!flow.disposed) { flow.view = 'workflow'; flow.onChange(); } });
-  back.id = 'setup-return'; foot.append(back);
+  back.id = 'setup-return';
+  const finishFoot = (...before) => { foot.append(...before, back); };
 
   const stored = ui.settings;
   // Never claim where ideas live before the saved choice has been read.
@@ -49,13 +53,16 @@ export function render(ctx) {
     stored.where === 'api' ? STATUS_API : STATUS_NATIVE, 'notice');
   line.id = 'setup-status'; line.setAttribute('role', 'status'); body.append(line);
   if (ui.notice) { const note = element('p', ui.notice, 'backlog-notice'); note.id = 'setup-notice'; note.setAttribute('role', 'status'); body.append(note); }
-  if (!stored) { if (ui.loaded) { const retry = button('Try again', handle(() => { ui.loaded = false; return load(); })); retry.id = 'setup-retry'; foot.append(retry); } return; }
+  if (!stored) { const extra = []; if (ui.loaded) { const retry = button('Try again', handle(() => { ui.loaded = false; return load(); })); retry.id = 'setup-retry'; extra.push(retry); } finishFoot(); foot.append(...extra); return; }
 
-  const group = element('div', '', 'setup-choices'); group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-label', 'Where do your ideas live?');
-  const question = element('h2', 'Where do your ideas live?', 'setup-question');
-  body.append(question, group);
+  body.append(element('p', 'Choose the store for saved ideas. Changing it does not move ideas you already saved.', 'g-sub'));
+  const columns = element('div', '', 'g-cols setup-cols'), left = element('div', '', 'bw-stack');
+  const group = element('div', '', 'setup-choices'); group.setAttribute('role', 'radiogroup'); group.setAttribute('aria-labelledby', 'setup-question');
+  const question = element('h2', 'Where do your ideas live?', 'g-label setup-question'); question.id = 'setup-question';
+  left.append(question, group); columns.append(left);
   for (const key of ['native', 'api']) {
-    const choice = button(WHERE[key], () => { ui.choice = key; ui.test = ''; ui.notice = ''; redraw(); }, 'setup-choice');
+    const choice = button('', () => { ui.choice = key; ui.test = ''; ui.notice = ''; redraw(); }, 'g-choice setup-choice');
+    choice.append(element('b', WHERE[key][0]), element('span', WHERE[key][1]));
     // One choice of two: a radio group with roving focus and arrow keys, styled like every selected choice.
     choice.id = 'setup-' + key; choice.setAttribute('role', 'radio'); choice.setAttribute('aria-checked', ui.choice === key ? 'true' : 'false');
     choice.tabIndex = ui.choice === key ? 0 : -1;
@@ -68,31 +75,31 @@ export function render(ctx) {
     group.append(choice);
     if (ui.focus === choice.id) { ui.focus = null; queueMicrotask?.(() => choice.focus?.()); }
   }
-  let urlInput = null, keyInput = null;
+  let urlInput = null, keyInput = null, holder = null;
   if (ui.choice === 'api') {
-    const fields = element('div', '', 'setup-fields');
-    const urlField = element('div', '', 'field');
+    const fields = element('section', '', 'g-card setup-fields'); fields.setAttribute('aria-label', 'API connection');
+    const urlField = element('div', '', 'field g-field');
     const urlLabel = element('label', 'API address'); urlLabel.htmlFor = 'setup-url';
-    urlInput = element('input'); urlInput.id = 'setup-url'; urlInput.type = 'text'; urlInput.placeholder = 'https:' + '//…'; urlInput.value = ui.url; // placeholder built in two parts: shipped files carry no literal URL
+    urlInput = element('input', '', 'g-input'); urlInput.id = 'setup-url'; urlInput.type = 'text'; urlInput.placeholder = 'https:' + '//…'; urlInput.value = ui.url; // placeholder built in two parts: shipped files carry no literal URL
     urlInput.setAttribute('autocomplete', 'off'); urlInput.autocomplete = 'off'; urlInput.spellcheck = false;
     urlInput.readOnly = ui.busy;  // nothing typed during a test or save can be lost to the redraw that ends it
     urlInput.addEventListener('input', () => { ui.url = urlInput.value; untested(); });
-    urlField.append(urlLabel, urlInput);
-    const keyField = element('div', '', 'field');
+    urlField.append(urlLabel, urlInput, element('span', 'Full https address, no sign-in details or query. Plain http only for this computer.', 'g-help'));
+    const keyField = element('div', '', 'field g-field');
     const keyLabel = element('label', 'API key'); keyLabel.htmlFor = 'setup-key';
-    keyInput = element('input'); keyInput.id = 'setup-key'; keyInput.type = 'password'; keyInput.autocomplete = 'off'; keyInput.value = ui.key; // a key being typed survives the redraws the page makes
+    keyInput = element('input', '', 'g-input'); keyInput.id = 'setup-key'; keyInput.type = 'password'; keyInput.autocomplete = 'off'; keyInput.value = ui.key; // a key being typed survives the redraws the page makes
     keyInput.setAttribute('autocomplete', 'off'); keyInput.readOnly = ui.busy;
-    keyInput.placeholder = stored.api.key_set ? 'A key is saved — leave empty to keep it' : 'Paste the key your system minted for you';
+    keyInput.placeholder = stored.api.key_set ? 'A key is saved. Leave empty to keep it' : 'Paste the key your system minted for you';
     keyInput.addEventListener('input', () => { ui.key = keyInput.value; untested(); });
     keyField.append(keyLabel, keyInput);
-    if (stored.api.key_set) {
-      const remove = button('Remove the saved key', handle(() => save('')));
-      remove.id = 'setup-remove-key'; remove.disabled = ui.busy || !connected(); keyField.append(remove);
-    }
     fields.append(urlField, keyField,
       element('p', 'Use https. Plain http is only allowed to this computer. The key is stored privately on this computer and never shown again. Keys are minted by your own system for you, and everything written with one is yours.', 'help'));
-    body.append(fields);
+    columns.append(fields); holder = fields;
+  } else {
+    const note = element('div', '', 'bw-notice'); note.append(element('span', 'Ideas are saved in Glitch as Markdown, one file per idea.'));
+    columns.append(note); holder = note;
   }
+  body.append(columns);
   const save = async key => {
     const where = key === '' ? stored.where : ui.choice; // removing a key never switches the store
     if (ui.busy || !connected()) return;
@@ -119,16 +126,22 @@ export function render(ctx) {
     } catch (error) { ui.test = TEST_REASONS[error?.code] ?? 'The test could not run: ' + (error?.code ?? 'unknown_error') + '.'; }
     finally { ui.busy = false; redraw(); }
   };
-  const actions = element('div', '', 'setup-actions');
-  const saveButton = button('Save', handle(() => save()), 'primary'); saveButton.id = 'setup-save'; saveButton.disabled = ui.busy || !connected();
-  const testButton = button('Test connection', handle(test)); testButton.id = 'setup-test';
-  const unsaved = element('p', 'Save first: Test connection checks the saved settings.', 'help'); unsaved.id = 'setup-test-unsaved';
+  const actions = element('div', '', 'bw-row setup-actions');
+  const saveButton = button('Save settings', handle(() => save()), 'bw-btn bw-btn--primary primary'); saveButton.id = 'setup-save'; saveButton.disabled = ui.busy || !connected();
+  const testButton = button('Test connection', handle(test), 'bw-btn bw-btn--secondary'); testButton.id = 'setup-test';
+  const unsaved = element('span', 'Test connection checks the saved settings, so save first.', 'g-foot__msg'); unsaved.id = 'setup-test-unsaved';
   // Typed but unsaved settings disable the test without a redraw, so a typed key is never wiped by it.
   function untested() {
     const changed = Boolean(keyInput?.value) || (ui.choice === 'api' && ui.url.trim() !== (stored.api.base_url ?? '')) || ui.choice !== stored.where;
     testButton.disabled = ui.busy || !connected() || changed; unsaved.hidden = !changed;
   }
   untested();
-  actions.append(saveButton, testButton); body.append(actions, unsaved);
-  const result = element('p', ui.test, 'backlog-notice'); result.id = 'setup-test-result'; result.setAttribute('role', 'status'); result.hidden = !ui.test; body.append(result);
+  actions.append(testButton);
+  if (ui.choice === 'api' && stored.api.key_set) {
+    const remove = button('Remove saved key', handle(() => save('')), 'bw-btn bw-btn--ghost');
+    remove.id = 'setup-remove-key'; remove.disabled = ui.busy || !connected(); actions.append(remove);
+  }
+  holder.append(actions);
+  finishFoot(saveButton); foot.append(unsaved);
+  const result = element('p', ui.test, 'backlog-notice'); result.id = 'setup-test-result'; result.setAttribute('role', 'status'); result.hidden = !ui.test; holder.append(result);
 }

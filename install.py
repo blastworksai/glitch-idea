@@ -17,7 +17,7 @@ import uuid
 PRODUCT = "glitch-idea-personal"
 MANIFEST = ".glitch-idea-install.json"
 SUPPORTED_KEYS = frozenset(("store_path", "plan_validator_argv", "validator_timeout_seconds",
-                            "runtime_root", "runtime_python"))
+                            "runtime_root", "runtime_python", "default_workspace"))
 MINIMUM_PYTHON = (3, 10)
 # A Glitch Brain is identified by its engine updater beside its operations manual.
 BRAIN_MARKERS = (Path(".claude") / "scripts" / "update.py", Path("operations-reference.md"))
@@ -207,6 +207,15 @@ def effective_config(source, destination, explicit_store, recognized, explicit_r
         raise InstallError("validator_timeout_seconds must be an integer from 1 to 120")
     result = {"store_path": str(store), "plan_validator_argv": argv,
               "validator_timeout_seconds": timeout}
+    workspace = config.get("default_workspace")
+    if workspace is not None:
+        # The helper checks the folder exists each time it runs; here only the shape, so an install never writes a config it refuses.
+        if (not isinstance(workspace, dict) or set(workspace) != {"name", "path"} or not isinstance(workspace["name"], str)
+                or not 1 <= len(workspace["name"]) <= 100 or not workspace["name"].strip() or "\n" in workspace["name"]
+                or "\r" in workspace["name"] or not isinstance(workspace["path"], str) or "\x00" in workspace["path"]
+                or not os.path.isabs(workspace["path"])):
+            raise InstallError("default_workspace must be null or an object with a one-line name and an absolute path")
+        result["default_workspace"] = {"name": workspace["name"], "path": workspace["path"]}
     if len(json_bytes(result)) > LAUNCH_CONFIG_LIMIT:
         raise InstallError(f"store_path and plan_validator_argv together exceed the {LAUNCH_CONFIG_LIMIT}-byte launch limit")
     explicit_runtime = explicit_runtime or {}
