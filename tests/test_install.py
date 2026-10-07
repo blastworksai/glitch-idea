@@ -200,6 +200,21 @@ class InstallTests(unittest.TestCase):
         self.assertIn("store_paht", error["message"])
         self.assertFalse(self.skills.exists())
 
+    def test_default_workspace_is_a_supported_config_key_and_is_preserved(self):
+        self.pin()
+        folder = self.root / "project"; folder.mkdir()
+        value = {"name": "Atlas", "path": str(folder)}
+        (self.local / "config.json").write_text(json.dumps({"store_path": "ideas", "default_workspace": value}))
+        self.run_install("--runtime-python", sys.executable, "--runtime-root", str(self.root / "state"))
+        self.assertEqual(json.loads((self.destination / "config.json").read_text())["default_workspace"], value)
+
+    def test_malformed_default_workspace_refuses(self):
+        for bad in ({"name": "A"}, {"name": "A", "path": "relative"}, {"name": "", "path": "/x"}, "x", {"name": "A", "path": "/x", "extra": 1}):
+            with self.subTest(bad=bad):
+                (self.local / "config.json").write_text(json.dumps({"store_path": "ideas", "default_workspace": bad}))
+                self.run_install(success=False)
+                self.assertFalse(self.skills.exists())
+
     def test_malformed_runtime_and_validator_values_refuse(self):
         for bad in ({"runtime_root": "relative/state"}, {"runtime_root": None}, {"runtime_python": ""},
                     {"plan_validator_argv": ["x"] * 33}, {"plan_validator_argv": ["ok", "nul\x00"]}):

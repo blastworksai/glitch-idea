@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import copy
 import getpass
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -22,22 +23,25 @@ import tempfile
 
 from idea_bridge import BridgeError, BridgeServer, Response, check
 from idea_domain import IdeaError, check_id, decode, encoded, require
-from idea_native import open_browser, NativeError, OrcaBinding
+from idea_native import open_browser, close_browser_page, NativeError, OrcaBinding
 from idea_runtime import Runtime, RuntimeError as OwnerError, MAX_BINDINGS
 from idea_service import Service, TrustedContext
 from idea_sessions import SessionPolicy, AgentBinding
 from idea_steps import load_registry, TrustedRoute
 from idea_proposals import Broker
 from idea_workflow_api import WorkflowError, WorkflowSettings
-from idea_agent_source import (SourceAdapter, prepare_source, validate_source,
+from idea_agent_source import (SourceAdapter, own_fill_base, prepare_source, reconcile_own_fills, validate_source,
     validate_current, project_sources, proposal_source_digest)
 from idea_agent_memory import validate_proposal, validate_method_memory
 from idea_store import Store
 from idea_handoff import HandoffProvider, idea_markdown, ideas, selection
+from idea_workflow import derive_state
 
 COMMON = {'challenge','instance_nonce','store_sha256'}
 OPEN_FIELDS = COMMON | {'mode','binding_id','selected_idea_id'}
 CREDENTIAL_FIELDS = COMMON | {'binding_id','session_id','expected_generation'}
+DISCARD_FIELDS = COMMON | {'binding_id','confirm'}
+CONTROL_FIELDS = {'binding-open':OPEN_FIELDS,'agent-credentials':CREDENTIAL_FIELDS,'binding-discard':DISCARD_FIELDS,'binding-list':COMMON}
 CHILD = Path(__file__).resolve()
 _children = []  # Retain handles; no killing/ownership authority follows from PID.
 _children_lock = threading.Lock()
@@ -51,7 +55,7 @@ class LaunchError(Exception):
 
 def _config(config, store_path):
     value = {} if config is None else copy.deepcopy(config)
-    require(type(value) is dict and set(value) <= {'store_path','plan_validator_argv','validator_timeout_seconds'},
+    require(type(value) is dict and set(value) <= {'store_path','plan_validator_argv','validator_timeout_seconds','default_workspace'},
             'Unexpected trusted launch configuration','invalid_config')
     argv = value.get('plan_validator_argv')
     require(argv is None or (type(argv) is list and 0 < len(argv) <= 32 and
@@ -61,6 +65,9 @@ def _config(config, store_path):
     require(type(timeout) in (int,float) and math.isfinite(timeout) and 1 <= timeout <= 120,
             'Invalid trusted validator timeout','invalid_config')
     result = dict(store_path=str(store_path),plan_validator_argv=argv,validator_timeout_seconds=timeout)
+    if value.get('default_workspace') is not None:
+        from idea_service import default_workspace
+        result['default_workspace'] = default_workspace(value['default_workspace'])
     require(len(encoded(result)) <= 16384,'Launch configuration exceeds limit','invalid_config')
     return result
 
@@ -112,6 +119,10 @@ class _AgentProvider:
                     capabilities=dict(agent=status=='connected',memory=status=='connected'),proposal_sources=sources,
                     conversation=talk,**projection)
 
+    def release(self, live, idea_id, step):
+        """Hand release: cancel only this step's open request; the binding is untouched."""
+        return self.owner.broker.release_request(live['binding_id'],live['generation'],idea_id,step)
+
     def validate_acceptance(self, state, idea, payload, source, context, live):
         record = None
         if live is None:
@@ -119,9 +130,14 @@ class _AgentProvider:
         else:
             record = self.sources.validate_acceptance(state,idea,payload,source,context,live_binding=live)
         if payload['step'] == 'method':
+            # Same lock order project() already uses: the Store transaction is held, then the broker
+            # condition is taken inside conversation(); the broker never takes the Store lock.
+            talk = None
+            if live is not None and live['agent_status'] == 'connected':
+                talk = self.owner.broker.conversation(live['binding_id'],live['generation'])
             validate_method_memory(state,idea,payload['fields'],context,live_binding=live,
                                    proposals=self.owner.store.agent_proposals(state,idea['idea_id']),
-                                   accepted_proposal=record)
+                                   accepted_proposal=record,conversation=talk)
         return record
 
 
@@ -141,7 +157,7 @@ class OwnerService:
         self._agents = {}
         self._scope = threading.local()
         self._restoring = True
-        self.broker = Broker(validate_source=self._validate_source,persist_proposal=self._persist_proposal,
+        self.broker = Broker(validate_source=self._validate_source,persist_proposal=self._persist_proposal,reconcile_source=self._reconcile_source,
                              validate_proposal=validate_proposal, source_digest_fn=proposal_source_digest)
         self.agent_provider = _AgentProvider(self)
         self.handoff_provider = HandoffProvider(self.store)
@@ -200,6 +216,10 @@ class OwnerService:
         check(hasattr(self._scope,'state'),'invalid_transaction',500)
         return validate_source(self._scope.state,correlation,source)
 
+    def _reconcile_source(self, correlation, source, fills, base):
+        check(hasattr(self._scope,'state'),'invalid_transaction',500)
+        return reconcile_own_fills(self._scope.state,correlation,source,fills,base)
+
     def _persist_proposal(self, evidence):
         check(hasattr(self._scope,'state'),'invalid_transaction',500)
         return self.store.persist_agent_proposal(self._scope.state,evidence,actor=self._scope.actor,
@@ -227,18 +247,33 @@ class OwnerService:
             return dict(ok=True,code='ok',reachable=False,reason=exc.code,service=None)
         return dict(ok=True,code='ok',reachable=True,reason=None,service=found['service'])
 
+    def _refuse_moved(self, idea_id):
+        """Inside a Store transaction: a moved or delivered idea lives in its project, so agent work on it is refused."""
+        if type(idea_id) is str:
+            info = self.store.lifecycle(idea_id)
+            if info['lifecycle'] != 'active':
+                raise IdeaError('idea_moved','This idea moved to a workspace; edit its file there',home=info['home'])
+
     def propose(self, binding, request, payload):
         # Browser bridge holds the stable binding lock; source is prepared under
         # Store, never from browser prose or an unsaved client buffer.
+        # A moved idea answers idea_moved before anything else (the agent may not even be connected).
+        if type(payload) is dict:
+            with self.store.transaction() as state:
+                self._refuse_moved(payload.get('idea_id'))
         live = self.live_context(binding.application.context)
         check(live is not None and live['agent_status'] == 'connected','agent_unavailable',409)
-        check(type(payload) is dict and payload.get('operation') in ('shape','memory','method','assessment'),'operation_unavailable',409)
+        check(type(payload) is dict and payload.get('operation') in ('discovery','exploration','memory','method','visual_brief','assessment'),'operation_unavailable',409)
         context = AgentBinding(binding,live['binding_id'],live['generation'],live['session_id'])
         self.policy.recheck_agent(context)
         with self.store.transaction() as state:
+            held = state['ideas'].get(payload.get('idea_id')) if type(payload.get('idea_id')) is str else None
+            check(held is None or payload['operation'] not in ('discovery','exploration')
+                  or held.get('workflow',{}).get('hand',{}).get(payload['operation']) is not True,'hand_released',409)
             source = prepare_source(state,payload.get('idea_id'),payload['operation'])
             with self._source_scope(state,binding.application):
-                return self.broker.enqueue(context.binding_id,context.generation,payload,source)
+                return self.broker.enqueue(context.binding_id,context.generation,payload,source,
+                                           base=own_fill_base(state,payload.get('idea_id'),payload['operation']))
 
     def agent(self, operation, context, payload):
         if operation == 'events':
@@ -253,12 +288,23 @@ class OwnerService:
             self.policy.recheck_agent(context)
             check(type(payload) is dict,'invalid_input')
             with self.store.transaction() as state:
+                self._refuse_moved(payload.get('idea_id'))
                 idea = state['ideas'].get(payload.get('idea_id')) if type(payload.get('idea_id')) is str else None
                 check(idea is not None and idea['revision'] == payload.get('accepted_revision'),'stale_source',409)
             return self.broker.fill(context.binding_id,context.generation,payload)
+        if operation == 'asset':
+            # The asset door's gate: a delivered, open visual_brief of this idea and revision, else nothing is stored.
+            self.policy.recheck_agent(context)
+            check(type(payload) is dict,'invalid_input')
+            with self.store.transaction() as state:
+                self._refuse_moved(payload.get('idea_id'))
+            return self.broker.open_request(context.binding_id,context.generation,payload['request_id'],
+                                            payload['idea_id'],payload['revision'],'visual_brief')
         check(operation == 'respond','unknown_route',404)
         self.policy.recheck_agent(context)
+        check(type(payload) is dict,'invalid_input')
         with self.store.transaction(write=True) as state:
+            self._refuse_moved(payload.get('idea_id'))
             with self._source_scope(state,context.binding.application):
                 return self.broker.respond(context.binding_id,context.generation,payload)
 
@@ -286,6 +332,62 @@ class OwnerService:
         self.server.stop_admission()
         self.stopped.set()
 
+    def _in_use(self,binding_id):
+        live = self.policy.in_use(binding_id)
+        return live['browser'] or live['agent']
+
+    def _sessions(self,records):
+        """Bounded per-session view for the terminal: finished = the selected idea's Review step is saved."""
+        rows = {}
+        with self.store.transaction() as state:
+            for binding_id,record in records.items():
+                idea_id = record['selected_idea_id']
+                idea = state['ideas'].get(idea_id) if idea_id is not None else None
+                title,finished = None,False
+                if idea is not None:
+                    try:
+                        view = derive_state(idea,self.handoff_provider(state,idea))
+                        finished = view['steps']['review']['status'] == 'saved'
+                        capture = view['accepted']['capture']
+                        title = capture['raw_text'] if capture is not None else idea['origin']['text']
+                        title = ' '.join(title.split())[:80] if type(title) is str else None
+                    except (IdeaError,KeyError,TypeError,ValueError):
+                        finished = False  # Unreadable means not finished: never free what cannot be proven done.
+                rows[binding_id] = dict(binding_id=binding_id,selected_idea_id=idea_id,title=title,finished=finished)
+        for binding_id,row in rows.items():
+            row['in_use'] = self._in_use(binding_id)
+        return [rows[key] for key in sorted(rows)]
+
+    def _free(self,binding_id,only_if_idle=False):
+        """Caller holds admission. Revoke first, then delete the record; ideas are never touched.
+        only_if_idle (auto path) re-checks use atomically in the policy; False means nothing changed."""
+        if not self.policy.discard(binding_id,only_if_idle) and only_if_idle: return False
+        self.broker.discard(binding_id)
+        with self._agent_lock:
+            self._agents.pop(binding_id,None)
+        self.runtime.remove_binding(binding_id)
+        self.members.discard(binding_id)
+        return True
+
+    def _list(self,payload):
+        with self.admission:
+            check(not self.stopped.is_set(),'busy',503)
+            records = {record['binding_id']:record for record in self.runtime.list_bindings()}
+            return dict(sessions=self._sessions(records))
+
+    def _discard(self,payload):
+        binding_id,confirm = payload['binding_id'],payload['confirm']
+        check(type(binding_id) is str and re.fullmatch(r'binding_[0-9a-f]{32}',binding_id) and type(confirm) is bool,'invalid_control')
+        with self.admission:
+            check(not self.stopped.is_set(),'busy',503)
+            records = {record['binding_id'] for record in self.runtime.list_bindings()}
+            check(records == self.members,'binding_membership_conflict',409)
+            check(binding_id in records,'binding_not_found',404)
+            was = self._in_use(binding_id)
+            check(confirm or not was,'session_in_use',409)
+            self._free(binding_id)
+            return dict(binding_id=binding_id,was_in_use=was)
+
     def _open(self,payload):
         mode,binding_id,selected = (payload[key] for key in ('mode','binding_id','selected_idea_id'))
         check(type(mode) is str and mode in ('new','resume'),'invalid_control')
@@ -297,7 +399,15 @@ class OwnerService:
             records = {record['binding_id']:record for record in self.runtime.list_bindings()}
             check(set(records) == self.members,'binding_membership_conflict',409)
             if mode == 'new':
-                check(len(records) < MAX_BINDINGS and len(self.members) < self.policy.limit,'session_capacity_exhausted',503)
+                if len(records) >= MAX_BINDINGS or len(self.members) >= self.policy.limit:
+                    # Full: free the least-recently-used finished session nobody is using, else refuse.
+                    times = self.runtime.binding_mtimes()
+                    free = sorted((row for row in self._sessions(records) if row['finished'] and not row['in_use']),
+                                  key=lambda row:(times.get(row['binding_id'],0),row['binding_id']))
+                    check(any(self._free(row['binding_id'],True) for row in free),'session_capacity_exhausted',503)
+                    records = {record['binding_id']:record for record in self.runtime.list_bindings()}
+                    check(set(records) == self.members and len(records) < MAX_BINDINGS and len(self.members) < self.policy.limit,
+                          'session_capacity_exhausted',503)
                 if selected is not None:
                     with self.store.transaction() as state:
                         check(selected in state['ideas'],'not_found',404)
@@ -320,10 +430,10 @@ class OwnerService:
             if operation in ('probe','stop'):
                 body,callback = self.runtime.control(operation,payload,request.header('Authorization'),self.request_stop)
                 return Response(body,after_send=callback)
-            check(operation in ('binding-open','agent-credentials') and type(payload) is dict and
-                  set(payload) == (OPEN_FIELDS if operation == 'binding-open' else CREDENTIAL_FIELDS),'invalid_control')
+            check(operation in CONTROL_FIELDS and type(payload) is dict and set(payload) == CONTROL_FIELDS[operation],'invalid_control')
             body = self.runtime.validate_owner({key:payload[key] for key in COMMON},request.header('Authorization'),operation,payload)
-            body.update(self._open(payload) if operation == 'binding-open' else self._credentials(payload))
+            body.update({'binding-open':self._open,'agent-credentials':self._credentials,
+                         'binding-discard':self._discard,'binding-list':self._list}[operation](payload))
             return Response(body)
         except OwnerError as exc:
             return Response(dict(ok=False,code=exc.code),401 if exc.code == 'owner_unauthorized' else 409)
@@ -357,11 +467,48 @@ class OwnerService:
         self.runtime.close()
 
 
+_ACTIVITY_LOG = 'activity.log'
+_ACTIVITY_LIMIT = 256 * 1024
+
+
+class _ActivityHandler(logging.Handler):
+    """Owner-private, size-bounded keep-alive log: one 0600 file, never a symlink, cut back when full."""
+    def __init__(self, path):
+        super().__init__(logging.INFO)
+        self.path = str(path)
+        self.fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        os.fchmod(self.fd, 0o600)
+        self.setFormatter(logging.Formatter('%(asctime)s %(message)s', '%Y-%m-%dT%H:%M:%SZ'))
+        self.formatter.converter = time.gmtime
+
+    def emit(self, record):
+        try:
+            if os.fstat(self.fd).st_size > _ACTIVITY_LIMIT: os.ftruncate(self.fd, 0)
+            os.write(self.fd, (self.format(record) + '\n').encode())
+        except Exception: self.handleError(record)
+
+    def close(self):
+        try: os.close(self.fd)
+        except OSError: pass
+        super().close()
+
+
+def attach_activity_log(runtime_root):
+    """Route logger idea.activity (only) to <runtime_root>/activity.log, once per process."""
+    log = logging.getLogger('idea.activity')
+    for handler in log.handlers:
+        if isinstance(handler, _ActivityHandler): return handler
+    handler = _ActivityHandler(Path(runtime_root) / _ACTIVITY_LOG)
+    log.addHandler(handler); log.setLevel(logging.INFO); log.propagate = False
+    return handler
+
+
 def serve(store_path,runtime_root,config=None,*,clock=time.monotonic,on_ready=None,workspace_resolver=None):
     runtime = Runtime(store_path,runtime_root,clock=clock)
     owner = None
     try:
         runtime.acquire_owner()
+        attach_activity_log(runtime.runtime_root)
         owner = OwnerService(runtime,config,workspace_resolver=workspace_resolver)
         owner.start()
         if on_ready is not None: on_ready(owner)
@@ -436,11 +583,61 @@ def open_browser_session(store_path,runtime_root,config=None,*,mode,orcabinding=
             raise LaunchError('origin_missing')
     result = open_session(store_path,runtime_root,config,**options)
     try:
-        launched = open_browser(result['origin'],mode=mode,binding=orcabinding,runner=runner)
+        code = result['pairing_code']
+        launched = open_browser(result['origin'].rstrip('/') + '/#pair=' + code,mode=mode,binding=orcabinding,runner=runner)
     except NativeError as exc:
         raise LaunchError(exc.code,binding_id=result['binding_id'],session_id=result['session_id'],
                           selected_idea_id=result['selected_idea_id'],resume_required=True) from None
-    return dict(result,browser=dict(mode=launched.mode,url=launched.url,browser_page_id=launched.browser_page_id))
+    # browser.url is the root-only origin: the fragment URL (code) is never returned.
+    browser = dict(mode=launched.mode,url=result['origin'],browser_page_id=launched.browser_page_id)
+    if mode == 'orca':
+        # The new tab exists; now retire the page this binding recorded last time. A close failure
+        # never fails the reconnect, and only the id recorded for THIS binding is ever closed.
+        previous = _recorded_page(runtime_root,result['binding_id'])
+        _record_page(runtime_root,result['binding_id'],launched.browser_page_id)
+        if options.get('binding_id') is not None and previous is not None and previous != launched.browser_page_id:
+            try:
+                close_browser_page(previous,orcabinding,runner=runner)
+                browser['previous_page_closed'] = True
+            except NativeError as exc:
+                browser['previous_page_closed'] = False
+                browser['previous_page_close_error'] = exc.code
+    return dict(result,browser=browser,
+                fallback_line=f'Only if the tab did not open paired: type {code} within 60 s.')
+
+
+_PAGES_FILE = 'orca-pages.json'
+
+
+def _recorded_page(runtime_root,binding_id):
+    # Owner-private record of the last Orca page opened per binding (page ID only, no secrets).
+    try:
+        data = json.loads((Path(runtime_root)/_PAGES_FILE).read_text())
+        value = data.get(binding_id) if isinstance(data,dict) else None
+    except (OSError,ValueError):
+        return None
+    return value if type(value) is str and 0 < len(value) <= 4096 and not any(ord(c) < 32 or ord(c) == 127 for c in value) else None
+
+
+def _record_page(runtime_root,binding_id,page_id):
+    path = Path(runtime_root)/_PAGES_FILE
+    try:
+        try:
+            data = json.loads(path.read_text())
+            if not isinstance(data,dict): data = {}
+        except (OSError,ValueError):
+            data = {}
+        data[binding_id] = page_id
+        fd,name = tempfile.mkstemp(dir=str(path.parent),prefix='.orca-pages-')
+        try:
+            with os.fdopen(fd,'w') as stream: json.dump(data,stream)
+            os.chmod(name,0o600); os.replace(name,path)
+        except BaseException:
+            try: os.unlink(name)
+            except OSError: pass
+            raise
+    except OSError:
+        pass  # Unrecorded page: a later reconnect simply has nothing to close.
 
 
 def main(argv=None):

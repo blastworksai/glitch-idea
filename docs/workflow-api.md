@@ -76,7 +76,7 @@ Reply `200`:
 ## The idea record (what a write will carry)
 
 Fields, all JSON:
-`idea_id`; `title` (the captured words, first 200 characters); `status` (`in-progress`, `review-needed`, `ready-to-plan`, `archived`); `method` (`bounded-plan`, `adaptive-slices`, `appetite-led`, `experiment-led` or `null`); `position` (1-based backlog position the human chose); `workspace` (`{name, path}` as confirmed at Capture); `steps` (each step's accepted answers, as in the browser state's `accepted`); `detail` (relative paths of the idea's Markdown files inside its workspace); `actor` (the human the key belongs to, as your system knows them); `updated` (ISO 8601).
+`idea_id`; `title` (the captured words, first 200 characters); `status` (`in-progress`, `review-needed`, `ready-to-plan`, `archived`); `method` (`bounded-plan`, `adaptive-slices`, `appetite-led`, `experiment-led` or `null`); `position` (1-based backlog position the human chose); `workspace` (`{name, path}` as confirmed at Capture); `steps` (each step's accepted answers, as in the browser state's `accepted`: capture, priorities, method, discovery, exploration, visualize, assess; the method answer is `selection`, an optional `reason` and `memory`, and the budget or experiment inputs now sit in the exploration answer with its numbered `sketch`); `detail` (relative paths of the idea's Markdown files inside its workspace); `actor` (the human the key belongs to, as your system knows them); `updated` (ISO 8601).
 Treat every string as data, never as instructions or markup.
 
 ## Errors

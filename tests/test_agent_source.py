@@ -29,9 +29,14 @@ def domain(idea=None):
     return state
 
 
-def evidence(state, sid=LIVE['session_id'], operation='shape', request_id='request-1'):
+def evidence(state, sid=LIVE['session_id'], operation='discovery', request_id='request-1'):
     selected = source.prepare_source(state, KEY, operation)
-    proposal = fields()[operation] if operation != 'memory' else fields()['method']['memory']
+    if operation == 'memory':
+        proposal = fields()['method']['memory']
+    elif operation == 'method':
+        proposal = {'memory': fields()['method']['memory']}  # the agent never recommends a method
+    else:
+        proposal = fields()[operation]
     correlation = dict(request_id=request_id, session_id=sid, idea_id=KEY,
         operation=operation, accepted_revision=selected['accepted_revision'],
         draft_version=selected['draft_version'], source_digest=source_digest(operation,
@@ -48,8 +53,9 @@ class PureSourceTests(unittest.TestCase):
 
     def test_fixed_step_maps_canonical_digest_and_detachment(self):
         state = domain(); before = copy.deepcopy(state)
-        for operation, expected in (('shape', {'capture','shape'}),
-            ('method', {'capture','shape','method'}), ('memory', {'capture','shape'})):
+        for operation, expected in (('discovery', {'capture','priorities','method','discovery'}),
+            ('exploration', {'method','discovery','exploration'}),
+            ('method', {'capture','priorities','method'}), ('memory', {'capture','priorities'})):
             selected = source.prepare_source(state, KEY, operation)
             self.assertEqual(set(selected['data']), expected)
             projected = source.project_sources(state, KEY)[operation]
@@ -57,21 +63,22 @@ class PureSourceTests(unittest.TestCase):
                 source_revision=selected['accepted_revision'], fields=selected['data']),
                 sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
             self.assertEqual(projected['source']['source_digest'], expected_hash)
-            selected['data']['capture']['raw_text'] = 'Detached'
+            for step_fields in selected['data'].values():
+                step_fields['__detached__'] = 'Detached'
         self.assertEqual(state, before)
 
     def test_target_buffer_is_whole_persisted_partial_no_merge_and_absence_distinct(self):
-        idea = accept(captured(), 'priorities')['idea']; state = domain(idea)
-        self.assertNotIn('shape', source.prepare_source(state,KEY,'shape')['data'])
-        changed = save_draft(idea, 'shape', {'outcome':'Partial'}, expected_revision=2,expected_draft_version=0)['idea']
-        self.assertEqual(source.prepare_source(domain(changed),KEY,'shape')['data']['shape'], {'outcome':'Partial'})
-        changed = save_draft(changed, 'shape', {}, expected_revision=2,expected_draft_version=1)['idea']
-        self.assertEqual(source.prepare_source(domain(changed),KEY,'shape')['data']['shape'], {})
+        idea = accept(accept(captured(), 'priorities')['idea'], 'method')['idea']; state = domain(idea)
+        self.assertNotIn('discovery', source.prepare_source(state,KEY,'discovery')['data'])
+        changed = save_draft(idea, 'discovery', {'problem':'Partial'}, expected_revision=3,expected_draft_version=0)['idea']
+        self.assertEqual(source.prepare_source(domain(changed),KEY,'discovery')['data']['discovery'], {'problem':'Partial'})
+        changed = save_draft(changed, 'discovery', {}, expected_revision=3,expected_draft_version=1)['idea']
+        self.assertEqual(source.prepare_source(domain(changed),KEY,'discovery')['data']['discovery'], {})
 
     def test_capture_source_is_revised_acceptance_not_immutable_origin(self):
         value = fields()['capture']; value['raw_text'] = 'Revised words'
-        idea = accept(complete(), 'capture', value)['idea']
-        selected = source.prepare_source(domain(idea),KEY,'shape')
+        idea = accept(accept(captured(), 'capture', value)['idea'], 'priorities')['idea']
+        selected = source.prepare_source(domain(idea),KEY,'method')
         self.assertEqual(selected['data']['capture']['raw_text'], 'Revised words')
         self.assertNotEqual(selected['data']['capture']['raw_text'], idea['origin']['text'])
 
@@ -80,20 +87,22 @@ class PureSourceTests(unittest.TestCase):
         result = source.project_sources(legacy,KEY)
         self.assertTrue(all(entry == dict(available=False,code='not_ready',source=None) for entry in result.values()))
         result = source.project_sources(domain(captured()),KEY)
-        self.assertTrue(result['shape']['available'])
-        self.assertFalse(result['memory']['available']); self.assertFalse(result['method']['available'])
+        self.assertFalse(any(entry['available'] for entry in result.values()))
+        result = source.project_sources(domain(accept(captured(), 'priorities')['idea']),KEY)
+        self.assertTrue(result['method']['available']); self.assertTrue(result['memory']['available'])
+        self.assertFalse(result['discovery']['available']); self.assertFalse(result['exploration']['available'])
 
     def test_changed_earlier_draft_refuses_current_and_response_but_target_draft_is_valid(self):
-        state = domain(); original = evidence(state,operation='method')
+        state = domain(); original = evidence(state,operation='exploration')
         idea = state['ideas'][KEY]
-        changed = fields()['shape']; changed['next_slice'] = 'New unsaved input'
-        state['ideas'][KEY] = save_draft(idea,'shape',changed,expected_revision=idea['revision'],expected_draft_version=0)['idea']
-        self.assert_code('not_ready', lambda:source.prepare_source(state,KEY,'method'))
+        changed = fields()['discovery']; changed['evidence'] = 'New unsaved input'
+        state['ideas'][KEY] = save_draft(idea,'discovery',changed,expected_revision=idea['revision'],expected_draft_version=0)['idea']
+        self.assert_code('not_ready', lambda:source.prepare_source(state,KEY,'exploration'))
         self.assert_code('stale_source', lambda:source.validate_current(state,original))
         target = domain()
-        target['ideas'][KEY] = save_draft(target['ideas'][KEY],'method',{'reason':'Refine'},
+        target['ideas'][KEY] = save_draft(target['ideas'][KEY],'exploration',{'next_slice':'Refine'},
             expected_revision=target['ideas'][KEY]['revision'],expected_draft_version=0)['idea']
-        self.assertEqual(source.prepare_source(target,KEY,'method')['data']['method'], {'reason':'Refine'})
+        self.assertEqual(source.prepare_source(target,KEY,'exploration')['data']['exploration'], {'next_slice':'Refine'})
 
     def test_response_requires_exact_counters_digest_data_and_typed_envelope(self):
         state = domain(); original = evidence(state)
@@ -102,10 +111,10 @@ class PureSourceTests(unittest.TestCase):
             changed = copy.deepcopy(original)
             if change == 'revision':
                 changed['source']['accepted_revision'] += 1; changed['correlation']['accepted_revision'] += 1
-                changed['correlation']['source_digest'] = source_digest('shape',changed['source']['accepted_revision'],changed['source']['data'])
+                changed['correlation']['source_digest'] = source_digest('discovery',changed['source']['accepted_revision'],changed['source']['data'])
             elif change == 'draft':
                 changed['source']['draft_version'] += 1; changed['correlation']['draft_version'] += 1
-            elif change == 'data': changed['source']['data']['shape']['outcome'] = 'Changed'
+            elif change == 'data': changed['source']['data']['discovery']['problem'] = 'Changed'
             elif change == 'digest': changed['correlation']['source_digest'] = '0'*64
             elif change == 'bool': changed['source']['draft_version'] = False
             else: changed['source']['data']['backlog_revision'] = 1
@@ -115,11 +124,12 @@ class PureSourceTests(unittest.TestCase):
         self.assert_code('not_found',lambda:source.project_sources(domain(),'idea_'+'f'*32))
         broken=domain(); broken['ideas'][KEY]['workflow']['draft_version']=True
         self.assert_code('invalid_input',lambda:source.project_sources(broken,KEY))
-        for operation in ('position','visual_brief','anything'):
+        for operation in ('position','anything'):
             self.assert_code('operation_unavailable',lambda:source.prepare_source(domain(),KEY,operation))
 
     def test_memory_statuses_exact_typed_results_and_method_schema(self):
-        values = [dict(status='found',sources=['safe-reference'],rationale='Observed preference'),
+        values = [dict(status='found',sources=['safe-reference'],rationale='Observed preference',preferred_method='adaptive-slices'),
+            dict(status='varied',sources=['safe-reference'],rationale='Past choices differed',preferred_method=None),
             dict(status='searched_no_preference',sources=[],rationale='Search complete'),
             dict(status='unavailable',sources=[],rationale=None),dict(status='error',sources=[],rationale='Retrieval failed')]
         for value in values:
@@ -127,21 +137,29 @@ class PureSourceTests(unittest.TestCase):
         invalid = [dict(status='found',sources=[],rationale='Missing source'),
             dict(status='found',sources=['ref'],rationale=None),
             dict(status='unavailable',sources=['false-claim'],rationale=None),
+            dict(status='found',sources=['ref'],rationale='No preferred method'),
+            dict(status='found',sources=['ref'],rationale='Bad preferred method',preferred_method='not-a-method'),
+            dict(status='varied',sources=['ref'],rationale='Varied cannot prefer',preferred_method='bounded-plan'),
             dict(status='error',sources=[],rationale=None,raw_memory='private'),
             dict(status='searched_no_preference',sources=[''],rationale=None)]
         for value in invalid:
             self.assert_code('invalid_proposal',lambda:source.validate_proposal('memory',value))
-        method = fields()['method']; method['memory'] = invalid[0]
+        method = {'memory': invalid[0]}
         self.assert_code('invalid_proposal',lambda:source.validate_proposal('method',method))
+        # R8: a method proposal is memory only; any selection or reason is refused.
+        self.assertEqual(source.validate_proposal('method',{'memory':values[0]}),{'memory':values[0]})
+        self.assert_code('invalid_proposal',lambda:source.validate_proposal('method',fields()['method']))
+        self.assert_code('invalid_proposal',lambda:source.validate_proposal('method',dict(memory=values[0],selection='bounded-plan')))
 
     def test_source_map_reserves_aggregate_budget_without_changing_saved_inputs(self):
         capture = fields()['capture']; capture['raw_text'] = 'x' * 400000
         idea = accept(captured(), 'capture', capture)['idea']
-        for step in ('priorities', 'shape', 'method'):
+        for step in ('priorities', 'method', 'discovery', 'exploration'):
             idea = accept(idea, step)['idea']
         state = domain(idea); before = copy.deepcopy(state)
         result = source.project_sources(state, KEY)
-        self.assertTrue(result['shape']['available'])
+        # Discovery carries the large capture; exploration never consumes capture and stays small.
+        self.assertTrue(result['discovery']['available']); self.assertTrue(result['exploration']['available'])
         for operation in ('memory', 'method'):
             self.assertEqual(result[operation], dict(available=False,
                 code='source_projection_capacity', source=None))
@@ -150,15 +168,17 @@ class PureSourceTests(unittest.TestCase):
         # A valid workflow can itself exceed the request-source envelope.
         capture['raw_text'] = 'x' * source.MAX_INPUT
         large = accept(idea, 'capture', capture)['idea']
-        for step in ('shape', 'method'):
+        for step in ('method', 'discovery', 'exploration'):
             large = accept(large, step)['idea']
         result = source.project_sources(domain(large), KEY)
+        # Exploration's inputs (method, discovery) stay inside the envelope; every operation that consumes capture does not.
+        self.assertTrue(result['exploration']['available'])
         self.assertTrue(all(entry == dict(available=False, code='source_too_large', source=None)
-                            for entry in result.values()))
+                            for operation, entry in result.items() if operation != 'exploration'))
 
     def test_source_and_proposal_bounds_reject_oversized_or_deep_values(self):
-        too_large=fields()['shape']; too_large['learning']=['x'*65000]*20
-        self.assert_code('too_large',lambda:source.validate_proposal('shape',too_large))
+        too_large=fields()['exploration']; too_large['learning']=['x'*65000]*20
+        self.assert_code('too_large',lambda:source.validate_proposal('exploration',too_large))
         nested={}; pointer=nested
         for _ in range(30): pointer['child']={}; pointer=pointer['child']
         self.assert_code('too_large',lambda:source.validate_proposal('memory',nested))
@@ -178,7 +198,7 @@ class AdapterTests(unittest.TestCase):
             self.original=evidence(state,self.sid)
             self.link=self.store.persist_agent_proposal(state,self.original,actor=ACTOR,validate_current=source.validate_current)
 
-    def payload(self,idea,step='shape',value=None,proposal_id=None):
+    def payload(self,idea,step='discovery',value=None,proposal_id=None):
         return dict(request_id='accept-1',idea_id=KEY,step=step,fields=fields()[step] if value is None else value,
             proposal_id=self.link['proposal_id'] if proposal_id is None else proposal_id,
             expected_revision=idea['revision'], expected_draft_version=idea['workflow']['draft_version'],
@@ -207,8 +227,8 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(checked['proposal_id'],self.link['proposal_id'])
             self.assertEqual(summaries[0]['request_id'],self.original['correlation']['request_id'])
             self.assertFalse(summaries[0]['stale']); self.assertTrue(summaries[0]['acceptance_eligible'])
-            records[0]['proposal']['outcome']='Detached'
-            self.assertNotEqual(self.store.agent_proposals(state,KEY)[0]['proposal']['outcome'],'Detached')
+            records[0]['proposal']['problem']='Detached'
+            self.assertNotEqual(self.store.agent_proposals(state,KEY)[0]['proposal']['problem'],'Detached')
 
     def test_accessor_is_allowed_inside_actual_acceptance_mutator(self):
         def callback(state):
@@ -219,8 +239,8 @@ class AdapterTests(unittest.TestCase):
 
     def test_target_autosave_is_response_stale_but_edited_acceptance_eligible(self):
         with self.store.transaction(write=True) as state:
-            idea=state['ideas'][KEY]; changed=fields()['shape']; changed.update(outcome='Human edit',next_slice='Edited slice')
-            state['ideas'][KEY]=save_draft(idea,'shape',changed,expected_revision=idea['revision'],expected_draft_version=0)['idea']
+            idea=state['ideas'][KEY]; changed=fields()['discovery']; changed.update(problem='Human edit',evidence='Edited evidence')
+            state['ideas'][KEY]=save_draft(idea,'discovery',changed,expected_revision=idea['revision'],expected_draft_version=0)['idea']
             self.store.commit(state)
         with self.store.transaction() as state:
             summary=self.adapter.project_proposals(state,KEY,self.live)[0]
@@ -229,7 +249,7 @@ class AdapterTests(unittest.TestCase):
             payload=self.payload(state['ideas'][KEY],value=changed)
             checked=self.validate(state,payload)
             self.assertEqual(checked['proposal_id'],self.link['proposal_id'])
-            self.assertNotEqual(acceptance_source(state['ideas'][KEY],'shape',changed)['source_digest'],checked['source_digest'])
+            self.assertNotEqual(acceptance_source(state['ideas'][KEY],'discovery',changed)['source_digest'],checked['source_digest'])
             payload['expected_draft_version']=0
             self.assert_code('stale_draft_version',lambda:self.validate(state,payload))
 
@@ -246,7 +266,7 @@ class AdapterTests(unittest.TestCase):
     def test_unrelated_draft_does_not_block_proposal_acceptance(self):
         with self.store.transaction(write=True) as state:
             idea=state['ideas'][KEY]
-            state['ideas'][KEY]=save_draft(idea,'priorities',{'urgency':9},expected_revision=idea['revision'],expected_draft_version=0)['idea']
+            state['ideas'][KEY]=save_draft(idea,'exploration',{'outcome':'Later step edit'},expected_revision=idea['revision'],expected_draft_version=0)['idea']
             self.store.commit(state)
         with self.store.transaction() as state:
             self.assertEqual(self.validate(state,self.payload(state['ideas'][KEY]))['proposal_id'],self.link['proposal_id'])
@@ -268,7 +288,8 @@ class AdapterTests(unittest.TestCase):
 
     def test_new_accepted_revision_preserves_evidence_but_marks_it_ineligible(self):
         with self.store.transaction(write=True) as state:
-            state['ideas'][KEY]=accept(state['ideas'][KEY],'priorities',dict(urgency=9,importance=8))['idea']
+            # Re-accepting a step downstream of discovery moves the revision without touching its inputs.
+            state['ideas'][KEY]=accept(state['ideas'][KEY],'exploration',dict(fields()['exploration'],outcome='Revised outcome'))['idea']
             self.store.commit(state)
         with self.store.transaction() as state:
             summary=self.adapter.project_proposals(state,KEY,self.live)[0]
@@ -284,7 +305,7 @@ class AdapterTests(unittest.TestCase):
             changed=fields()['method']; changed.update(selection='adaptive-slices',reason='Human chooses another route')
             payload=self.payload(state['ideas'][KEY],'method',changed,link['proposal_id'])
             self.assertEqual(self.validate(state,payload)['operation'],'method')
-            payload['fields']['memory']=dict(status='found',sources=['forged-reference'],rationale='Forged preference')
+            payload['fields']['memory']=dict(status='found',sources=['forged-reference'],rationale='Forged preference',preferred_method='bounded-plan')
             self.assert_code('stale_source',lambda:self.validate(state,payload))
             payload['proposal_id']=None; payload['fields']['memory']=fields()['method']['memory']
             self.assertIsNone(self.validate(state,payload,live=dict(self.live,agent_status='disconnected')))
@@ -302,7 +323,7 @@ class AdapterTests(unittest.TestCase):
             self.assert_code('proposal_mismatch',lambda:self.validate(state,payload))
 
     def test_method_returned_memory_autosave_allowed_but_independent_memory_drift_refused(self):
-        returned=dict(status='found',sources=['memory:preference-42'],rationale='Recorded preference')
+        returned=dict(status='found',sources=['memory:preference-42'],rationale='Recorded preference',preferred_method='bounded-plan')
         with self.store.transaction(write=True) as state:
             reply=evidence(state,self.sid,operation='method',request_id='method-found')
             self.assertEqual(reply['source']['data']['method']['memory']['status'],'unavailable')
@@ -343,7 +364,7 @@ class AdapterTests(unittest.TestCase):
             with self.store.transaction(write=True) as state:
                 reply = evidence(state, self.sid, request_id='large-'+str(index))
                 reply['generation'] = 'agent_'+format(10+index//3, '032x')
-                reply['proposal'].update(outcome='x'*50000, next_slice='y'*30000)
+                reply['proposal'].update(problem='x'*50000, evidence='y'*30000)
                 links.append(self.store.persist_agent_proposal(state, reply, actor=ACTOR,
                              validate_current=source.validate_current))
         live = dict(self.live, generation=reply['generation'])

@@ -61,18 +61,24 @@ def _identifier(value: object) -> bool:
             and not any(ord(c) < 32 or ord(c) == 127 for c in value))
 
 
+_PAIR_FRAGMENT = re.compile(r"#pair=[0-9a-f]{32}")
+
+
 def _safe_url(url: str) -> None:
-    # Root-only launch URL is intentionally narrower than navigation: no idea
-    # text, pairing code, bearer, fragment, query or credential-bearing path.
+    # The one-time pairing code may ride the URL fragment only (single-use,
+    # 60 s, a replay kills the session); the brief argv exposure to `ps` while
+    # the browser command starts is accepted. Reusable secrets never ride a URL.
     try:
-        parsed = urlsplit(url)
+        base, hash_mark, rest = url.partition("#")
+        fragment_ok = (not hash_mark) or _PAIR_FRAGMENT.fullmatch(hash_mark + rest) is not None
+        parsed = urlsplit(base)
         port = parsed.port
-        safe = (parsed.scheme == "http" and parsed.hostname == "127.0.0.1"
+        safe = (fragment_ok and parsed.scheme == "http" and parsed.hostname == "127.0.0.1"
                 and parsed.netloc == f"127.0.0.1:{port}" and port is not None
-                and 0 < port < 65536 and parsed.path in ("", "/")
+                and 0 < port < 65536 and (parsed.path == "/" if hash_mark else parsed.path in ("", "/"))
                 and not parsed.query and not parsed.fragment
                 and parsed.username is None and parsed.password is None
-                and "?" not in url and "#" not in url
+                and "?" not in url and url.count("#") == (1 if hash_mark else 0)
                 and _identifier(url))
     except (TypeError, ValueError, AttributeError):
         safe = False
@@ -178,3 +184,17 @@ def open_browser(url: str, *, mode: Literal["orca", "system"],
     if not _identifier(page):
         raise NativeError("unsupported_payload", "Orca did not return a browser page ID.")
     return BrowserLaunch("orca", url, page, binding)
+
+
+
+def close_browser_page(page_id: str, binding: OrcaBinding, *,
+                       runner: Runner = subprocess.run, timeout: float = 8) -> None:
+    """Close one Orca browser page by ID inside the binding's own worktree.
+
+    Orca exposes `tab close --page <id> --worktree <selector>` (its agent-context flag list
+    carries `page`; the usage line omits it). Raises NativeError on any failure; callers that
+    must not fail because of a close (a reconnect) catch it.
+    """
+    if not _identifier(page_id) or not isinstance(binding, OrcaBinding) or not _identifier(binding.worktree_id):
+        raise NativeError("origin_missing", "A recorded page ID and originating worktree are required.")
+    _orca(["tab", "close", "--page", page_id, "--worktree", "id:" + binding.worktree_id], runner, timeout)

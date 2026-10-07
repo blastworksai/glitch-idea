@@ -51,16 +51,16 @@ STAGE_SETTLE_SECONDS = 0.05
 # itself, or any malformed reply, stays an identity failure.
 OWNER_REFUSALS = frozenset(('busy', 'agent_unavailable', 'binding_not_found', 'not_found',
                             'session_binding_mismatch', 'session_capacity_exhausted',
-                            'binding_membership_conflict', 'invalid_control', 'unknown_control',
+                            'binding_membership_conflict', 'session_in_use', 'invalid_control', 'unknown_control',
                             'control_unavailable', 'internal_error', 'runtime_busy', 'runtime_corrupt'))
 IDENTITY_REFUSALS = frozenset(('owner_unauthorized', 'owner_identity_mismatch'))
 
 
 class RuntimeError(Exception):
     """Stable redacted failure; committed means a private replace may be visible."""
-    def __init__(self, code, *, committed=False):
+    def __init__(self, code, *, committed=False, sessions=None):
         super().__init__(code)
-        self.code, self.committed = code, committed
+        self.code, self.committed, self.sessions = code, committed, sessions
 
 
 def _check(value, code='runtime_corrupt'):
@@ -229,6 +229,18 @@ def _binding(value):
     idea_id = value['selected_idea_id']
     _check(idea_id is None or (type(idea_id) is str and IDEA.fullmatch(idea_id) is not None))
     return copy.deepcopy(value)
+
+
+def _sessions(value):
+    """Strict shape of the owner's session list; anything else is an identity failure."""
+    _check(type(value) is list and len(value) <= MAX_BINDINGS, 'owner_identity_mismatch')
+    for row in value:
+        _check(type(row) is dict and set(row) == {'binding_id', 'selected_idea_id', 'title', 'finished', 'in_use'}
+               and type(row['binding_id']) is str and BINDING.fullmatch(row['binding_id']) is not None
+               and (row['selected_idea_id'] is None or (type(row['selected_idea_id']) is str and IDEA.fullmatch(row['selected_idea_id']) is not None))
+               and (row['title'] is None or (type(row['title']) is str and len(row['title']) <= 200))
+               and type(row['finished']) is bool and type(row['in_use']) is bool, 'owner_identity_mismatch')
+    return value
 
 
 def _proof(owner_token, challenge, instance_nonce, store_sha256):
@@ -568,6 +580,28 @@ class Runtime:
             _check(total + MAX_RECORD <= MAX_AGGREGATE)
             self._write(self._bindings_fd, record['binding_id'] + '.json', record)
 
+    def binding_mtimes(self):
+        """Owner only: each retained binding's last-write time (ns); the least-recently-used signal."""
+        with self._mutex:
+            self._owner()
+            records, _ = self._scan(self._directory_fd, self._bindings_fd)
+            return {key: os.stat(key + '.json', dir_fd=self._bindings_fd, follow_symlinks=False).st_mtime_ns for key in records}
+
+    def remove_binding(self, binding_id):
+        """Owner only: delete one retained binding record; durable (fsync) before returning. Ideas are never touched."""
+        _check(type(binding_id) is str and BINDING.fullmatch(binding_id) is not None)
+        with self._mutex:
+            self._owner()
+            records, _ = self._scan(self._directory_fd, self._bindings_fd)
+            _check(binding_id in records, 'binding_not_found')
+            name = binding_id + '.json'
+            _raw(self._bindings_fd, name)  # Refuse to unlink anything but a private regular file.
+            try:
+                os.unlink(name, dir_fd=self._bindings_fd)
+                os.fsync(self._bindings_fd)
+            except OSError:
+                raise RuntimeError('runtime_persistence_failed') from None
+
     def publish_discovery(self, port):
         _check(type(port) is int and 1 <= port <= 65535)
         with self._mutex:
@@ -606,13 +640,15 @@ class Runtime:
         finally:
             os.close(descriptor)
 
-    def _call(self, operation, discovery, credential, deadline, binding=None, agent=None):
+    def _call(self, operation, discovery, credential, deadline, binding=None, agent=None, discard=None):
         challenge = secrets.token_hex(32)
         payload = dict(challenge=challenge, instance_nonce=discovery['instance_nonce'], store_sha256=self.store_sha256)
         if binding is not None:
             payload.update(mode=binding[0], binding_id=binding[1], selected_idea_id=binding[2])
         if agent is not None:
             payload.update(binding_id=agent[0], session_id=agent[1], expected_generation=agent[2])
+        if discard is not None:
+            payload.update(binding_id=discard[0], confirm=discard[1])
         raw = json.dumps(payload, separators=(',', ':')).encode('utf-8')
         remaining = deadline - time.monotonic()
         _check(remaining > 0, 'owner_unavailable')
@@ -675,6 +711,10 @@ class Runtime:
             extra_keys = {'binding_id', 'session_id', 'selected_idea_id', 'pairing_code'} if binding is not None else set()
             if agent is not None:
                 extra_keys = {'binding_id', 'session_id', 'generation', 'token'}
+            if operation == 'binding-list':
+                extra_keys = {'sessions'}
+            if discard is not None:
+                extra_keys = {'binding_id', 'was_in_use'}
             _check(set(value) == identity_keys | extra_keys
                    and value['ok'] is True and type(value['schema_version']) is int and value['schema_version'] == 1
                    and value['code'] == ('stopping' if operation == 'stop' else 'ok')
@@ -693,6 +733,10 @@ class Runtime:
                        'owner_identity_mismatch')
                 _check(binding[1] is None or value['binding_id'] == binding[1], 'owner_identity_mismatch')
                 _check(binding[2] is None or value['selected_idea_id'] == binding[2], 'owner_identity_mismatch')
+            if operation == 'binding-list':
+                value['sessions'] = _sessions(value['sessions'])
+            if discard is not None:
+                _check(value['binding_id'] == discard[0] and type(value['was_in_use']) is bool, 'owner_identity_mismatch')
             if agent is not None:
                 _check(value['binding_id'] == agent[0] and value['session_id'] == agent[1]
                        and type(value['generation']) is str and AGENT.fullmatch(value['generation']) is not None
@@ -737,15 +781,38 @@ class Runtime:
         deadline = self._timeout(timeout)
         reads = deadline - timeout / 2  # half for settling reads; the call keeps at least the other half
         prior = self.load_binding(binding_id, reads) if mode == 'resume' else None
-        if mode == 'new':
-            _check(len(self.list_bindings(reads)) < MAX_BINDINGS, 'binding_capacity')
+        # No client-side capacity precheck: at eight bindings the owner decides, because it may free a finished one.
         discovery, credential = self._client_pair(deadline)
         self._call('probe', discovery, credential, deadline)
-        value = self._call('binding-open', discovery, credential, deadline, (mode, binding_id, selected_idea_id))
+        try:
+            value = self._call('binding-open', discovery, credential, deadline, (mode, binding_id, selected_idea_id))
+        except RuntimeError as exc:
+            if mode != 'new' or exc.code != 'session_capacity_exhausted': raise
+            # Refused: nothing finished and idle to free. The list is fetched over the authenticated channel, never from the refusal.
+            sessions = None
+            try: sessions = self._call('binding-list', discovery, credential, max(deadline, time.monotonic() + 5))['sessions']  # the verbs' 5 s budget
+            except RuntimeError: pass
+            raise RuntimeError('binding_capacity', sessions=sessions) from None
         _check(prior is None or value['session_id'] == prior['receipt_session_id'], 'owner_identity_mismatch')
         identity = {key: value[key] for key in ('ok', 'code', 'schema_version', 'service', 'store_sha256', 'instance_nonce', 'challenge')}
         return dict(identity=identity, origin='http://127.0.0.1:' + str(discovery['port']) + '/',
                     **{key: value[key] for key in ('binding_id', 'session_id', 'selected_idea_id', 'pairing_code')})
+
+    def list_sessions(self, timeout=1):
+        """Read-only: the retained sessions (binding_id, selected idea id and title, finished, in_use), via the owner."""
+        deadline = self._timeout(timeout)
+        discovery, credential = self._client_pair(deadline)
+        self._call('probe', discovery, credential, deadline)
+        return self._call('binding-list', discovery, credential, deadline)['sessions']
+
+    def discard_binding(self, binding_id, confirm=False, timeout=1):
+        """Operator discard of one retained session. In use and not confirmed -> session_in_use, nothing changes."""
+        _check(type(binding_id) is str and BINDING.fullmatch(binding_id) is not None and type(confirm) is bool, 'invalid_control')
+        deadline = self._timeout(timeout)
+        discovery, credential = self._client_pair(deadline)
+        self._call('probe', discovery, credential, deadline)
+        value = self._call('binding-discard', discovery, credential, deadline, discard=(binding_id, confirm))
+        return dict(binding_id=value['binding_id'], was_in_use=value['was_in_use'])
 
     def _agent_channel(self, session_id, expected_generation=None, timeout=1):
         """Retrieve an existing generation only; never implicitly open/resume.

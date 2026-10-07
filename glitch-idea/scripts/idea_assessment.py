@@ -16,7 +16,7 @@ from idea_workflow import (derive_state, import_workflow, validate_snapshot,
                            validate_step_fields)
 
 ROUTES = ()
-CONSUMED_STEPS = ('capture', 'priorities', 'shape')
+CONSUMED_STEPS = ('capture', 'priorities', 'discovery', 'exploration')
 POSITION_KEYS = frozenset(('proposed_position', 'actual_position', 'neighbors',
                            'override_reason'))
 
@@ -98,7 +98,7 @@ def validate_data(data, idea_id=None):
     _exact(data, ('steps', 'backlog', 'target'), 'assessment source data')
     _exact(data['steps'], CONSUMED_STEPS, 'consumed assessment steps')
     for step in CONSUMED_STEPS:
-        validate_step_fields(step, data['steps'][step])
+        validate_step_fields(step, data['steps'][step], legacy=True)
     _backlog(data['backlog'], idea_id)
     if data['target'] is not None:
         validate_step_fields('assess', data['target'], partial=True)

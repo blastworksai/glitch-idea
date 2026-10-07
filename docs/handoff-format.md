@@ -74,10 +74,10 @@ Exact frontmatter fields:
 - `source_files`: exact `detail`, `index`, and `revision` mappings, each containing
   an absolute service-host `path` and lowercase SHA-256 `sha256`;
 - `origin`: exact immutable original wording/hash/actor/timestamp;
-- `accepted`: the six accepted Capture through Assess records, each containing
+- `accepted`: the seven accepted Capture through Assess records, each containing
   its typed `fields` and original `acceptance` receipt, never drafts;
 - `placement`: exact `{actual_position, neighbors: {before, after}}`;
-- `design_set`: null for reasoned Skip/Not applicable, otherwise the verified
+- `design_set`: null when Visualize was skipped (its reason is optional), otherwise the verified
   `{set_id, members}` with explicit ordered members, each exactly
   `{asset_id, name, type, size, sha256, path}`: literal display name, validated
   type, bounded size, hash and absolute existing generated blob path.
@@ -112,11 +112,11 @@ file and falsely mark the packet stale. The immutable revision hash remains an
 independent evidence witness. Store CAS protects the exact observed source bytes
 while publishing; live paths must still resolve to the generated Store objects.
 
-`source_digest` covers canonical idea ID/revision, immutable origin, the six
+`source_digest` covers canonical idea ID/revision, immutable origin, the seven
 accepted fields/receipts, actual placement and the explicit design-set membership
 and blob hashes. It excludes publication counters, packet links, navigation,
-Notes and unrelated backlog entries. Eligibility additionally requires all six
-step states to be saved, skipped or not-applicable as appropriate, no changed
+Notes and unrelated backlog entries. Eligibility additionally requires all seven
+step states to be saved, or skipped for Visualize, no changed
 draft or review-needed prerequisite, valid current method-specific fields, active
 idea status, current actual placement/neighbors, an existing confirmed service-host
 workspace directory, and freshly verified existing assets. Derive readiness from
@@ -147,8 +147,9 @@ plan registration is checked through its existing immutable evidence before new
 eligibility checks, preserving archived receipt behavior. New registration links
 exact current revision, invokes existing validation, and alone archives it.
 Origin, revision, packet, plan and asset evidence remain immutable. Existing
-archival revision semantics and recorded stale-Shape-tab review note are retained;
-this contract does not silently change the user's archived Shape policy.
+archival revision semantics are retained;
+this contract does not silently change the archived-idea policy:
+only an explicit Exploration acceptance reactivates an archived idea.
 
 Workflow-managed means exactly `'workflow' in idea`. Missing/currentness failures
 use `not_ready`, source drift uses `stale_source`, counter drift uses existing

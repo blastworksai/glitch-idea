@@ -49,13 +49,22 @@ def record_fixture(state=None):
 # prior schema1 formats, independent of codec.encode_proposal/_body. Only the
 # operation-specific digest is substituted, checked against literal old inputs.
 LEGACY_PROPOSALS = {
-    'shape': {
+    'discovery': {
+        'value': dict(problem='Lids are hard to clean', audience='Home cooks', workaround='Scrub by hand',
+            evidence='Three complaints', kill_criteria='Nobody cleans lids',
+            challenges=[dict(challenge='Is this real?', response='Reported thrice')]),
+        'yaml': '  audience: Home cooks\n  challenges:\n  - challenge: Is this real?\n    response: Reported thrice\n  evidence: Three complaints\n  kill_criteria: Nobody cleans lids\n  problem: Lids are hard to clean\n  workaround: Scrub by hand\n',
+        'json': '{"audience":"Home cooks","challenges":[{"challenge":"Is this real?","response":"Reported thrice"}],"evidence":"Three complaints","kill_criteria":"Nobody cleans lids","problem":"Lids are hard to clean","workaround":"Scrub by hand"}',
+        'body': '    {\n      "audience": "Home cooks",\n      "challenges": [\n        {\n          "challenge": "Is this real?",\n          "response": "Reported thrice"\n        }\n      ],\n      "evidence": "Three complaints",\n      "kill_criteria": "Nobody cleans lids",\n      "problem": "Lids are hard to clean",\n      "workaround": "Scrub by hand"\n    }\n',
+    },
+    'exploration': {
         'value': dict(outcome='Outcome', scope='small-change', scope_reason='One lid',
             alternatives=[dict(route='Keep lid', reason='Less effort')], assumptions=[],
-            next_slice='Inspect lid', learning=[]),
-        'yaml': '  alternatives:\n  - reason: Less effort\n    route: Keep lid\n  assumptions: []\n  learning: []\n  next_slice: Inspect lid\n  outcome: Outcome\n  scope: small-change\n  scope_reason: One lid\n',
-        'json': '{"alternatives":[{"reason":"Less effort","route":"Keep lid"}],"assumptions":[],"learning":[],"next_slice":"Inspect lid","outcome":"Outcome","scope":"small-change","scope_reason":"One lid"}',
-        'body': '    {\n      "alternatives": [\n        {\n          "reason": "Less effort",\n          "route": "Keep lid"\n        }\n      ],\n      "assumptions": [],\n      "learning": [],\n      "next_slice": "Inspect lid",\n      "outcome": "Outcome",\n      "scope": "small-change",\n      "scope_reason": "One lid"\n    }\n',
+            next_slice='Inspect lid', learning=[], investment=None, experiment=None,
+            sketch=[dict(title='Inspect lid', why_next='Cheapest test', done_when='Lid is inspected', method=None)]),
+        'yaml': '  alternatives:\n  - reason: Less effort\n    route: Keep lid\n  assumptions: []\n  experiment: null\n  investment: null\n  learning: []\n  next_slice: Inspect lid\n  outcome: Outcome\n  scope: small-change\n  scope_reason: One lid\n  sketch:\n  - done_when: Lid is inspected\n    method: null\n    title: Inspect lid\n    why_next: Cheapest test\n',
+        'json': '{"alternatives":[{"reason":"Less effort","route":"Keep lid"}],"assumptions":[],"experiment":null,"investment":null,"learning":[],"next_slice":"Inspect lid","outcome":"Outcome","scope":"small-change","scope_reason":"One lid","sketch":[{"done_when":"Lid is inspected","method":null,"title":"Inspect lid","why_next":"Cheapest test"}]}',
+        'body': '    {\n      "alternatives": [\n        {\n          "reason": "Less effort",\n          "route": "Keep lid"\n        }\n      ],\n      "assumptions": [],\n      "experiment": null,\n      "investment": null,\n      "learning": [],\n      "next_slice": "Inspect lid",\n      "outcome": "Outcome",\n      "scope": "small-change",\n      "scope_reason": "One lid",\n      "sketch": [\n        {\n          "done_when": "Lid is inspected",\n          "method": null,\n          "title": "Inspect lid",\n          "why_next": "Cheapest test"\n        }\n      ]\n    }\n',
     },
     'memory': {
         'value': dict(status='unavailable', sources=[], rationale=None),
@@ -64,11 +73,10 @@ LEGACY_PROPOSALS = {
         'body': '    {\n      "rationale": null,\n      "sources": [],\n      "status": "unavailable"\n    }\n',
     },
     'method': {
-        'value': dict(selection='bounded-plan', reason='Known boundary', investment=None,
-                      experiment=None, memory=dict(status='unavailable', sources=[], rationale=None)),
-        'yaml': '  experiment: null\n  investment: null\n  memory:\n    rationale: null\n    sources: []\n    status: unavailable\n  reason: Known boundary\n  selection: bounded-plan\n',
-        'json': '{"experiment":null,"investment":null,"memory":{"rationale":null,"sources":[],"status":"unavailable"},"reason":"Known boundary","selection":"bounded-plan"}',
-        'body': '    {\n      "experiment": null,\n      "investment": null,\n      "memory": {\n        "rationale": null,\n        "sources": [],\n        "status": "unavailable"\n      },\n      "reason": "Known boundary",\n      "selection": "bounded-plan"\n    }\n',
+        'value': dict(memory=dict(status='unavailable', sources=[], rationale=None)),
+        'yaml': '  memory:\n    rationale: null\n    sources: []\n    status: unavailable\n',
+        'json': '{"memory":{"rationale":null,"sources":[],"status":"unavailable"}}',
+        'body': '    {\n      "memory": {\n        "rationale": null,\n        "sources": [],\n        "status": "unavailable"\n      }\n    }\n',
     },
 }
 
@@ -87,7 +95,7 @@ class AssessmentSourceTests(unittest.TestCase):
                          supplied['correlation']['source_digest'])
         self.assertEqual(source.validate_current(state, supplied), selected)
         projected = source.project_sources(state, KEY)
-        self.assertEqual(set(projected), {'shape', 'memory', 'method', 'assessment'})
+        self.assertEqual(set(projected), {'discovery', 'exploration', 'memory', 'method', 'visual_brief', 'assessment'})
         self.assertEqual(projected['assessment'], dict(available=True, code='ok',
             source=dict(selected, source_digest=supplied['correlation']['source_digest'])))
         projected['assessment']['source']['data']['target'] = {}
@@ -95,14 +103,16 @@ class AssessmentSourceTests(unittest.TestCase):
 
     def test_old_operation_sources_and_digests_remain_exact(self):
         state = domain()
-        for operation, keys in (('shape', {'capture', 'shape'}),
-                                ('memory', {'capture', 'shape'}),
-                                ('method', {'capture', 'shape', 'method'})):
+        for operation, keys in (('discovery', {'capture', 'priorities', 'method', 'discovery'}),
+                                ('exploration', {'method', 'discovery', 'exploration'}),
+                                ('memory', {'capture', 'priorities'}),
+                                ('method', {'capture', 'priorities', 'method'}),
+                                ('visual_brief', {'capture', 'discovery', 'exploration'})):
             selected = source.prepare_source(state, KEY, operation)
             self.assertEqual(set(selected['data']), keys)
             expected = source_digest(operation, selected['accepted_revision'], selected['data'])
             self.assertEqual(source.proposal_source_digest(operation, selected), expected)
-        for operation in ('position', 'visual_brief', 'unknown'):
+        for operation in ('position', 'unknown'):
             self.assert_code('operation_unavailable', lambda: source.prepare_source(state, KEY, operation))
 
     def test_schema1_old_canonical_json_markdown_paths_and_byte_hashes_pinned(self):
@@ -138,6 +148,28 @@ class AssessmentSourceTests(unittest.TestCase):
                 link = dict(proposal_id=record['proposal_id'], path=expected_path, sha256=hashlib.sha256(raw).hexdigest())
                 self.assertEqual(codec.proposal_link(record), link)
                 self.assertEqual(codec.decode_proposal(raw, path=expected_path, link=link), record)
+
+    def test_schema1_shape_record_is_refused_never_decoded(self):
+        # Owner ruling: old ideas were demo only, so a schema-1 shape proposal is not migrated.
+        digest = hashlib.sha256(b'{"fields":{"capture":{"raw_text":"Fixture"}},"operation":"shape","source_revision":2}').hexdigest()
+        record = dict(schema_version=1, kind='agent-proposal', proposal_id='proposal_'+'1'*32,
+            binding_id='binding_'+'2'*32, generation='agent_'+'3'*32, actor='Operator', timestamp='fixture-time',
+            request_id='fixture-request', session_id='session_'+'4'*32, idea_id='idea_'+'5'*32,
+            accepted_revision=2, draft_version=3, operation='shape', source_digest=digest,
+            data={'capture': {'raw_text': 'Fixture'}},
+            proposal=dict(outcome='Outcome', scope='small-change', scope_reason='One lid',
+                alternatives=[dict(route='Keep lid', reason='Less effort')], assumptions=[],
+                next_slice='Inspect lid', learning=[]))
+        self.assert_code('unsupported_proposal_version', lambda: codec.validate_record(record))
+        self.assert_code('unsupported_proposal_version', lambda: codec.encode_proposal(record))
+        raw = ('---\naccepted_revision: 2\nactor: Operator\nbinding_id: binding_'+'2'*32+'\n'
+            'data:\n  capture:\n    raw_text: Fixture\ndraft_version: 3\ngeneration: agent_'+'3'*32+'\n'
+            'idea_id: idea_'+'5'*32+'\nkind: agent-proposal\noperation: shape\nproposal:\n'
+            '  alternatives:\n  - reason: Less effort\n    route: Keep lid\n  assumptions: []\n  learning: []\n'
+            '  next_slice: Inspect lid\n  outcome: Outcome\n  scope: small-change\n  scope_reason: One lid\n'
+            'proposal_id: proposal_'+'1'*32+'\nrequest_id: fixture-request\nschema_version: 1\nsession_id: session_'+'4'*32+'\n'
+            'source_digest: '+digest+'\ntimestamp: fixture-time\n---\n# Immutable agent proposal\n').encode()
+        self.assert_code('unsupported_proposal_version', lambda: codec.decode_proposal(raw))
 
     def test_assessment_codec_roundtrip_keeps_schema_and_checks_recorded_target(self):
         record = record_fixture(); before = copy.deepcopy(record)
@@ -202,7 +234,8 @@ class AssessmentSourceTests(unittest.TestCase):
         large = copy.deepcopy(state)
         changed = fields()['capture']; changed['raw_text'] = 'x'*source.MAX_INPUT
         idea = accept(large['ideas'][KEY], 'capture', changed)['idea']
-        idea = accept(idea, 'shape')['idea']
+        for step in ('method', 'discovery', 'exploration'):
+            idea = accept(idea, step)['idea']
         large['ideas'][KEY] = idea
         self.assertEqual(source.project_sources(large, KEY)['assessment'],
                          dict(available=False, code='source_too_large', source=None))

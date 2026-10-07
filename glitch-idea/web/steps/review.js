@@ -1,4 +1,5 @@
 // Derived packet Review; copying never accepts, plans or archives.
+import {METHOD_LABELS} from '../folds.js';
 const copies = new WeakMap();
 const identity = packet => packet && JSON.stringify([packet.handoff_id, packet.sha256,
   packet.source_digest, packet.source_revision, packet.path]);
@@ -66,14 +67,38 @@ export async function copyCurrent(ctx, packet = ctx.flow.state?.handoff, manual 
 
 // Review summary: one card per step, the decision first, then compact labelled details.
 // All text goes in through textContent via ctx.element; nothing here parses markup.
-// The method names are plain text on purpose: this module is loaded on its own in tests, so it imports nothing.
-const METHOD_NAMES = {'bounded-plan': 'Bounded plan (APIV)', 'adaptive-slices': 'Adaptive vertical slices',
-  'appetite-led': 'Appetite-led shaping', 'experiment-led': 'Experiment-led discovery'};
+const METHOD_NAMES = METHOD_LABELS;
 const SCOPE_NAMES = {'small-change': 'Small change', capability: 'New capability', project: 'Project', epic: 'Epic'};
 const MEMORY_NAMES = {found: 'Found in memory', searched_no_preference: 'Searched, no preference found',
   unavailable: 'Memory was not available', error: 'Memory could not be read'};
-const CARDS = [['capture', 'Capture'], ['priorities', 'Your priorities'], ['shape', 'Shape the outcome'],
-  ['method', 'Choose a methodology'], ['visualize', 'Visualize'], ['assess', 'Assess and position']];
+// Step labels match the Flow's; the cards follow the Flow's order (flow.steps) when it has one.
+const CARDS = [['capture', 'Capture'], ['priorities', 'Priorities'], ['method', 'Methods'], ['discovery', 'Discovery'],
+  ['exploration', 'Exploration'], ['visualize', 'Visualize'], ['assess', 'Assess']];
+const DISCOVERY_LABELS = [['problem', 'The problem'], ['audience', 'Who has it'], ['workaround', 'How people cope today'],
+  ['evidence', 'Evidence'], ['kill_criteria', 'What would make us stop']];
+// CP6p: an answer accepted before the prior-art fields existed reads "Not checked", never an error.
+function priorArt(fields, element) {
+  const found = Array.isArray(fields.prior_art) ? fields.prior_art.filter(isObject) : [];
+  if (found.length) {
+    const table = element('table', '', 'review-prior-art'), head = element('tr');
+    for (const name of ['Name', 'Link', 'What it does', 'How we differ', 'Licence']) head.append(element('th', name));
+    table.append(head);
+    for (const item of found) {
+      const tr = element('tr');
+      for (const key of ['name', 'link', 'does', 'differs', 'licence']) tr.append(element('td', str(item[key])));
+      table.append(tr);
+    }
+    return table;
+  }
+  if (fields.prior_art_none === true) return 'Nothing comparable found (looked: ' + str(fields.prior_art_searched) + ')';
+  return 'Not checked';
+}
+function cardsFor(flow) {
+  const known = new Map(CARDS), keys = Array.isArray(flow.steps) ? flow.steps.map(step => step?.key).filter(key => known.has(key)) : [];
+  if (!keys.length) return CARDS;
+  const titles = new Map(flow.steps.map(step => [step?.key, str(step?.title)]));
+  return keys.map(key => [key, titles.get(key) || known.get(key)]);
+}
 const str = value => typeof value === 'string' && value.trim() ? value : '';
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const list = value => Array.isArray(value) ? value.map(str).filter(Boolean) : [];
@@ -96,10 +121,15 @@ function scoreWords(assessment) {
   return Number.isFinite(score) ? name + ' ' + number(score) : name + ' Unknown (check the values)';
 }
 function summaryCards(ctx, accepted) {
-  const {element} = ctx, cards = [];
-  for (const [key, title] of CARDS) {
-    const fields = accepted[key], card = element('section', '', 'review-card'); card.dataset.step = key;
-    card.append(element('h3', title));
+  const {element, flow} = ctx, cards = [];
+  for (const [key, title] of cardsFor(flow)) {
+    const fields = accepted[key], card = element('section', '', 'review-card g-card'); card.dataset.step = key;
+    // Header row: the step name and an Edit door that reopens that step (the same open the step list uses).
+    const head = element('div', '', 'bw-card__top');
+    const edit = ctx.button('Edit', ctx.handle(() => flow.open(key)), 'bw-btn--ghost');
+    edit.id = 'review-edit-' + key; edit.setAttribute('aria-label', 'Edit ' + title);
+    edit.disabled = !connected(ctx) || flow.selectionUncertain === true || typeof flow.canOpen !== 'function' || !flow.canOpen(key);
+    head.append(element('h3', title), edit); card.append(head);
     const rows = [];   // [label, string | string[]]
     const row = (label, value) => { if (Array.isArray(value) ? value.length : value) rows.push([label, value]); };
     let decision = '', more = null;
@@ -110,27 +140,56 @@ function summaryCards(ctx, accepted) {
       if (isObject(fields.workspace)) { row('Workspace', str(fields.workspace.name)); row('Path', str(fields.workspace.path)); }
     } else if (key === 'priorities') {
       decision = 'Urgency ' + number(fields.urgency) + ' · Importance ' + number(fields.importance) + ' (your ratings)';
-    } else if (key === 'shape') {
+    } else if (key === 'discovery') {
+      const challenges = Array.isArray(fields.challenges) ? fields.challenges.filter(isObject) : [];
+      decision = str(fields.problem) || 'No problem saved.';
+      for (const [name, label] of DISCOVERY_LABELS) if (name !== 'problem') {
+        row(label, str(fields[name]));
+        if (name === 'workaround') rows.push(['Does it already exist?', priorArt(fields, element)]);
+      }
+      const asked = challenges.map(c => [str(c.challenge), str(c.response)].filter(Boolean)).filter(pair => pair.length);
+      if (asked.length) {
+        const ul = element('ul');
+        for (const [challenge, response] of asked.map(pair => pair.length === 2 ? pair : [pair[0], ''])) {
+          const li = element('li', 'Challenge: ' + challenge);
+          if (response) { const inner = element('ul'); inner.append(element('li', 'Your response: ' + response)); li.append(inner); }
+          ul.append(li);
+        }
+        rows.push(['Challenges', ul]);
+      }
+    } else if (key === 'exploration') {
       decision = (str(fields.outcome) || 'No desired result saved.') + (SCOPE_NAMES[fields.scope] ? ' Scope: ' + SCOPE_NAMES[fields.scope] + '.' : '');
       row('Why this scope', str(fields.scope_reason));
       row('Alternatives considered', Array.isArray(fields.alternatives) ? fields.alternatives.filter(isObject)
         .map(a => [str(a.route), str(a.reason)].filter(Boolean).join(' — ')).filter(Boolean) : []);
-      row('Assumptions and risks', list(fields.assumptions)); row('Next slice', str(fields.next_slice)); row('What we expect to learn', list(fields.learning));
-    } else if (key === 'method') {
-      const name = METHOD_NAMES[fields.selection] ?? 'No method chosen';
-      decision = str(fields.reason) ? name + ' — ' + fields.reason : name;
+      row('Uncertainty and risk', list(fields.assumptions)); row('Next slice', str(fields.next_slice)); row('What we expect to learn', list(fields.learning));
       const inv = isObject(fields.investment) ? fields.investment : null;
       if (inv) { row('Investment', [typeof inv.cap === 'number' ? number(inv.cap) : '', str(inv.unit)].filter(Boolean).join(' ')); row('Boundary', str(inv.boundary)); }
       const exp = isObject(fields.experiment) ? fields.experiment : null;
       if (exp) { row('Experiment question', str(exp.question)); row('Evidence we will look for', str(exp.evidence));
         row('Success looks like', str(exp.success_criterion)); row('Stop rule', str(exp.stop_rule)); }
+      const sketch = Array.isArray(fields.sketch) ? fields.sketch.filter(isObject) : [];
+      if (sketch.length) {
+        const ul = element('ul');
+        sketch.forEach((item, index) => {
+          const li = element('li', (index + 1) + '. ' + (str(item.title) || 'Untitled') + ' — ' + (METHOD_NAMES[item.method] ?? 'overall method'));
+          const inner = element('ul');
+          if (str(item.why_next)) inner.append(element('li', 'Why next: ' + item.why_next));
+          if (str(item.done_when)) inner.append(element('li', 'Done when: ' + item.done_when));
+          if (inner.children.length) li.append(inner);
+          ul.append(li);
+        });
+        rows.push(['Sketch', ul]);
+      }
+    } else if (key === 'method') {
+      const name = METHOD_NAMES[fields.selection] ?? 'No method chosen';
+      decision = str(fields.reason) ? name + ' — ' + fields.reason : name;
       if (isObject(fields.memory)) { row('Memory check', MEMORY_NAMES[fields.memory.status] ?? ''); row('Memory sources', list(fields.memory.sources)); row('Memory rationale', str(fields.memory.rationale)); }
     } else if (key === 'visualize') {
       const reason = str(fields.reason);
       if (str(fields.design_set_id)) row('Design set', str(fields.design_set_id));
       decision = fields.disposition === 'accepted_set' ? 'Design set accepted.' + (reason ? ' ' + reason : '') :
-        fields.disposition === 'skipped' ? 'Skipped' + (reason ? ' — ' + reason : '') :
-        fields.disposition === 'not-applicable' ? 'Not applicable' + (reason ? ' — ' + reason : '') : 'No decision saved.';
+        fields.disposition === 'skipped' ? 'Skipped' + (reason ? ' — ' + reason : '') : 'No decision saved.';
     } else if (key === 'assess') {
       const pos = isObject(fields.position) ? fields.position : {}, a = isObject(fields.assessment) ? fields.assessment : null;
       decision = (Number.isInteger(pos.actual_position) ? 'Position ' + pos.actual_position + ' in your backlog' : 'No position saved') + ' · ' + scoreWords(a);
@@ -153,6 +212,7 @@ function summaryCards(ctx, accepted) {
       for (const [label, value] of rows) {
         const dd = element('dd');
         if (Array.isArray(value)) { const ul = element('ul'); for (const item of value) ul.append(element('li', item)); dd.append(ul); }
+        else if (typeof value === 'object') dd.append(value);
         else dd.textContent = value;
         dl.append(element('dt', label), dd);
       }
@@ -177,18 +237,22 @@ export function render(ctx) {
   foot.append(generate);
   if (!packet) body.append(element('p', 'Accept the required steps, then explicitly generate a planning prompt.', 'notice'));
   else {
+    body.append(element('h2', 'Planning prompt', 'g-section-title'));
     const status = element('p', flow.canCopyHandoff() ? 'Verified current planning packet.' :
       'This saved packet is historical or its source needs review. Copy is unavailable; review the steps and explicitly generate a current prompt.', 'notice');
     status.id = 'review-packet-status'; status.setAttribute('role', 'status'); body.append(status);
-    body.append(element('p', 'Packet: ' + packet.handoff_id + ' · source revision ' + packet.source_revision),
-      element('p', 'Immutable packet: ' + packet.path), element('p', 'Packet SHA-256: ' + packet.sha256));
-    for (const [name, file] of Object.entries(packet.source_files)) body.append(element('p', name + ': ' + file.path + ' · SHA-256 ' + file.sha256));
+    // The packet facts sit in one card, as read-only detail lines.
+    const facts = element('div', '', 'g-card');
+    facts.append(element('p', 'Packet: ' + packet.handoff_id + ' · source revision ' + packet.source_revision, 'bw-meta'),
+      element('p', 'Immutable packet: ' + packet.path, 'bw-meta'), element('p', 'Packet SHA-256: ' + packet.sha256, 'bw-meta'));
+    for (const [name, file] of Object.entries(packet.source_files)) facts.append(element('p', name + ': ' + file.path + ' · SHA-256 ' + file.sha256, 'bw-meta'));
     if (packet.design_set) {
-      body.append(element('p', 'Accepted design set: ' + packet.design_set.set_id));
-      for (const member of packet.design_set.members) body.append(element('p', member.name + ' · ' + member.path + ' · SHA-256 ' + member.sha256));
-    } else body.append(element('p', 'No accepted design assets.'));
+      facts.append(element('p', 'Accepted design set: ' + packet.design_set.set_id, 'bw-meta'));
+      for (const member of packet.design_set.members) facts.append(element('p', member.name + ' · ' + member.path + ' · SHA-256 ' + member.sha256, 'bw-meta'));
+    } else facts.append(element('p', 'No accepted design assets.', 'bw-meta'));
+    body.append(facts);
     const label = element('label', 'Full planning prompt'); label.htmlFor = 'review-prompt';
-    const prompt = element('textarea'); prompt.id = 'review-prompt'; prompt.value = packet.prompt; prompt.readOnly = true;
+    const prompt = element('textarea', '', 'g-textarea'); prompt.id = 'review-prompt'; prompt.value = packet.prompt; prompt.readOnly = true;
     body.append(label, prompt, element('p', 'Paste this into a NEW window or pane. Copying does not start planning or archive your idea.', 'help'));
     const copy = button('Copy planning prompt', handle(() => copyCurrent(ctx, packet)), 'primary');
     copy.id = 'review-copy'; copy.disabled = !connected(ctx) || !flow.canCopyHandoff() || value.copying; foot.append(copy);

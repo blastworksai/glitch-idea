@@ -1,4 +1,4 @@
-# Shaping and assessment decisions
+# Exploration and assessment decisions
 
 ## Scope describes the outcome
 
@@ -11,20 +11,28 @@
 
 A screen count, repository count or terse description does not determine scope. Record risk, uncertainty and dependencies in labelled `assumptions` entries and explain the classification in `scope_reason`. This is not an effort or delivery-date estimate.
 
-## Four development choices
+## Four development methods
 
-Compare these briefly against the idea; recommendation and operator selection are separate. The enum in parentheses is the helper's `method` value.
+The operator chooses; the agent never selects or favours one. The id in parentheses is the helper's stored `method` value.
 
 | Choice | Fixed now | Earns the next step | Good fit |
 |---|---|---|---|
-| APIV-compatible bounded plan (`bounded-plan`) | Clear scope and acceptance criteria | Verification of the bounded change | An understood change |
-| Adaptive vertical slices (`adaptive-slices`) | Outcome and next useful increment | Build/use evidence reshapes the next increment | Evolving requirements or larger work |
-| Appetite-led shaping (`appetite-led`) | Operator's investment cap and outcome boundaries | Completed bet or explicit stop/reshape | Scope can flex inside the chosen cap |
-| Experiment-led discovery (`experiment-led`) | A question, evidence criterion and bounded experiment | Evidence supports proceeding, changing or stopping | Uncertain value or feasibility |
+| Full Plan Up Front (`bounded-plan`) | Clear scope and acceptance criteria | Verification of the bounded change | An understood change |
+| Vertical Slicing (Agile) (`adaptive-slices`) | Outcome and next useful increment | Build/use evidence reshapes the next increment | Evolving requirements or larger work |
+| Fixed Budget, Build what Fits (`appetite-led`) | Operator's investment cap and outcome boundaries | Completed bet or explicit stop/reshape | Scope can flex inside the chosen cap |
+| Experiment First (`experiment-led`) | A question, evidence criterion and bounded experiment | Evidence supports proceeding, changing or stopping | Uncertain value or feasibility |
 
-APIV's expansion is unverified; do not invent it. These are local operating choices, not claims to implement entire frameworks. A bounded plan may deliver a slice or experiment inside another method without erasing its learning loop.
+APIV (Align, Plan, Implement, Verify) is the loop all four methods run inside. These are local operating choices, not claims to implement entire frameworks. A Full Plan Up Front item may deliver a slice or experiment inside another method without erasing its learning loop.
 
-For appetite-led work, obtain the operator's cap instead of inventing one; preserve it in `method_reason` or assumptions. For experiments, distinguish customer/value hypotheses from technical feasibility, and label throwaway work versus production-quality exploratory code. Specify the evidence that would stop or redirect work. Method changes require the operator's decision when new evidence invalidates the old assumptions.
+### Inner methods for sketched items
+
+Each item sketched in Exploration may name an inner method, or none (it then follows the overall method). The meaningful pairings:
+
+- Any overall method may run an item as Experiment First.
+- Fixed Budget, Build what Fits items may be Vertical Slicing.
+- Full Plan Up Front items stay overall: no inner method.
+
+For Fixed Budget work, obtain the operator's cap, unit and boundary in Exploration instead of inventing them. For Experiment First work, ask in Exploration for the question, the evidence, what counts as success and when to stop. For experiments, distinguish customer/value hypotheses from technical feasibility, and label throwaway work versus production-quality exploratory code. Specify the evidence that would stop or redirect work. Method changes require the operator's decision when new evidence invalidates the old assumptions.
 
 ## Human ratings and brain assessments
 

@@ -10,13 +10,13 @@ An intent contains schema_version 1, kind upload-intent, upload_id, asset_id, id
 
 An upload intent and its request receipt publish together. Network streaming never holds a Store lock. Flush and publish the immutable blob first; then rehash and register complete evidence/detail links and receipt atomically through Store's recoverable transaction. A crash before registration leaves an orphan, never a completed upload. Completed stages are sealed read-only and owner-only (0400, with stages created 0600 and asset directories 0700) before exclusive hardlink blob publication. A retained stage whose generated upload ID and verified read-only inode match the completed blob is a retained success, excluded from orphan diagnostics. Failed, interrupted or unmatched stages and unlinked blobs remain reported orphans; no automatic deletion. Replays return the original receipt before business/CAS checks. Same identity with different bytes refuses. Linked missing/corrupt evidence or blobs fail closed.
 
-`visual-set/accept` receives explicit unique asset_ids (1–20) with design_set_id null for construction, or an existing design_set_id for reacceptance. Creation snapshots member names/types/sizes/hashes and capture/shape source revision/digest; acceptance publishes that set and the accepted pointer in one receipt transaction. At most 25 MiB/file and 100 MiB/set. Never infer a set from all uploaded files. Replacing a set preserves every earlier record/blob. Generic Visualize acceptance applies the same verification. Skip/not-applicable requires a nonempty reason and null design_set_id.
+`visual-set/accept` receives explicit unique asset_ids (1–20) with design_set_id null for construction, or an existing design_set_id for reacceptance. Creation snapshots member names/types/sizes/hashes and capture, discovery and exploration source revision/digest; acceptance publishes that set and the accepted pointer in one receipt transaction. At most 25 MiB/file and 100 MiB/set. Never infer a set from all uploaded files. Replacing a set preserves every earlier record/blob. Generic Visualize acceptance applies the same verification. A Visualize skip needs no reason and carries a null design_set_id.
 
 Supported inert formats: PNG, JPEG, WebP, PDF, SVG, HTML, CSS, JSON, Markdown/text, ZIP. Extension, declared type and basic signature must agree. Only validated raster formats may preview; active formats, PDF and ZIP download as inert attachments. No extraction, execution or malware-scanning claim.
 
 The authenticated state projects bounded verified uploads/historical sets for resume and reports omission explicitly. Original Capture attachments are never automatically accepted design assets. Uploading does not increment accepted idea revision or complete Visualize. Native Windows/macOS and remote Orca-client upload remain later qualification gates.
 
-Design-set `source` is exactly `{capture:{revision,digest},shape:{revision,digest}}`. Each revision is the corresponding accepted step receipt revision (at most source_revision); each digest is workflow source_digest(step, revision, {step: accepted_fields}). The set source_digest is SHA-256 of compact sorted UTF-8 JSON `{operation:"visualize-assets",source:<witness>}`. It deliberately excludes overall idea source_revision: unrelated Priorities/Method changes must not stale unchanged Capture/Shape. Original source_revision stays immutable. Construction requires both current accepted Capture and Shape; a compact witness avoids duplicating raw text.
+Design-set `source` is exactly `{capture:{revision,digest},discovery:{revision,digest},exploration:{revision,digest}}`. Each revision is the corresponding accepted step receipt revision (at most source_revision); each digest is workflow source_digest(step, revision, {step: accepted_fields}). The set source_digest is SHA-256 of compact sorted UTF-8 JSON `{operation:"visualize-assets",source:<witness>}`. It deliberately excludes overall idea source_revision: an unrelated change (such as Assess) must not stale unchanged Capture, Discovery and Exploration; a Priorities or Method change sits upstream of Discovery and Exploration, so those are saved again first. Original source_revision stays immutable. Construction requires current accepted Capture, Discovery and Exploration; a compact witness avoids duplicating raw text.
 
 The reserved append-only asset link inventory is capped at 256 records per idea.
 Capacity exhaustion is an explicit refusal and never evicts immutable history.
@@ -69,9 +69,9 @@ Windows/macOS storage qualification remains pending. Completed byte replay
 hashes the supplied body without allocating a stage or consuming capacity.
 
 Archived ideas refuse new uploads and every new existing-idea acceptance except
-explicit Shape: Capture, Priorities, Method, Visualize and Assess all require
-Shape first. Old receipts and files remain readable; initial new Capture is allowed.
-Explicit Shape acceptance, including unchanged answers, creates an active next
+explicit Exploration: Capture, Priorities, Method, Discovery, Visualize and Assess all require
+Exploration first. Old receipts and files remain readable; initial new Capture is allowed.
+Explicit Exploration acceptance, including unchanged answers, creates an active next
 revision without changing archived
 plan, revision or asset bytes. Retained overlap stages are counted, not reclaimed.
 Guided Store repair is outside CP3 (a later change); there is no automatic cleanup.

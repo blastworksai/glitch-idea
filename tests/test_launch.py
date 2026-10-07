@@ -154,8 +154,11 @@ class LaunchTests(unittest.TestCase):
         calls=[]
         def runner(argv,**kwargs):calls.append(argv);return SimpleNamespace(returncode=0,stdout='',stderr='')
         opened=launch.open_browser_session(self.store,self.root,mode='system',runner=runner,spawn=self.spawn)
-        self.assertEqual(calls[0][-1],opened['origin'])
-        self.assertNotIn('?',calls[0][-1]);self.assertNotIn(opened['pairing_code'],' '.join(calls[0]))
+        code=opened['pairing_code']
+        self.assertEqual(calls[0][-1],opened['origin'].rstrip('/')+'/#pair='+code)
+        self.assertNotIn('?',calls[0][-1]);self.assertEqual(' '.join(calls[0]).count(code),1)
+        self.assertEqual(opened['browser']['url'],opened['origin']);self.assertNotIn(code,opened['browser']['url'])
+        self.assertIn(code,opened['fallback_line'])
         def refuse(argv,**kwargs):return SimpleNamespace(returncode=1,stdout='',stderr='')
         with self.assertRaises(launch.LaunchError) as caught:
             launch.open_browser_session(self.store,self.root,mode='system',runner=refuse,spawn=self.spawn)
@@ -218,6 +221,21 @@ class LaunchTests(unittest.TestCase):
         for config in ({'actor':'editable'},{'plan_validator_argv':'shell'},{'validator_timeout_seconds':True}):
             with self.assertRaises(IdeaError):launch.ensure_service(self.store,self.root,config)
         self.assertFalse(self.root.exists())
+
+    def test_default_workspace_config_is_validated_and_reaches_the_launched_service(self):
+        folder=Path(self.temp.name)/'default'; folder.mkdir()
+        value=dict(name='Atlas',path=str(folder))
+        self.assertNotIn('default_workspace',launch._config(None,self.store))
+        self.assertNotIn('default_workspace',launch._config(dict(default_workspace=None),self.store))
+        self.assertEqual(launch._config(dict(default_workspace=value),self.store)['default_workspace'],value)
+        for bad in (dict(name='Atlas'),dict(name='Atlas',path='relative'),dict(name='Atlas',path=str(folder/'missing')),
+                    dict(name='',path=str(folder)),'x',dict(name='Atlas',path=str(folder),extra=1)):
+            with self.subTest(bad=bad):
+                with self.assertRaises(IdeaError) as caught: launch._config(dict(default_workspace=bad),self.store)
+                self.assertEqual(caught.exception.code,'invalid_config')
+        runtime=Runtime(self.store,self.root);runtime.acquire_owner()
+        service=launch.OwnerService(runtime,dict(default_workspace=value))
+        self.assertEqual(service.config['default_workspace'],value)
 
     def test_browser_selector_preflight_before_startup_or_receipt_allocation(self):
         from idea_native import OrcaBinding

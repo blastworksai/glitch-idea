@@ -23,7 +23,7 @@ def record(number=1, kind='upload-intent', idea_id=KEY):
     value = dict(schema_version=1, kind=kind, idea_id=idea_id, source_revision=1,
                  actor='Operator', timestamp='2026-10-02T00:00:00Z')
     if kind == 'design-set':
-        source = {step: dict(revision=1, digest=digest(step.encode())) for step in ('capture', 'shape')}
+        source = {step: dict(revision=1, digest=digest(step.encode())) for step in ('capture', 'discovery', 'exploration')}
         return dict(value, set_id='set_'+format(number, '032x'), session_id='session_'+'2'*32, source=source,
                     source_digest=evidence.source_digest(source),
                     members=[dict(asset_id='asset_'+format(number, '032x'), name='Fixture.png',

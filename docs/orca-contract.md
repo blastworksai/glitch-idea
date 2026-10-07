@@ -92,6 +92,13 @@ invalidates the browser session, displays a re-pair warning and disconnects the
 agent. Recover with explicit `resume`, retrieve the newly generated code and
 pair again. Cookie survives browser reload, not service restart. No localStorage.
 
+The product's `browser-open --browser orca` opens the dedicated tab at
+`<origin>/#pair=<code>`, and the page redeems the one-time code from the
+fragment itself, so the operator types nothing. The code is single-use and
+lasts 60 seconds, and a fragment never reaches the server or a referrer.
+Reusable secrets never ride a URL. The manual typed road above stays the
+fallback, shown only if the operator reports the tab did not open paired.
+
 ## Orca route
 
 Read runtime-matched instructions first:
@@ -146,7 +153,7 @@ writes a JSON reply file. Copy correlation fields exactly; do not copy
   "idea_id": "copy-the-event-idea-id",
   "accepted_revision": 1,
   "draft_version": 1,
-  "operation": "shape",
+  "operation": "discovery",
   "source_digest": "copy-the-event-sha256",
   "text": "FAKE: the current agent's bounded proposal"
 }
@@ -165,7 +172,7 @@ Reload must retain saved fixture state through its session cookie. Request a
 second proposal in the same session and use `--after <last-sequence>`; prove the
 same initiating agent responds again. Fixtures or unit tests cannot stand in
 for this active-agent evidence. The probe's accepted text is a minimal string,
-not a production seven-step shape schema.
+not a production eight-step workflow schema.
 
 ## Bounded idle, interruption and restart
 

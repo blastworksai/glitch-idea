@@ -10,7 +10,7 @@ import copy
 import re
 
 from idea_domain import integer, require
-from idea_agent_source import (prepare_source, validate_memory as typed_memory,
+from idea_agent_source import (INPUTS, prepare_source, validate_memory as typed_memory,
                                validate_proposal as typed_proposal)
 from idea_proposal_evidence import validate_record
 
@@ -57,7 +57,7 @@ def validate_result(result):
 
 
 def validate_proposal(operation, proposal):
-    """Inject into Broker; retain existing Shape/Method/Memory schemas."""
+    """Inject into Broker; retain the Discovery/Exploration/Method/Memory schemas."""
     checked = typed_proposal(operation, proposal)
     if operation == 'memory':
         validate_result(checked)
@@ -83,22 +83,40 @@ def _eligible(state, idea, record, context, live):
             or record['binding_id'] != live['binding_id'] or record['generation'] != live['generation']
             or live['agent_status'] != 'connected' or record['accepted_revision'] != idea['revision']):
         return False
-    required = {'capture', 'shape'}
+    # The inputs a memory search consumes: the same derived set prepare_source reads for it.
+    required = set(INPUTS['memory'])
     allowed = required | ({'method'} if record['operation'] == 'method' else set())
     require(required <= set(record['data']) <= allowed, 'Unexpected memory consumed input map')
-    # A changed Capture/Shape draft makes prepare_source refuse with not_ready;
+    # A changed Capture/Priorities draft makes prepare_source refuse with not_ready;
     # it is a real readiness failure, never converted into a successful search.
     current = prepare_source(state, idea['idea_id'], 'memory')
     return all(record['data'][step] == current['data'][step] for step in required)
 
 
+def _filled(idea, memory, conversation):
+    """True when memory equals the LAST memory the connected agent filled into this idea's open Method request.
+
+    The conversation is read for the live binding and current generation, so an earlier
+    generation, a released/expired/answered request or another revision never reaches here.
+    """
+    if (type(conversation) is not dict or conversation.get('operation') != 'method'
+            or conversation.get('idea_id') != idea['idea_id']
+            or conversation.get('accepted_revision') != idea['revision']):
+        return False
+    filled = [item['fields']['memory'] for item in conversation.get('fills', ())
+              if type(item) is dict and type(item.get('fields')) is dict and 'memory' in item['fields']]
+    return bool(filled) and validate_result(filled[-1]) == memory
+
+
 def validate_method_memory(state, idea, fields, context, *, live_binding,
-                           proposals, accepted_proposal=None):
+                           proposals, accepted_proposal=None, conversation=None):
     """Provider seam under existing Store lock, accepting human Method choice.
 
     proposals is Store.agent_proposals(state,idea_id)'s verified detached list.
     accepted_proposal is SourceAdapter.validate_acceptance's Method result, when
-    a proposal was explicitly linked. Neither argument is browser-selected data.
+    a proposal was explicitly linked. conversation is the live Broker's view of the
+    open request (Broker.conversation for the live binding and generation). None of
+    these arguments is browser-selected data.
     Only memory is checked here; Method choice/reason/investment/experiment may
     differ from the recommendation. No accepted state or input is mutated.
     """
@@ -132,4 +150,6 @@ def validate_method_memory(state, idea, fields, context, *, live_binding,
                                    else record['proposal']['memory'])
         if recorded == memory and _eligible(state, idea, record, context, live_binding):
             return copy.deepcopy(memory)
+    if _filled(idea, memory, conversation):
+        return copy.deepcopy(memory)
     require(False, 'Method memory lacks matching current agent evidence', 'memory_provenance_missing')

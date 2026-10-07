@@ -28,9 +28,9 @@ def build_evidence(state, sid, request_id='suggestion-1', generation='agent_'+'3
     data = {'capture':copy.deepcopy(idea['workflow']['steps']['capture']['fields'])}
     source = dict(accepted_revision=idea['revision'],draft_version=idea['workflow']['draft_version'],data=data)
     correlation = dict(request_id=request_id,session_id=sid,idea_id=KEY,accepted_revision=source['accepted_revision'],
-        draft_version=source['draft_version'],operation='shape',source_digest=source_digest('shape',idea['revision'],data))
+        draft_version=source['draft_version'],operation='exploration',source_digest=source_digest('exploration',idea['revision'],data))
     return dict(binding_id='binding_'+'2'*32,generation=generation,correlation=correlation,source=source,
-                proposal=copy.deepcopy(fields()['shape']))
+                proposal=copy.deepcopy(fields()['exploration']))
 
 
 def validate_current(state, evidence):
@@ -171,7 +171,7 @@ class ProposalStoreTests(unittest.TestCase):
         for field,code in (('accepted_revision','stale_revision'),('draft_version','stale_draft_version')):
             stale = copy.deepcopy(self.evidence)
             stale['correlation'][field] += 1; stale['source'][field] += 1
-            stale['correlation']['source_digest'] = source_digest('shape',stale['correlation']['accepted_revision'],stale['source']['data'])
+            stale['correlation']['source_digest'] = source_digest('exploration',stale['correlation']['accepted_revision'],stale['source']['data'])
             with self.subTest(field=field), self.assertRaises(IdeaError) as caught:
                 self.publish(stale,validator=lambda *args:self.fail('validator called before Store CAS'))
             self.assertEqual(caught.exception.code,code)

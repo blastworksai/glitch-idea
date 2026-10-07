@@ -10,10 +10,13 @@ from idea_domain import IdeaError
 from idea_service import Service, TrustedContext, TrustedStepHandler
 from idea_store import Store
 from idea_workflow import source_digest
-from test_agent_bridge import SHAPE
 from test_workflow import fields as workflow_fields
 
 PID = 'proposal_'+'a'*32
+# Workflow v3 order: Capture, Priorities, Method, then Discovery. The human accepts the Method by hand
+# (the agent never selects one); the agent-assisted target exercised here is Discovery.
+METHOD = workflow_fields()['method']
+DISCOVERY = workflow_fields()['discovery']
 
 
 class Provider:
@@ -30,9 +33,10 @@ class Provider:
         self.calls.append('context'); return self.live
 
     def source(self, idea):
-        data = {'capture': copy.deepcopy(idea['workflow']['steps']['capture']['fields'])}
+        steps = idea['workflow']['steps']
+        data = {step: copy.deepcopy(steps[step]['fields']) for step in ('capture', 'priorities', 'method')}
         return dict(accepted_revision=idea['revision'], draft_version=idea['workflow']['draft_version'],
-                    data=data, source_digest=source_digest('shape', idea['revision'], data))
+                    data=data, source_digest=source_digest('discovery', idea['revision'], data))
 
     def project(self, state, idea, context, live):
         self.case.assertIs(state, self.case.store._contexts.active['state'])
@@ -46,9 +50,9 @@ class Provider:
             changed = source['accepted_revision'] != self.original['accepted_revision'] or source['data'] != self.original['data']
             response_stale = changed or source['draft_version'] != self.original['draft_version']
             reason = 'agent_unavailable' if status != 'connected' else 'stale_source' if changed else None
-            proposals = [dict(proposal_id=PID, request_id='proposal-request', operation='shape',
+            proposals = [dict(proposal_id=PID, request_id='proposal-request', operation='discovery',
                 accepted_revision=self.original['accepted_revision'], draft_version=self.original['draft_version'],
-                source_digest=self.original['source_digest'], proposal=copy.deepcopy(SHAPE),
+                source_digest=self.original['source_digest'], proposal=copy.deepcopy(DISCOVERY),
                 evidence=dict(path='history/'+idea['idea_id']+'/metadata/'+'b'*64+'.md',sha256='a'*64),content_omitted=False,
                 stale=response_stale or status != 'connected',
                 stale_reason=reason or ('stale_source' if response_stale else None),
@@ -57,7 +61,7 @@ class Provider:
             resume=dict(required=status!='connected',
             reason=None if status=='connected' else 'agent_paused' if status=='paused' else 'agent_disconnected'),
             capabilities=dict(agent=status=='connected', memory=status=='connected'),
-            proposal_sources={'shape':dict(available=True, code='ok', source=source)} if source else {},
+            proposal_sources={'discovery':dict(available=True, code='ok', source=source)} if source else {},
             proposals=proposals,proposal_inventory=dict(total=len(proposals),projected=len(proposals),omitted=0,
                 content_omitted=0,index_path=idea['idea_id']+'.md' if idea is not None else None))
         if self.overlay_change: self.overlay_change(overlay)
@@ -73,13 +77,15 @@ class Provider:
         if payload['proposal_id'] is None: return
         if live is None or live['agent_status'] != 'connected': raise IdeaError('agent_unavailable', 'Disconnected fixture')
         if payload['proposal_id'] != PID: raise IdeaError('proposal_not_found', 'Unknown fixture proposal')
-        # Draft version and edited Shape target are intentionally independent of
+        # Draft version and edited Discovery target are intentionally independent of
         # consumed Capture inputs. The current final acceptance source differs.
         current = self.source(idea)
         if current['accepted_revision'] != self.original['accepted_revision'] or current['data'] != self.original['data']:
             raise IdeaError('stale_source', 'Consumed fixture source changed')
         self.case.assertEqual(source['source_digest'], source_digest(payload['step'], idea['revision'],
-            {'capture': idea['workflow']['steps']['capture']['fields'], 'shape': payload['fields']}))
+            {'capture': idea['workflow']['steps']['capture']['fields'],
+             'priorities': idea['workflow']['steps']['priorities']['fields'],
+             'method': idea['workflow']['steps']['method']['fields'], 'discovery': payload['fields']}))
 
 
 class AgentResumeTests(unittest.TestCase):
@@ -90,7 +96,7 @@ class AgentResumeTests(unittest.TestCase):
         self.context = TrustedContext('Operator', self.sid)
         self.provider = Provider(self)
         def handler(*_): self.provider.calls.append('handler')
-        self.handlers = {'shape': TrustedStepHandler(handler), 'method': TrustedStepHandler(handler)}
+        self.handlers = {step: TrustedStepHandler(handler) for step in ('method', 'discovery', 'exploration')}
         self.service = Service(self.store, {}, self.context, handlers=self.handlers, agent_provider=self.provider)
 
     def code(self, expected, callback):
@@ -101,13 +107,14 @@ class AgentResumeTests(unittest.TestCase):
         self.service.capture(dict(request_id='capture', raw_text='Original words',
             workspace=dict(name='Explicit', path=str(self.workspace), confirmed=True)))
         self.service.accept(self.payload('priorities', dict(urgency=6, importance=7), 'priorities', proposal_id=None))
+        self.service.accept(self.payload('method', METHOD, 'method', proposal_id=None))
         with self.store.transaction() as state: self.provider.original = self.provider.source(state['ideas'][self.context.selected_idea_id])
 
-    def payload(self, step='shape', fields=None, rid='shape', proposal_id=PID):
+    def payload(self, step='discovery', fields=None, rid='discovery', proposal_id=PID):
         with self.store.transaction() as state:
             idea = state['ideas'][self.context.selected_idea_id]
             return dict(request_id=rid, idea_id=idea['idea_id'], expected_revision=idea['revision'],
-                expected_draft_version=idea['workflow']['draft_version'], step=step, fields=copy.deepcopy(fields or SHAPE),
+                expected_draft_version=idea['workflow']['draft_version'], step=step, fields=copy.deepcopy(fields or DISCOVERY),
                 proposal_id=proposal_id, expected_backlog_revision=None)
 
     def draft(self, fields=None, rid='draft'):
@@ -121,27 +128,27 @@ class AgentResumeTests(unittest.TestCase):
         self.assertEqual(before['proposal_inventory'],dict(total=0,projected=0,omitted=0,content_omitted=0,index_path=None))
         self.assertEqual(self.provider.calls, ['context', 'project'])
         self.capture(); current = self.service.state()
-        self.assertEqual(current['steps']['shape']['status'], 'current')
-        self.assertEqual(current['accepted']['shape'], None)
-        self.assertEqual(current['proposal_sources']['shape']['source']['accepted_revision'], 2)
-        current['proposal_sources']['shape']['source']['data']['capture']['raw_text'] = 'changed'
-        current['proposals'][0]['proposal']['outcome'] = 'changed'
+        self.assertEqual(current['steps']['discovery']['status'], 'current')
+        self.assertEqual(current['accepted']['discovery'], None)
+        self.assertEqual(current['proposal_sources']['discovery']['source']['accepted_revision'], 3)
+        current['proposal_sources']['discovery']['source']['data']['capture']['raw_text'] = 'changed'
+        current['proposals'][0]['proposal']['problem'] = 'changed'
         again = self.service.state()
-        self.assertEqual(again['proposal_sources']['shape']['source']['data']['capture']['raw_text'], 'Original words')
-        self.assertEqual(again['proposals'][0]['proposal']['outcome'], SHAPE['outcome'])
+        self.assertEqual(again['proposal_sources']['discovery']['source']['data']['capture']['raw_text'], 'Original words')
+        self.assertEqual(again['proposals'][0]['proposal']['problem'], DISCOVERY['problem'])
 
     def test_target_autosave_then_edited_accept_durable_proposal_receipt(self):
-        self.capture(); edited = dict(SHAPE, outcome='Edited by user')
+        self.capture(); edited = dict(DISCOVERY, problem='Edited by user')
         draft = self.draft(edited); self.assertEqual(draft['draft_version'], 1)
         state = self.service.state(); summary = state['proposals'][0]
         self.assertTrue(summary['stale']); self.assertTrue(summary['acceptance_eligible'])
         payload = self.payload(fields=edited); self.provider.calls.clear()
         result = self.service.accept(payload)
-        self.assertEqual(result['proposal_id'], PID); self.assertEqual(result['revision'], 3)
+        self.assertEqual(result['proposal_id'], PID); self.assertEqual(result['revision'], 4)
         self.assertEqual(self.provider.calls, ['context', 'validate', 'handler'])
-        state = self.service.state(); self.assertEqual(state['accepted']['shape']['outcome'], 'Edited by user')
+        state = self.service.state(); self.assertEqual(state['accepted']['discovery']['problem'], 'Edited by user')
         with self.store.transaction() as domain:
-            self.assertNotIn('proposal_id', domain['ideas'][self.context.selected_idea_id]['workflow']['steps']['shape']['acceptance'])
+            self.assertNotIn('proposal_id', domain['ideas'][self.context.selected_idea_id]['workflow']['steps']['discovery']['acceptance'])
         restarted = Service(Store(self.store.path), {}, TrustedContext('Operator', self.sid))
         self.assertEqual(restarted.accept(payload), result)
         self.provider.live = None; self.provider.calls.clear()
@@ -154,20 +161,22 @@ class AgentResumeTests(unittest.TestCase):
         changed = dict(capture_fields, raw_text='Changed capture')
         self.service.accept(self.payload('capture', changed, 'capture-edit', proposal_id=None))
         payload = self.payload(rid='stale-proposal')
-        self.code('stale_source', lambda: self.service.accept(payload))
+        # v3: the accepted Method now depends on the Capture, so the workflow itself refuses the
+        # stale discovery acceptance (not_ready) before the provider's own stale_source check is reached.
+        self.code('not_ready', lambda: self.service.accept(payload))
         self.code('request_not_found', lambda: self.service.request_result('stale-proposal'))
-        self.assertEqual(self.service.state()['revision'], 3)
-        self.assertIsNone(self.service.state()['accepted']['shape'])
+        self.assertEqual(self.service.state()['revision'], 4)
+        self.assertIsNone(self.service.state()['accepted']['discovery'])
 
-    def test_method_manual_acceptance_uses_provider_before_packaged_handler(self):
+    def test_exploration_manual_acceptance_uses_provider_before_packaged_handler(self):
         self.capture(); self.service.accept(self.payload())
-        payload = self.payload('method', workflow_fields()['method'], 'manual-method', proposal_id=None)
+        payload = self.payload('exploration', workflow_fields()['exploration'], 'manual-exploration', proposal_id=None)
         self.provider.calls.clear()
         result = self.service.accept(payload)
         self.assertEqual(self.provider.calls, ['context', 'validate', 'handler'])
-        self.assertEqual(result['revision'], 4)
+        self.assertEqual(result['revision'], 5)
         self.assertNotIn('proposal_id', result)
-        self.assertEqual(self.service.state()['accepted']['method']['selection'], 'bounded-plan')
+        self.assertEqual(self.service.state()['accepted']['exploration']['outcome'], workflow_fields()['exploration']['outcome'])
 
     def test_disconnected_and_initial_no_binding_keep_drafts_usable(self):
         self.provider.live = None
@@ -178,17 +187,17 @@ class AgentResumeTests(unittest.TestCase):
         result = self.draft(); self.assertEqual(result['draft_version'], 1)
         state = self.service.state(); self.assertFalse(state['capabilities']['agent']); self.assertFalse(state['capabilities']['memory'])
         self.code('agent_unavailable', lambda: self.service.accept(self.payload()))
-        self.assertEqual(self.service.state()['drafts']['shape'], SHAPE)
+        self.assertEqual(self.service.state()['drafts']['discovery'], DISCOVERY)
         # Manual accepted fields remain the packaged handler's own decision.
-        self.assertEqual(self.service.accept(self.payload(rid='manual', proposal_id=None))['revision'], 3)
+        self.assertEqual(self.service.accept(self.payload(rid='manual', proposal_id=None))['revision'], 4)
 
     def test_overlay_rejects_arbitrary_steps_secrets_capabilities_and_bad_sources(self):
         self.capture()
-        mutations = [lambda o:o.update(steps={'shape':{'status':'saved'}}), lambda o:o.update(token='secret'),
+        mutations = [lambda o:o.update(steps={'discovery':{'status':'saved'}}), lambda o:o.update(token='secret'),
             lambda o:o['capabilities'].update(handoff=True), lambda o:o['capabilities'].update(agent=1),
             lambda o:o['resume'].update(reason='secret'),
-            lambda o:o['proposal_sources']['shape']['source']['data'].update(token='secret'),
-            lambda o:o['proposal_sources']['shape']['source'].update(source_digest='f'*64),
+            lambda o:o['proposal_sources']['discovery']['source']['data'].update(token='secret'),
+            lambda o:o['proposal_sources']['discovery']['source'].update(source_digest='f'*64),
             lambda o:o['proposals'][0].update(token='secret'),
             lambda o:o['proposals'][0]['proposal'].update(token='secret'),
             lambda o:o['proposals'][0].update(acceptance_reason='secret'),
@@ -200,7 +209,7 @@ class AgentResumeTests(unittest.TestCase):
             with self.assertRaises(IdeaError): self.service.state()
         self.provider.overlay_change = None
         self.assertEqual((self.store.path/'IDEAS.md').read_bytes(), before)
-        self.assertIsNone(self.service.state()['accepted']['shape'])
+        self.assertIsNone(self.service.state()['accepted']['discovery'])
 
     def test_inventory_omitted_body_schema_and_source_capacity_codes(self):
         self.capture()
@@ -215,8 +224,8 @@ class AgentResumeTests(unittest.TestCase):
         self.assertEqual(projected['proposal_inventory']['index_path'],self.context.selected_idea_id+'.md')
         for code in ('source_too_large','source_projection_capacity'):
             self.provider.overlay_change=lambda overlay,c=code:overlay['proposal_sources'].update(
-                shape=dict(available=False,code=c,source=None))
-            self.assertEqual(self.service.state()['proposal_sources']['shape']['code'],code)
+                discovery=dict(available=False,code=c,source=None))
+            self.assertEqual(self.service.state()['proposal_sources']['discovery']['code'],code)
         self.provider.overlay_change=None
 
     def test_inventory_rejects_forged_counts_witnesses_and_omission_flags(self):
@@ -272,8 +281,8 @@ class AgentResumeTests(unittest.TestCase):
         self.code('invalid_agent_provider', lambda: self.service.accept(self.payload()))
         self.provider.mutate_inputs = False
         self.assertEqual(self.service.state()['backlog_revision'], 1)
-        self.assertEqual(self.service.state()['revision'], 2)
-        self.assertIsNone(self.service.state()['accepted']['shape'])
+        self.assertEqual(self.service.state()['revision'], 3)
+        self.assertIsNone(self.service.state()['accepted']['discovery'])
 
     def test_provider_context_schema_and_default_behavior(self):
         self.provider.live = dict(self.provider.live, token='secret')

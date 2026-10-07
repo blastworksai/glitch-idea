@@ -26,7 +26,8 @@ class FixedHandler(BaseHTTPRequestHandler):
         f = self.server.fixture
         path = urlsplit(self.path)
         raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
-        payload = json.loads(raw) if raw else None
+        is_asset = urlsplit(self.path).path == '/agent/v1/asset'
+        payload = raw if is_asset else json.loads(raw) if raw else None
         f.calls.append((self.command, path.path, payload, dict(self.headers)))
         status = 200
         if path.path == '/control/v1/probe':
@@ -53,9 +54,9 @@ class FixedHandler(BaseHTTPRequestHandler):
                 assert set(query) == {'session_id','after','timeout'} and query['session_id'] == [f.sid]
                 assert payload is None
                 result = dict(ok=True,code='ok',session_id=f.sid,agent_status='connected',
-                              reason=None,sequence=1,events=[dict(f.correlation,sequence=1,data={'shape':'input'})])
+                              reason=None,sequence=1,events=[dict(f.correlation,sequence=1,data={'exploration':'input'})])
                 if f.mode == 'wrong_event_sid': result['events'][0]['session_id'] = 'session_'+'f'*32
-                if f.mode == 'token_echo': result['events'][0]['data']['shape'] = f.token
+                if f.mode == 'token_echo': result['events'][0]['data']['exploration'] = f.token
                 if f.mode == 'secret_key': result['events'][0]['data']['token'] = 'hidden'
                 if f.mode == 'wrong_sequence': result['events'][0]['sequence'] = True
             elif path.path == '/agent/v1/respond':
@@ -66,6 +67,19 @@ class FixedHandler(BaseHTTPRequestHandler):
                 if f.mode == 'uncertain':
                     status = 503
                     result = dict(ok=False,code='DO NOT PRINT '+f.token,write_state='committed_uncertain',extra=f.token)
+            elif path.path == '/agent/v1/asset':
+                f.asset_seen = dict(raw=payload, headers=dict(self.headers))
+                if f.mode == 'asset_type':
+                    status = 400; result = dict(ok=False,code='unsupported_asset_type')
+                elif f.mode == 'asset_big':
+                    status = 413; result = dict(ok=False,code='too_large')
+                elif f.mode == 'asset_session':
+                    status = 403; result = dict(ok=False,code='wrong_session')
+                else:
+                    result = dict(ok=True,code='ok',idea_id=self.headers['X-Idea-Id'],asset_id='asset_'+'6'*32,
+                                  asset_ids=['asset_'+'6'*32],upload_id='upload_'+'7'*32,size=len(payload),
+                                  sha256='b'*64)
+                    if f.mode == 'asset_extra': result['token'] = 'hidden'
             elif path.path == '/agent/v1/session-close':
                 assert payload == {'session_id':f.sid}
                 result = dict(ok=True,code='ok',session_id=f.sid,agent_status='disconnected')
@@ -103,7 +117,7 @@ class AgentClientTests(unittest.TestCase):
                            actor='Operator',selected_idea_id=None)
         self.owner.persist_binding(self.record)
         self.correlation = dict(request_id='request-1',session_id=self.sid,idea_id='idea_'+'4'*32,
-                                accepted_revision=1,draft_version=0,operation='shape',source_digest='a'*64)
+                                accepted_revision=1,draft_version=0,operation='exploration',source_digest='a'*64)
         self.calls = []; self.mode = ''
         self.server = ThreadingHTTPServer(('127.0.0.1',0),FixedHandler)
         self.server.daemon_threads=True; self.server.fixture=self
@@ -115,7 +129,7 @@ class AgentClientTests(unittest.TestCase):
         self.server.shutdown(); self.server.server_close(); self.worker.join()
 
     def client(self, **kwargs): return AgentClient(self.runtime,self.sid,**kwargs)
-    def reply(self): return dict(self.correlation,proposal={'shape':'suggestion'})
+    def reply(self): return dict(self.correlation,proposal={'exploration':'suggestion'})
 
     def assert_error(self, cls, action, code=None):
         with self.assertRaises(cls) as caught: action()
@@ -182,6 +196,66 @@ class AgentClientTests(unittest.TestCase):
         client=self.client(); self.mode='trickle'; start=time.monotonic()
         self.assert_error(AgentClientError,lambda:client.events(timeout=0),'agent_unavailable')
         self.assertLess(time.monotonic()-start,2.8)
+
+    PNG = b'\x89PNG\r\n\x1a\n' + b'x' * 20
+
+    def asset_kwargs(self, **over):
+        return dict(dict(idea_id=self.correlation['idea_id'],revision=2,request_id='request-1',
+                         name='shot one.png',mime='image/png',data=self.PNG),**over)
+
+    def test_asset_sends_raw_bytes_headers_and_agent_auth_only(self):
+        client = self.client(expected_generation=self.generation)
+        value = client.asset(**self.asset_kwargs())
+        seen = self.asset_seen; h = seen['headers']
+        self.assertEqual(seen['raw'], self.PNG)
+        self.assertEqual(h['Content-Type'], 'image/png')
+        self.assertEqual(h['X-Idea-Session'], self.sid)
+        self.assertEqual(h['X-Idea-Id'], self.correlation['idea_id'])
+        self.assertEqual(h['X-Idea-Revision'], '2')
+        self.assertEqual(h['X-Idea-Request-Id'], 'request-1')
+        self.assertEqual(h['X-Idea-Asset-Name'], 'shot%20one.png')
+        self.assertEqual(h['Authorization'], 'Bearer ' + self.token)
+        self.assertEqual(value['asset_ids'], [value['asset_id']])
+        self.assertNotIn(self.token, json.dumps(value))
+
+    def test_asset_zip_and_invalid_input_never_hit_network(self):
+        client = self.client(); self.assertEqual(
+            client.asset(**self.asset_kwargs(mime='application/zip',data=b'PK\x03\x04zz',name='p.zip'))['size'], 6)
+        baseline = len(self.calls)
+        for over in (dict(mime='text/html'), dict(data=b'not a png'), dict(mime='application/zip'), dict(data=b''),
+                     dict(revision=0), dict(idea_id='idea_x'), dict(request_id='bad id'), dict(name='')):
+            with self.subTest(over=over):
+                self.assert_error(AgentClientError,lambda:client.asset(**self.asset_kwargs(**over)),'invalid_agent_input')
+        self.assertEqual(len(self.calls), baseline)
+
+    def test_asset_refusal_codes_and_unknown_fields(self):
+        client = self.client()
+        for mode, code in (('asset_type','unsupported_asset_type'),('asset_big','too_large'),
+                           ('asset_session','wrong_session')):
+            with self.subTest(mode=mode):
+                self.mode = mode
+                exc = self.assert_error(AgentClientError,lambda:client.asset(**self.asset_kwargs()),code)
+                self.assertIsNone(exc.write_state)
+        self.mode = 'asset_extra'
+        self.assert_error(AgentClientError,lambda:client.asset(**self.asset_kwargs()),'invalid_agent_response')
+
+
+class AssetVerbParseTests(unittest.TestCase):
+    def run_verb(self, *extra):
+        import idea
+        args = idea.parser().parse_args(['asset','--session','session_'+'1'*32,'--idea','idea_'+'4'*32,
+                                         '--revision','1','--request','request-1',*extra])
+        return idea.run_agent(args)
+
+    def test_wrong_or_unknown_type_is_refused_before_any_network_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / 'page.html'; bad.write_bytes(b'<html>')
+            result = self.run_verb('--file', str(bad))
+            self.assertEqual(result['error']['code'], 'invalid_agent_input')
+            png = Path(tmp) / 'shot.png'; png.write_bytes(b'\x89PNG\r\n\x1a\nx')
+            from idea_domain import IdeaError
+            with self.assertRaises(IdeaError):
+                self.run_verb('--file', str(png), '--type', 'text/html')
 
 
 if __name__ == '__main__': unittest.main()

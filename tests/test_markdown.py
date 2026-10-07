@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'glitch-idea/scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import idea_markdown as md
 from idea_domain import IdeaError, digest, snapshot
 
@@ -376,9 +377,10 @@ class MarkdownTests(unittest.TestCase):
             key = idea['idea_id']
             shape_file = root/'shape.json'
             shape_file.write_text(json.dumps(dict(outcome='Observed fixture', scope='small-change', scope_reason='One test',
-                alternatives=[dict(route='Reuse', reason='Simpler')], method='bounded-plan', method_reason='Understood',
-                assumptions=[], next_slice='One fixture check', learning=[])))
-            cli('shape', key, '--file', shape_file, '--expected-revision', 1, '--actor', 'Operator')
+                alternatives=[dict(route='Reuse', reason='Simpler')],
+                assumptions=[], next_slice='One fixture check', learning=[], investment=None, experiment=None,
+                sketch=[dict(title='Fixture slice', why_next='Smallest check', done_when='Fixture observed', method='bounded-plan')])))
+            cli('exploration', key, '--file', shape_file, '--expected-revision', 1, '--actor', 'Operator')
             cli('rate', key, '--urgency', 7, '--importance', 8, '--expected-revision', 2, '--actor', 'operator')
             assessed = root/'assessment.json'
             assessed.write_text(json.dumps(dict(method='wsjf', version='fixture-v1', inputs=dict(value=3, time_criticality=None, enablement=2, effort=1),
@@ -442,6 +444,111 @@ class MarkdownTests(unittest.TestCase):
         detail = md.decode_detail(files[KEY+'.md'])
         self.assertEqual(detail.metadata['transaction_revision'], 2)
         self.assertIs(type(detail.metadata['extensions']['flag']), int)
+
+
+def v3_state():
+    """A complete accepted v3 idea (Discovery, Exploration, Methods) as a domain state."""
+    from test_handoff_evidence import fixture as accepted_fixture
+    state, idea, _, _ = accepted_fixture(method=dict(selection='appetite-led', reason=None),
+        exploration=dict(investment=dict(cap=3, unit='days', boundary='One page'),
+                         sketch=[dict(title='Check the lid', why_next='Cheapest test', done_when='Lid is checked', method='experiment-led')]))
+    state = copy.deepcopy(state); state['schema_version'] = 1; state['archives'] = {}
+    for key in ('proposals', 'plans', 'executions'):
+        state['ideas'][idea['idea_id']].setdefault(key, [])
+    return state, idea['idea_id']
+
+
+class WorkflowV3MarkdownTests(unittest.TestCase):
+    def test_v3_idea_round_trips_with_no_generated_body_conflict(self):
+        state, key = v3_state()
+        files = md.encode_state(state)
+        self.assertEqual(md.decode_state(files), state)
+        doc = md.decode_detail(files[key + '.md'])
+        self.assertEqual(md.detail_notes(doc), '')
+        again = md.encode_state(state, previous={name: md.parse_document(raw) for name, raw in files.items() if name in (key + '.md', 'IDEAS.md')},
+                                previous_state=state)
+        self.assertEqual(again[key + '.md'], files[key + '.md'])
+
+    def test_detail_names_discovery_exploration_sketch_and_methods(self):
+        state, key = v3_state()
+        body = md.decode_detail(md.encode_state(state)[key + '.md']).body
+        for heading in ('### Discovery', '### Exploration', '### Methods'):
+            self.assertIn(heading, body)
+        self.assertIn('Lids are hard to clean', body)
+        self.assertIn('1. Check the lid (Experiment First) - why next: Cheapest test; done when: Lid is checked', body)
+        self.assertIn('- Method: Fixed Budget, Build what Fits', body)
+        self.assertNotIn('Why this method', body)
+        self.assertNotIn('### Shape', body)
+
+    def test_method_reason_is_shown_when_given(self):
+        state, key = v3_state()
+        state['ideas'][key]['workflow']['steps']['method']['fields']['reason'] = 'Known change'
+        self.assertIn('- Why this method: Known change', md.decode_detail(md.encode_state(state)[key + '.md']).body)
+
+    def test_an_edit_to_a_section_source_without_regeneration_is_refused(self):
+        state, key = v3_state()
+        files = md.encode_state(state)
+        doc = md.decode_detail(files[key + '.md'])
+        meta = copy.deepcopy(doc.metadata)
+        meta['idea']['workflow']['steps']['discovery']['fields']['problem'] = 'Changed in the file'
+        files[key + '.md'] = md.encode_document(meta, doc.body)
+        with self.assertRaises(IdeaError) as caught:
+            md.decode_state(files)
+        self.assertEqual(caught.exception.code, 'generated_body_conflict')
+
+    def test_snapshot_version_is_three_and_older_is_refused(self):
+        from idea_workflow import WORKFLOW_VERSION
+        state, key = v3_state()
+        self.assertEqual(WORKFLOW_VERSION, 3)
+        snap = state['ideas'][key]['revisions'][-1]
+        self.assertEqual(snap.get('schema_version'), 3)
+        old = copy.deepcopy(snap); old['schema_version'] = 2
+        with self.assertRaises(IdeaError):
+            md.encode_history(key, old, origin=state['ideas'][key]['origin'])
+
+    def test_old_snapshot_version_is_refused_with_the_typed_code(self):
+        state, key = v3_state()
+        old = copy.deepcopy(state['ideas'][key]['revisions'][-1]); old['schema_version'] = 2
+        with self.assertRaises(IdeaError) as caught:
+            md.encode_history(key, old, origin=state['ideas'][key]['origin'])
+        self.assertEqual(caught.exception.code, 'unsupported_idea_version')
+        self.assertEqual(str(caught.exception), 'This idea was made with an older glitch-idea. Capture it again.')
+
+    def test_sketch_item_without_why_next_renders(self):
+        for missing in ('absent', None, ''):
+            with self.subTest(why_next=missing):
+                state, key = v3_state()
+                item = state['ideas'][key]['workflow']['steps']['exploration']['fields']['sketch'][0]
+                if missing == 'absent':
+                    del item['why_next']
+                else:
+                    item['why_next'] = missing
+                body = md.decode_detail(md.encode_state(state)[key + '.md']).body
+                self.assertIn('Check the lid', body)
+                self.assertNotIn('why next', body)
+                self.assertIn('done when: Lid is checked', body)
+
+    def test_external_edit_of_discovery_becomes_a_draft_without_acceptance(self):
+        import idea_store
+        state, key = v3_state()
+        baseline = state['ideas'][key]
+        original = copy.deepcopy(baseline)
+        original['workflow']['steps']['discovery']['fields']['problem'] = 'Edited in the file'
+        result = idea_store._external_idea(original, baseline, 'Operator')
+        self.assertEqual(result['workflow']['drafts']['discovery']['problem'], 'Edited in the file')
+        self.assertEqual(result['workflow']['steps']['discovery']['acceptance'], baseline['workflow']['steps']['discovery']['acceptance'])
+        self.assertEqual(result['workflow']['draft_version'], baseline['workflow']['draft_version'] + 1)
+
+    def test_retired_shape_record_cannot_be_edited_from_a_file(self):
+        import idea_store
+        state, key = v3_state()
+        baseline = state['ideas'][key]
+        original = copy.deepcopy(baseline)
+        original['shape'] = dict(outcome='x', scope=None, scope_reason=None, alternatives=[], method=None,
+                                 method_reason=None, assumptions=[], next_slice=None, learning=[])
+        with self.assertRaises(IdeaError) as caught:
+            idea_store._external_idea(original, baseline, 'Operator')
+        self.assertEqual(caught.exception.code, 'external_edit_conflict')
 
 
 if __name__ == '__main__':

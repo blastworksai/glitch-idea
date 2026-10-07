@@ -109,7 +109,7 @@ test('handoff uses exact typed envelope and single dispatcher without accepting 
 
 test('generation and copy refuse incomplete, dirty, pending, proposal, paused, archived, disposed or unavailable states',async()=>{
   for(const change of [f=>f.edit('capture',{...CAPTURE,raw_text:'Local edit'}),f=>f.pending={ambiguous:true},
-    f=>f.proposalPending={key:'shape'},f=>f.paused=true,f=>f.busy=true,f=>f.dispose(),
+    f=>f.proposalPending={key:'exploration'},f=>f.paused=true,f=>f.busy=true,f=>f.dispose(),
     f=>f.state.idea_status='archived',f=>f.state.capabilities.handoff=false,f=>f.state.steps.assess.status='review-needed']) {
     const h=harness({ready:true});change(h.flow);
     assert.equal(h.flow.canGenerateHandoff(),false);assert.equal(h.flow.canCopyHandoff(),false);
@@ -197,7 +197,7 @@ test('copy refresh rejects workspace drift and local dirty pending paused or dis
 
 test('Ideas read and view switch preserve all answers and pending associations; capacity keeps prior rows',async()=>{
   const h=harness();h.flow.edit('capture',{...CAPTURE,raw_text:'Keep this buffer'});
-  h.flow.pending={operation:'draft',ambiguous:true};h.flow.selectedProposals.shape='proposal_'+'8'.repeat(32);
+  h.flow.pending={operation:'draft',ambiguous:true};h.flow.selectedProposals.exploration='proposal_'+'8'.repeat(32);
   const before=copy(h.flow.buffers),pending=h.flow.pending,selected=copy(h.flow.selectedProposals);
   assert.equal(await h.flow.showIdeas(),true);assert.equal(h.flow.view,'ideas');assert.equal(h.flow.ideas.total,1);
   assert.deepEqual(h.flow.buffers,before);assert.equal(h.flow.pending,pending);assert.deepEqual(h.flow.selectedProposals,selected);
@@ -208,24 +208,24 @@ test('Ideas read and view switch preserve all answers and pending associations; 
 
 test('selection refuses silent discard of dirty, pending, proposal, paused or disposed work',async()=>{
   for(const change of [f=>f.edit('capture',{...CAPTURE,raw_text:'Keep words'}),f=>f.pending={ambiguous:false},
-    f=>f.proposalPending={key:'shape'},f=>f.paused=true,f=>f.busy=true,f=>f.dispose()]) {
+    f=>f.proposalPending={key:'exploration'},f=>f.paused=true,f=>f.busy=true,f=>f.dispose()]) {
     const h=harness();change(h.flow);const before=copy(h.flow.buffers),pending=h.flow.pending;
     assert.equal(await h.flow.selectIdea(null),false);assert.deepEqual(h.flow.buffers,before);assert.equal(h.flow.pending,pending);assert.equal(h.calls.length,0);
   }
 });
 
 test('verified null selection resets every default and target selection restores only actual saved fields',async()=>{
-  const h=harness({ready:true});h.flow.buffers.shape.outcome='Old clean field';h.flow.buffers.priorities={urgency:8,importance:9};
+  const h=harness({ready:true});h.flow.buffers.exploration.outcome='Old clean field';h.flow.buffers.discovery.problem='Old problem';h.flow.buffers.priorities={urgency:8,importance:9};
   h.flow.buffers.visualize.reason='Old reason';h.flow.buffers.assess.assessment={old:true};
-  h.flow.selectedProposals.shape='proposal_'+'8'.repeat(32);h.flow.proposalError={code:'old'};
+  h.flow.selectedProposals.exploration='proposal_'+'8'.repeat(32);h.flow.proposalError={code:'old'};
   h.flow.view='ideas';assert.equal(await h.flow.selectIdea(null),true);
   const fresh=new Flow(h.api,()=> 'unused',()=>0,null);
   assert.deepEqual(h.flow.buffers,fresh.buffers);assert.equal(h.flow.state.idea_id,null);assert.equal(h.flow.state.revision,0);
   assert.equal(h.flow.state.draft_version,0);assert.equal(h.flow.state.backlog_revision,2);
   assert.deepEqual(h.flow.selectedProposals,{});assert.equal(h.flow.proposalError,null);assert.equal(h.flow.current,'capture');assert.equal(h.flow.view,'workflow');
-  h.faults.targetState=value=>({...value,current_step:'shape',drafts:{shape:{outcome:'Actual saved draft'}}});
-  assert.equal(await h.flow.selectIdea(OTHER),true);assert.equal(h.flow.state.idea_id,OTHER);assert.equal(h.flow.current,'shape');
-  assert.deepEqual(h.flow.buffers.shape,{outcome:'Actual saved draft'});assert.deepEqual(h.flow.buffers.priorities,{urgency:null,importance:null});
+  h.faults.targetState=value=>({...value,current_step:'exploration',drafts:{exploration:{outcome:'Actual saved draft'}}});
+  assert.equal(await h.flow.selectIdea(OTHER),true);assert.equal(h.flow.state.idea_id,OTHER);assert.equal(h.flow.current,'exploration');
+  assert.deepEqual(h.flow.buffers.exploration,{outcome:'Actual saved draft'});assert.deepEqual(h.flow.buffers.priorities,{urgency:null,importance:null});
   assert.deepEqual(h.writes().map(c=>c.payload),[{idea_id:null},{idea_id:OTHER}]);
 });
 
@@ -238,9 +238,9 @@ test('persistence refusal preserves prior buffers and polling; uncertain selecti
   assert.equal(await h.flow.selectIdea(null),false);assert.deepEqual(h.flow.buffers,before);assert.equal(h.flow.selectionUncertain,true);
   assert.equal(poll.jobs.size,0);assert.equal(await h.flow.refreshAgent(),false);assert.equal(h.writes().length,2);
   assert.equal(await h.flow.save('capture'),false);assert.equal(await h.flow.pause(),false);
-  assert.equal(await h.flow.saveVisualize(),false);assert.equal(await h.flow.requestProposal('shape'),false);
+  assert.equal(await h.flow.saveVisualize(),false);assert.equal(await h.flow.requestProposal('exploration'),false);
   assert.equal(await h.flow.reloadKeepingAnswers(),false);assert.equal(await h.flow.retryProposal(),false);
-  assert.equal(h.flow.canPropose('shape'),false);assert.equal(h.writes().length,2);
+  assert.equal(h.flow.canPropose('exploration'),false);assert.equal(h.writes().length,2);
   h.faults.selectionLost=false;assert.equal(await h.flow.selectIdea(null),true);
   assert.equal(h.flow.selectionUncertain,false);assert.equal(poll.jobs.size,1);assert.equal([...poll.jobs.values()][0].delay,777);
   h.flow.dispose();
@@ -326,7 +326,7 @@ test('null and saved selected-state polls reject foreign idea or session before 
     assert.equal(h.flow.selectionUncertain,true);assert.equal(h.flow.error.code,'invalid_response');assert.equal(poll.jobs.size,0);
     assert.deepEqual(h.flow.state,initial);assert.deepEqual(h.flow.buffers,before);assert.equal(h.flow.dirty.has('capture'),true);
     assert.equal(await h.flow.save('capture',true),false);assert.equal(await h.flow.saveVisualize(),false);
-    assert.equal(await h.flow.requestProposal('shape'),false);assert.equal(await h.flow.pause(),false);
+    assert.equal(await h.flow.requestProposal('exploration'),false);assert.equal(await h.flow.pause(),false);
     assert.equal(await h.flow.reloadKeepingAnswers(),false);assert.equal(h.writes().length,posts);
     assert.equal(await h.flow.selectIdea(OTHER),false);h.flow.dispose();
   }
@@ -360,12 +360,12 @@ test('same-selection restore retains dirty capture text and resumes one loop bef
 test('restore preserves unresolved handoff identity, dirty fields, navigation, associations and paused state',async()=>{
   const h=harness();h.faults.before=true;assert.equal(await h.flow.generateHandoff(),false);
   const pending=h.flow.pending;h.flow.edit('capture',{...CAPTURE,raw_text:'Preserved words'});
-  h.flow.current='capture';h.flow.paused=true;h.flow.selectedProposals.shape='proposal_'+'8'.repeat(32);
+  h.flow.current='capture';h.flow.paused=true;h.flow.selectedProposals.exploration='proposal_'+'8'.repeat(32);
   h.flow.selectionUncertain=true;const before=copy(h.flow.buffers);
   assert.equal(await h.flow.restoreSelection(),true);
   assert.deepEqual(h.flow.buffers,before);assert.equal(h.flow.pending,pending);assert.equal(h.flow.pending.ambiguous,true);
   assert.equal(h.flow.current,'capture');assert.equal(h.flow.paused,true);
-  assert.equal(h.flow.selectedProposals.shape,'proposal_'+'8'.repeat(32));assert.ok(h.flow.error);
+  assert.equal(h.flow.selectedProposals.exploration,'proposal_'+'8'.repeat(32));assert.ok(h.flow.error);
   assert.match(h.flow.message,/check the original save result/);
   assert.equal(h.writes().filter(c=>c.url==='/api/v1/handoff').length,1);
   assert.deepEqual(h.writes().at(-1).payload,{idea_id:IDEA});

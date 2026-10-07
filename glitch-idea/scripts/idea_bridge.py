@@ -11,6 +11,7 @@ available, with twelve total handlers including bounded header parsing.
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -22,6 +23,7 @@ import time
 from types import MappingProxyType
 from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit
 
+import idea_asset_evidence as asset_codec
 from idea_domain import IdeaError, MAX_INPUT, MAX_STATE
 from idea_steps import ROUTE_SPECS, TrustedRoute, load_registry
 
@@ -52,19 +54,29 @@ STATIC = {
     '/ideas.js': ('ideas.js', 'text/javascript; charset=utf-8'),
     '/setup.js': ('setup.js', 'text/javascript; charset=utf-8'),  # the Setup pane, loaded on first open
     '/styles.css': ('styles.css', 'text/css; charset=utf-8'),
+    # The shipped brand files: each one an explicit row, so no directory is ever served as a whole.
+    **{'/assets/fonts/BlastworksSans-' + name + '.woff2': ('assets/fonts/BlastworksSans-' + name + '.woff2', 'font/woff2')
+       for name in ('Regular', 'SemiBold', 'ExtraBold')},
+    '/assets/fonts/BlastworksSans-UNLICENSE.txt': ('assets/fonts/BlastworksSans-UNLICENSE.txt', 'text/plain; charset=utf-8'),
+    '/assets/logo.svg': ('assets/logo.svg', 'image/svg+xml'),
+    '/assets/bwpm/bundle.css': ('assets/bwpm/bundle.css', 'text/css; charset=utf-8'),
     **{'/steps/' + name + '.js': ('steps/' + name + '.js', 'text/javascript; charset=utf-8')
-       for name in ('shape', 'method', 'visualize', 'assess', 'review')},
+       for name in ('discovery', 'exploration', 'method', 'visualize', 'assess', 'review')},
 }
-CONTROL_PATHS = frozenset('/control/v1/' + name for name in ('probe', 'stop', 'binding-open', 'agent-credentials'))
-AGENT_PATHS = frozenset('/agent/v1/' + name for name in ('events', 'respond', 'fill', 'session-close'))
+CONTROL_PATHS = frozenset('/control/v1/' + name for name in ('probe', 'stop', 'binding-open', 'agent-credentials', 'binding-discard', 'binding-list'))
+AGENT_PATHS = frozenset('/agent/v1/' + name for name in ('events', 'respond', 'fill', 'session-close', 'asset'))
+# The agent asset door takes exactly these types; the bytes are checked again by the store write path.
+AGENT_ASSET_TYPES = frozenset(('image/png', 'application/zip'))
+AGENT_ASSET_HEADERS = ('X-Idea-Session', 'X-Idea-Id', 'X-Idea-Revision', 'X-Idea-Asset-Name', 'X-Idea-Request-Id')
+AGENT_ASSET_MAGIC = {'image/png': (b'\x89PNG\r\n\x1a\n',), 'application/zip': (b'PK\x03\x04', b'PK\x05\x06')}
 AGENT_RESPONSE_KEYS = frozenset(('request_id', 'session_id', 'idea_id', 'accepted_revision',
                                 'draft_version', 'operation', 'source_digest', 'proposal'))
 SESSION_ID = re.compile(r'session_[0-9a-f]{32}')
-APP_POSTS = frozenset(('capture', 'draft', 'accept', 'navigate', 'rerank'))
+APP_POSTS = frozenset(('capture', 'draft', 'accept', 'navigate', 'rerank', 'release'))
 SECURITY_HEADERS = {
     'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
     'Referrer-Policy': 'no-referrer',
-    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'",
 }
 
 
@@ -219,6 +231,18 @@ class _DeadlineInput:
         self.stream.close()
 
 
+class _Prefixed:
+    """Replays bytes already read for the magic check, then the live socket."""
+    def __init__(self, head, reader):
+        self.head, self.reader = head, reader
+
+    def read(self, size):
+        if self.head:
+            chunk, self.head = self.head[:size], self.head[size:]
+            return chunk
+        return self.reader.read(size)
+
+
 class BoundedBody:
     """Upload extension's exact-length stream. No arbitrary file capability.
 
@@ -251,7 +275,7 @@ def error_status(code):
     if code == 'too_large':
         return 413
     if (code.endswith('_conflict') or code.startswith('stale_') or
-            code in ('changed_artifact', 'recovery_conflict')):
+            code in ('changed_artifact', 'recovery_conflict', 'idea_moved', 'not_moved', 'delivery_conflict')):
         return 409
     if code in ('step_unavailable', 'agent_unavailable', 'workspace_unavailable',
                 'receipt_capacity_exhausted', 'request_busy', 'request_capacity'):
@@ -491,7 +515,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _request(self):
         for name in ('Host', 'Origin', 'Content-Type', 'Cookie', 'X-CSRF-Token', 'X-Idea-Binding', 'X-Idea-Tab', 'Expect', 'Authorization',
-                     'X-Idea-Agent-Binding', 'X-Idea-Agent-Generation'):
+                     'X-Idea-Agent-Binding', 'X-Idea-Agent-Generation', *AGENT_ASSET_HEADERS):
             check(len(self.headers.get_all(name, [])) <= 1, 'ambiguous_headers')
         check(self.headers.get('Host') == self.server.host, 'wrong_host', 403)
         check(self.headers.get('Origin') in (None, self.server.origin), 'wrong_origin', 403)
@@ -527,7 +551,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in AGENT_PATHS:
             operation = path.rsplit('/', 1)[-1]
             check(self.command == ('GET' if operation == 'events' else 'POST'), 'method_refused', 405)
-            return 'agent-' + operation, None, None if operation == 'events' else 'json'
+            return 'agent-' + operation, None, None if operation == 'events' else 'asset' if operation == 'asset' else 'json'
         if path in CONTROL_PATHS:
             check(self.command == 'POST', 'method_refused', 405)
             return 'control', None, 'json'
@@ -545,7 +569,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise BridgeError('invalid_input') from None
             check(REQUEST_ID.fullmatch(key) is not None, 'invalid_input')
             return 'request', key, None
-        if path in {'/api/v1/' + name for name in APP_POSTS | {'pair', 'transport', 'activity'}}:
+        if path == '/api/v1/conversation/release':
+            check(self.command == 'POST', 'method_refused', 405)
+            return 'release', None, 'json'
+        if path in {'/api/v1/' + name for name in (APP_POSTS - {'release'}) | {'pair', 'transport', 'activity'}}:
             check(self.command == 'POST', 'method_refused', 405)
             return path.removeprefix('/api/v1/'), None, 'json'
         for name, (method, template, kind) in ROUTE_SPECS.items():
@@ -571,8 +598,13 @@ class Handler(BaseHTTPRequestHandler):
         check(len(lengths) == 1 and re.fullmatch(r'[0-9]{1,10}', lengths[0]) is not None,
               'length_required')
         length = int(lengths[0])
-        maximum = MAX_JSON if kind == 'json' else MAX_UPLOAD
+        maximum = MAX_JSON if kind == 'json' else asset_codec.MAX_FILE if kind == 'asset' else MAX_UPLOAD
+        if kind == 'asset':
+            # Type first: a wrong type is refused as such before its size is weighed.
+            check(self.headers.get('Content-Type') in AGENT_ASSET_TYPES, 'unsupported_asset_type')
         check(0 < length <= maximum, 'too_large', 413)
+        if kind == 'asset':
+            return BoundedBody(self.rfile, length)
         expected = 'application/json' if kind == 'json' else 'application/octet-stream'
         check(self.headers.get('Content-Type') == expected, 'content_type_required')
         stream = BoundedBody(self.rfile, length)
@@ -719,7 +751,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(response, json_limit=MAX_STATE_RESPONSE if state_read else MAX_JSON)
             except IdeaError as exc:
                 result = dict(ok=False, code=exc.code)
-                for name in ('committed', 'revision', 'draft_version', 'backlog_revision', 'idea_id'):
+                for name in ('committed', 'revision', 'draft_version', 'backlog_revision', 'idea_id', 'home', 'delivered_ref'):
                     if name in exc.details:
                         result[name] = exc.details[name]
                 if kind is not None and operation != 'selection':
@@ -733,6 +765,58 @@ class Handler(BaseHTTPRequestHandler):
                 except (IdeaError, OSError):
                     pass
                 self.send(Response(result, 500 if exc.details.get('committed') else error_status(exc.code)))
+
+    def _agent_asset(self, binding, context, body):
+        """POST /agent/v1/asset: raw PNG or ZIP bytes through the one asset-store write path.
+
+        Agent authentication only (the browser headers were refused above). The
+        metadata comes from headers so the body stays raw bytes; the store's own
+        upload routes do the staging, sealing and receipts, nothing is bypassed.
+        """
+        mime = self.headers.get('Content-Type')
+        routes = self.server.routes
+        check('uploads' in routes and 'upload-bytes' in routes, 'operation_unavailable', 503)
+        idea_id = self.headers.get('X-Idea-Id')
+        revision = self.headers.get('X-Idea-Revision')
+        request_id = self.headers.get('X-Idea-Request-Id')
+        raw_name = self.headers.get('X-Idea-Asset-Name')
+        check(type(idea_id) is str and IDEA_ID.fullmatch(idea_id) and type(revision) is str
+              and re.fullmatch(r'[0-9]{1,9}', revision) and type(request_id) is str
+              and REQUEST_ID.fullmatch(request_id) and type(raw_name) is str, 'invalid_input')
+        try:
+            name = unquote_to_bytes(raw_name).decode('utf-8')
+        except UnicodeError:
+            raise BridgeError('invalid_input') from None
+        # Magic bytes: the declared type must match the first bytes, not just the header.
+        total = body.remaining
+        head = b''
+        while len(head) < min(8, total):
+            head += body.read(min(8, total) - len(head))
+        check(any(head.startswith(magic) for magic in AGENT_ASSET_MAGIC[mime]), 'unsupported_asset_type')
+        body = BoundedBody(_Prefixed(head, body.reader), total)
+        # Only an open, delivered visual_brief of this idea and revision may receive files.
+        self.server.agent('asset', context, dict(request_id=request_id, idea_id=idea_id, revision=int(revision)))
+        # One store mutation id per file: the zip and the png of one brief must not collide on the request id.
+        # Same file again under the same request and type derives the same id, so a retry is still a retry.
+        store_id = request_id + ':' + ('zip' if mime == 'application/zip' else 'png')
+        if not REQUEST_ID.fullmatch(store_id):
+            store_id = 'asset:' + hashlib.sha256(store_id.encode()).hexdigest()[:40] + (':zip' if mime == 'application/zip' else ':png')
+        app = binding.application
+        with app.store.transaction() as state:
+            if idea_id in state['ideas']:
+                held = [record for record in app.store.asset_records(state, idea_id) if record['kind'] == 'asset']
+                check(len(held) < asset_codec.MAX_MEMBERS and
+                      sum(record['size'] for record in held) + total <= asset_codec.MAX_SET, 'too_large', 413)
+        meta = routes['uploads'].handler(binding, None, dict(
+            request_id=store_id, idea_id=idea_id, expected_revision=int(revision),
+            name=name, declared_type=mime, size=total))
+        info = RequestInfo('PUT', '/api/v1/uploads/' + meta['upload_id'] + '/bytes',
+                           MappingProxyType({}), self.server.origin, meta['upload_id'])
+        done = routes['upload-bytes'].handler(binding, info, body)
+        check(body.remaining == 0, 'incomplete_upload')
+        return dict(ok=True, code='ok', idea_id=idea_id, asset_id=done['asset_id'],
+                    asset_ids=[done['asset_id']], upload_id=done['upload_id'],
+                    size=done.get('size'), sha256=done.get('sha256'))
 
     def _agent(self, parsed, request, operation, kind):
         """Fixed private transport.
@@ -777,21 +861,30 @@ class Handler(BaseHTTPRequestHandler):
             payload = dict(session_id=values['session_id'], after=int(values['after']),
                            timeout=float(values['timeout']))
             check(payload['after'] <= 10**12 and payload['timeout'] <= 25, 'invalid_query')
+        elif operation == 'asset':
+            check('?' not in self.path, 'invalid_query')
+            check(self.headers.get('Content-Type') in AGENT_ASSET_TYPES, 'unsupported_asset_type')
+            session = self.headers.get('X-Idea-Session')
+            check(type(session) is str and session == context.session_id, 'wrong_session', 403)
+            payload = self._body(kind)
         else:
             check('?' not in self.path, 'invalid_query')
             payload = self._body(kind)
             expected = (AGENT_RESPONSE_KEYS if operation == 'respond' else
                         AGENT_RESPONSE_KEYS - {'proposal'} | {'fields'} if operation == 'fill' else {'session_id'})
             check(set(payload) == expected, 'invalid_input')
-        check(type(payload.get('session_id')) is str and
-              payload['session_id'] == context.session_id, 'wrong_session', 403)
-        self.application_payload = payload
+        if operation != 'asset':
+            check(type(payload.get('session_id')) is str and
+                  payload['session_id'] == context.session_id, 'wrong_session', 403)
+            self.application_payload = payload
         def checked():
             check(recheck(context) is binding, 'agent_unauthorized', 401)
         try:
             with _serialized(binding, self.server.body_deadline):
                 checked()
-                if operation != 'events':
+                if operation == 'asset':
+                    result = self._agent_asset(binding, context, payload)
+                elif operation != 'events':
                     self.application_started = operation == 'respond'
                     result = self.server.agent(operation, context, payload)
                     if operation == 'respond':

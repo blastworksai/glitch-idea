@@ -78,7 +78,7 @@ class AgentPolicyTests(unittest.TestCase):
         with binding.lock:self.policy.after_application(binding,captured)
         source=dict(accepted_revision=1,draft_version=0,data={'capture':{'raw_text':'Original words'}})
         envelope=dict(request_id='proposal1',idea_id=captured['idea_id'],expected_revision=1,
-            expected_draft_version=0,operation='shape',source_digest=source_digest('shape',1,source['data']))
+            expected_draft_version=0,operation='exploration',source_digest=source_digest('exploration',1,source['data']))
         self.broker.enqueue(self.bid,self.credentials['generation'],envelope,source)
         return captured
 

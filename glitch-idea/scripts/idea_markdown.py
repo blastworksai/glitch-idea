@@ -12,7 +12,7 @@ from urllib.parse import quote
 from pathlib import PurePosixPath, PureWindowsPath
 
 from idea_domain import (IdeaError, MAX_STATE, MAX_INPUT, ASSESS_KEYS, assessment,
-                         check_id, digest, integer, require, shape, text, receipt)
+                         check_id, digest, integer, require, shape, text, receipt, METHOD_LABELS)
 try:
     import yaml
 except ImportError as exc:
@@ -42,6 +42,12 @@ HANDOFF_EXTENSION = 'glitch_idea_handoffs'
 MAX_HANDOFF_LINKS = 128
 MAX_HANDOFF_EVIDENCE_FILES = 4096
 MAX_HANDOFF_EVIDENCE_BYTES = 256 * MAX_INPUT
+MOVE_EXTENSION = 'glitch_idea_moves'
+DELIVERED_EXTENSION = 'glitch_idea_delivered'
+MAX_POINTER_LINKS = 4096
+MOVED_KEYS = {'schema_version','kind','idea_id','idea_revision','plan_id','workspace','home_path',
+              'moved_sha256','actor','timestamp','frozen'}
+DELIVERED_KEYS = {'schema_version','kind','idea_id','ref','actor','timestamp'}
 SNAPSHOT_KEYS = {'revision','shape','ratings','assessments','actor','action','timestamp'}
 DETAIL_AUTHORITY = ('Frontmatter owns current fields. Origin and linked history are immutable.\n'
                     'Edit supported fields and Notes while paused; resume to validate changes.\n'
@@ -299,7 +305,8 @@ def _snapshot(value):
         text(value[key], 'snapshot ' + key, 200)
     _current(value)
     if optional:
-        require(type(value['schema_version']) is int and value['schema_version'] == 2, 'Unsupported snapshot schema')
+        from idea_workflow import _refuse_old_version
+        _refuse_old_version(value['schema_version'], 'Unsupported snapshot schema')
         _workflow(value['workflow'])
 
 
@@ -459,13 +466,94 @@ def markdown_link(label, relative_path):
     return '[' + markdown_text(label) + '](' + quote(relative_path, safe='/') + ')'
 
 
+def _field_lines(label, value):
+    return ['- ' + label + ': ' + markdown_text(value if value not in (None, '') else 'not given')]
+
+
+def _method_label(method):
+    return METHOD_LABELS.get(method, method)
+
+
+def _prior_art_lines(discovery):
+    """The "Does it already exist?" section; an older accepted Discovery has no such fields."""
+    if 'prior_art' not in discovery and 'prior_art_none' not in discovery:
+        return ['- Does it already exist: Not checked']
+    if discovery.get('prior_art_none') is True:
+        return ['- Does it already exist: ' + markdown_text('Nothing comparable found — looked: '
+                                                             + (discovery.get('prior_art_searched') or 'not given'))]
+    lines = []
+    for n, item in enumerate(discovery.get('prior_art') or [], 1):
+        lines.extend(_field_lines('Comparable ' + str(n), item['name']))
+        for label, key in (('Link', 'link'), ('What it does', 'does'), ('How we differ', 'differs'), ('Licence', 'licence')):
+            lines.extend(_field_lines(label + ' ' + str(n), item[key]))
+    return lines or ['- Does it already exist: Not checked']
+
+
+def _workflow_sections(workflow):
+    """Readable Discovery, Exploration and Methods sections from the ACCEPTED fields only."""
+    def accepted(step):
+        record = None if workflow is None else workflow['steps'].get(step)
+        return None if record is None else record['fields']
+    if workflow is None:
+        return []
+    lines = []
+    discovery = accepted('discovery')
+    lines.extend(['### Discovery', ''])
+    if discovery is None:
+        lines.append('Not saved yet.')
+    else:
+        for label, key in (('Problem', 'problem'), ('Who it serves', 'audience'), ('How it is handled today', 'workaround'),
+                           ('Evidence it is needed', 'evidence'), ('What would kill it', 'kill_criteria')):
+            lines.extend(_field_lines(label, discovery[key]))
+        for n, item in enumerate(discovery['challenges'], 1):
+            lines.extend(_field_lines('Challenge ' + str(n), item['challenge']) + _field_lines('Response ' + str(n), item['response']))
+        lines.extend(_prior_art_lines(discovery))
+    exploration = accepted('exploration')
+    lines.extend(['', '### Exploration', ''])
+    if exploration is None:
+        lines.append('Not saved yet.')
+    else:
+        lines.extend(_field_lines('Desired result', exploration['outcome']))
+        for n, item in enumerate(exploration['alternatives'], 1):
+            lines.extend(_field_lines('Route ' + str(n), item['route']) + _field_lines('Why not or why', item['reason']))
+        lines.extend(_field_lines('Scope', exploration['scope']) + _field_lines('Why this scope', exploration['scope_reason'])
+                     + _field_lines('Next slice', exploration['next_slice']))
+        lines.extend('- Assumption: ' + markdown_text(item) for item in exploration['assumptions'])
+        lines.extend('- Learning: ' + markdown_text(item) for item in exploration['learning'])
+        if exploration.get('investment'):
+            lines.extend(_field_lines('Budget', ' '.join(str(exploration['investment'][k]) for k in ('cap', 'unit', 'boundary'))))
+        if exploration.get('experiment'):
+            for label, key in (('Question', 'question'), ('Evidence', 'evidence'), ('Success', 'success_criterion'), ('Stop rule', 'stop_rule')):
+                lines.extend(_field_lines('Experiment ' + label.lower(), exploration['experiment'][key]))
+        lines.extend(['', 'Sketch:', ''])
+        sketch = exploration.get('sketch') or []
+        for n, item in enumerate(sketch, 1):
+            inner = ' (' + _method_label(item['method']) + ')' if item.get('method') else ''
+            why = ' - why next: ' + markdown_text(item['why_next']) if item.get('why_next') else ''
+            lines.append(str(n) + '. ' + markdown_text(item['title']) + inner + why
+                         + '; done when: ' + markdown_text(item['done_when']))
+        if not sketch:
+            lines.append('No sketch yet.')
+    method = accepted('method')
+    lines.extend(['', '### Methods', ''])
+    if method is None:
+        lines.append('Not saved yet.')
+    else:
+        lines.extend(_field_lines('Method', _method_label(method['selection'])))
+        if method.get('reason'):
+            lines.extend(_field_lines('Why this method', method['reason']))
+    return lines + ['']
+
+
 def _detail_summary(metadata):
     idea = metadata['idea']
     lines = ['# ' + idea['idea_id'], '', DETAIL_AUTHORITY.rstrip(), '',
              '## Original wording', '', markdown_text(idea['origin']['text']), '',
              '## Current details', '', 'Status: ' + idea['status'] + '; accepted revision: ' + str(idea['revision']), '']
+    lines.extend(_workflow_sections(idea.get('workflow')))
     for key in ('shape','ratings','assessments','workflow'):
-        if key in idea:
+        # The retired shape record is shown only if something still holds it, so a stray edit changes the body.
+        if key in idea and (key != 'shape' or idea[key] is not None):
             lines.extend(['### ' + key.title(), '', '```yaml',
                           yaml.dump(idea[key], Dumper=DeterministicDumper, allow_unicode=True, sort_keys=True, width=100).rstrip(), '```', ''])
     lines.extend(['## Evidence', ''])
@@ -586,6 +674,119 @@ def decode_history(raw):
     return doc
 
 
+def pointer_path(idea_id, kind):
+    check_id(idea_id)
+    require(kind in ('moved', 'delivered'), 'Unknown pointer kind')
+    return 'history/' + idea_id + '/' + kind + '.md'
+
+
+def home_file(workspace_path, idea_id):
+    """Where a moved detail file lives: <workspace>/ideas/<idea_id>.md."""
+    check_id(idea_id)
+    return str(PurePosixPath(workspace_path) / 'ideas' / (idea_id + '.md'))
+
+
+def pointer_links(extensions, extension, kind):
+    """Index links to immutable lifecycle pointers; one pointer per idea."""
+    _extensions(extensions)
+    links = extensions.get(extension, [])
+    require(type(links) is list and len(links) <= MAX_POINTER_LINKS, 'Pointer links must be a bounded list', 'too_large')
+    for link in links:
+        _exact(link, {'idea_id', 'path', 'sha256'}, kind + ' link')
+        check_id(link['idea_id'])
+        _digest(link['sha256'])
+        require(link['path'] == pointer_path(link['idea_id'], kind), 'Pointer link path differs from its idea', 'corrupt_store')
+    require(len({link['idea_id'] for link in links}) == len(links), 'Duplicate ' + kind + ' pointer', 'corrupt_store')
+    return copy.deepcopy(links)
+
+
+def move_links(extensions):
+    return pointer_links(extensions, MOVE_EXTENSION, 'moved')
+
+
+def delivered_links(extensions):
+    return pointer_links(extensions, DELIVERED_EXTENSION, 'delivered')
+
+
+def _workspace(value, idea_id=None):
+    _exact(value, {'name', 'path'}, 'workspace')
+    text(value['name'], 'workspace name', 100)
+    require('\n' not in value['name'] and '\r' not in value['name'], 'workspace name must be a single line')
+    text(value['path'], 'workspace path', 4096)
+    require(PurePosixPath(value['path']).is_absolute() or PureWindowsPath(value['path']).is_absolute(), 'workspace path must be absolute')
+
+
+def _frozen(value, idea_id, revision, plan_id):
+    _exact(value, {'idea', 'extensions'}, 'frozen detail')
+    _idea(value['idea'])
+    idea = value['idea']
+    require(idea['idea_id'] == idea_id and idea['revision'] == revision and idea['status'] == 'archived'
+            and any(plan['plan_id'] == plan_id for plan in idea['plans']), 'Frozen idea differs from its pointer')
+    require(all('content' not in plan for plan in idea['plans']), 'Frozen plans must not carry content')
+    _extensions(value['extensions'])
+    agent_proposal_links(value['extensions'], idea_id)
+    asset_links(value['extensions'], idea_id)
+    handoff_links(value['extensions'], idea_id)
+
+
+def encode_moved(idea_id, *, idea_revision, plan_id, workspace, home_path, moved_sha256, actor, timestamp, frozen):
+    """Immutable pointer left in the store when a detail file moves to a workspace.
+
+    frozen keeps the living fields as they were at the move (the idea mapping
+    without revisions, plus detail extension links) so history stays loadable;
+    only the file itself, Notes included, leaves the store.
+    """
+    check_id(idea_id)
+    check_id(plan_id, 'plan')
+    integer(idea_revision, 'moved revision', 1)
+    meta = dict(schema_version=2, kind='moved', idea_id=idea_id, idea_revision=idea_revision, plan_id=plan_id,
+                workspace=copy.deepcopy(workspace), home_path=home_path, moved_sha256=moved_sha256,
+                actor=actor, timestamp=timestamp, frozen=copy.deepcopy(frozen))
+    _check_moved(meta)
+    return encode_document(meta, '# Moved idea\n\nThe living detail file is in the workspace. Do not edit this evidence.\n')
+
+
+def _check_moved(meta):
+    _exact(meta, MOVED_KEYS, 'moved pointer')
+    require(type(meta['schema_version']) is int and meta['schema_version'] == 2 and meta['kind'] == 'moved', 'Unsupported moved pointer schema')
+    check_id(meta['idea_id'])
+    check_id(meta['plan_id'], 'plan')
+    integer(meta['idea_revision'], 'moved revision', 1)
+    _workspace(meta['workspace'])
+    require(meta['home_path'] == home_file(meta['workspace']['path'], meta['idea_id']), 'Home path differs from workspace and idea')
+    _digest(meta['moved_sha256'])
+    text(meta['actor'], 'moved actor', 200)
+    text(meta['timestamp'], 'moved timestamp', 200)
+    _frozen(meta['frozen'], meta['idea_id'], meta['idea_revision'], meta['plan_id'])
+
+
+def decode_moved(raw):
+    doc = parse_document(raw)
+    _check_moved(doc.metadata)
+    return copy.deepcopy(doc.metadata)
+
+
+def encode_delivered(idea_id, *, ref, actor, timestamp):
+    check_id(idea_id)
+    meta = dict(schema_version=2, kind='delivered', idea_id=idea_id, ref=ref, actor=actor, timestamp=timestamp)
+    _check_delivered(meta)
+    return encode_document(meta, '# Delivered idea\n\nDo not edit this evidence.\n')
+
+
+def _check_delivered(meta):
+    _exact(meta, DELIVERED_KEYS, 'delivered pointer')
+    require(type(meta['schema_version']) is int and meta['schema_version'] == 2 and meta['kind'] == 'delivered', 'Unsupported delivered pointer schema')
+    check_id(meta['idea_id'])
+    for key in ('ref', 'actor', 'timestamp'):
+        text(meta[key], 'delivered ' + key, 500 if key == 'ref' else 200)
+
+
+def decode_delivered(raw):
+    doc = parse_document(raw)
+    _check_delivered(doc.metadata)
+    return copy.deepcopy(doc.metadata)
+
+
 def _index_body(state):
     lines = ['# Ideas', '', INDEX_AUTHORITY.rstrip(), '', '| Rank | Idea | Status | Human urgency | Human importance | AI scores |',
              '| --- | --- | --- | --- | --- | --- |']
@@ -625,6 +826,8 @@ def _index_metadata(meta):
     for n, link in enumerate(meta['placements'], 1):
         _link(link, 'history/backlog/r' + str(n) + '.md')
     _extensions(meta['extensions'])
+    move_links(meta['extensions'])
+    delivered_links(meta['extensions'])
 
 
 def decode_index(raw, *, state=None):
@@ -638,6 +841,50 @@ def decode_index(raw, *, state=None):
 def _encode_placement(placement):
     _placement(placement)
     return encode_document(dict(schema_version=2, kind='placement', placement=copy.deepcopy(placement)), '# Immutable placement evidence\n')
+
+
+# Test switch: False forces every idea down the full re-encode/re-parse path.
+_UNCHANGED_SHORTCUT = True
+
+
+def _encode_unchanged_detail(key, current, idea, prior_idea, prior_document, history_links, metadata_links):
+    """Detail bytes for an idea identical to its baseline, or (None, None) for the full path.
+
+    Equality is strict: canonical JSON of both ideas (so 1, 1.0 and True differ,
+    unlike ==). The shortcut applies only when the previous document is
+    rewritable and its metadata (less transaction counter) and body both equal
+    what a fresh encode would produce; otherwise the caller takes the full path.
+    The result is encode_document of that same metadata/body, so it is byte-
+    identical to the full path, which would reach the same call with the
+    previous transaction counter. Only the baseline/after/detail parses and the
+    repeated history/metadata encodes are skipped. Evidence-link checks remain
+    in the caller and read the returned extensions.
+    """
+    if json.dumps(idea, sort_keys=True, allow_nan=False) != json.dumps(prior_idea, sort_keys=True, allow_nan=False):
+        return None, None
+    prior_document.require_rewritable()
+    extensions_ = prior_document.metadata.get('extensions')
+    counter = prior_document.metadata.get('transaction_revision')
+    if type(extensions_) is not dict or type(counter) is not int:
+        return None, None
+    metadata = dict(schema_version=2, kind='idea', idea={k:v for k,v in current.items() if k != 'revisions'},
+                    history=copy.deepcopy(history_links),
+                    metadata_evidence=copy.deepcopy(metadata_links), transaction_revision=counter,
+                    extensions=extensions_)
+    _detail_metadata(metadata)
+    try:
+        notes = _notes(prior_document, metadata)
+    except IdeaError:
+        return None, None
+    before = {k:v for k,v in prior_document.metadata.items() if k != 'transaction_revision'}
+    after = {k:v for k,v in metadata.items() if k != 'transaction_revision'}
+    if json.dumps(before, sort_keys=True, allow_nan=False) != json.dumps(after, sort_keys=True, allow_nan=False):
+        return None, None
+    body = _detail_summary(metadata) + notes + NOTES_END
+    if body != prior_document.body:
+        return None, None
+    return encode_document(metadata, body, previous=prior_document), copy.deepcopy(extensions_)
+
 
 
 def encode_state(state, *, notes=None, extensions=None, previous=None, previous_state=None,
@@ -695,42 +942,57 @@ def encode_state(state, *, notes=None, extensions=None, previous=None, previous_
             content = plan.pop('content')
             require(digest(content.encode('utf-8')) == plan['sha256'], 'Plan content hash mismatch')
             files['plan-evidence/' + plan['plan_id'] + '.md'] = content.encode('utf-8')
+        history_links = []
         for snap in idea['revisions']:
-            files['history/' + key + '/r' + str(snap['revision']) + '.md'] = encode_history(key, snap, origin=idea['origin'])
+            history_path = 'history/' + key + '/r' + str(snap['revision']) + '.md'
+            files[history_path] = encode_history(key, snap, origin=idea['origin'])
+            history_links.append(dict(path=history_path, sha256=digest(files[history_path])))
+        metadata_links = {}
         for field, kind in METADATA_TYPES.items():
+            metadata_links[field] = []
             for record in current[field]:
-                files[metadata_path(key, kind, record)] = encode_metadata(key, kind, record)
+                metadata_path_ = metadata_path(key, kind, record)
+                files[metadata_path_] = encode_metadata(key, kind, record)
+                metadata_links[field].append(dict(path=metadata_path_, sha256=digest(files[metadata_path_])))
         path = key + '.md'
-        baseline = None
-        if previous_state is not None and path in previous:
-            prior_idea = previous_state['ideas'][key]
-            prior = copy.deepcopy(prior_idea)
-            for plan in prior['plans']:
-                plan.pop('content', None)
-            # Earlier generated links belong to the baseline summary. Appending
-            # new links must not make the previous body appear externally edited.
-            baseline = parse_document(encode_detail(prior, extensions=previous[path].metadata['extensions'])).metadata
-        prior_document = previous.get(path)
-        encoded_detail = encode_detail(current, notes.get(key, ''), extensions.get(key),
-                                       previous=prior_document, previous_baseline=baseline,
-                                       transaction_revision=state['transaction_revision'])
-        if prior_document is not None:
-            after = parse_document(encoded_detail)
-            before_metadata = {k:v for k,v in prior_document.metadata.items() if k != 'transaction_revision'}
-            after_metadata = {k:v for k,v in after.metadata.items() if k != 'transaction_revision'}
-            same_metadata = (json.dumps(before_metadata, sort_keys=True, allow_nan=False) ==
-                             json.dumps(after_metadata, sort_keys=True, allow_nan=False))
-            if same_metadata and prior_document.body == after.body:
-                # An unrelated idea mutation must not force all detail files to
-                # carry the newest transaction counter. The touched detail is
-                # sufficient to recover the counter without rewriting IDEAS.md.
-                encoded_detail = encode_detail(current, notes.get(key, ''), extensions.get(key),
-                                               previous=prior_document, previous_baseline=baseline,
-                                               transaction_revision=prior_document.metadata['transaction_revision'])
+        encoded_detail = unchanged_extensions = None
+        if (_UNCHANGED_SHORTCUT and previous_state is not None and path in previous
+                and key in previous_state['ideas'] and extensions.get(key) is None):
+            encoded_detail, unchanged_extensions = _encode_unchanged_detail(
+                key, current, idea, previous_state['ideas'][key], previous[path], history_links, metadata_links)
+        if encoded_detail is not None:
+            detail_extensions = unchanged_extensions
+        else:
+            baseline = None
+            if previous_state is not None and path in previous:
+                prior_idea = previous_state['ideas'][key]
+                prior = copy.deepcopy(prior_idea)
+                for plan in prior['plans']:
+                    plan.pop('content', None)
+                # Earlier generated links belong to the baseline summary. Appending
+                # new links must not make the previous body appear externally edited.
+                baseline = parse_document(encode_detail(prior, extensions=previous[path].metadata['extensions'])).metadata
+            prior_document = previous.get(path)
+            encoded_detail = encode_detail(current, notes.get(key, ''), extensions.get(key),
+                                           previous=prior_document, previous_baseline=baseline,
+                                           transaction_revision=state['transaction_revision'])
+            if prior_document is not None:
+                after = parse_document(encoded_detail)
+                before_metadata = {k:v for k,v in prior_document.metadata.items() if k != 'transaction_revision'}
+                after_metadata = {k:v for k,v in after.metadata.items() if k != 'transaction_revision'}
+                same_metadata = (json.dumps(before_metadata, sort_keys=True, allow_nan=False) ==
+                                 json.dumps(after_metadata, sort_keys=True, allow_nan=False))
+                if same_metadata and prior_document.body == after.body:
+                    # An unrelated idea mutation must not force all detail files to
+                    # carry the newest transaction counter. The touched detail is
+                    # sufficient to recover the counter without rewriting IDEAS.md.
+                    encoded_detail = encode_detail(current, notes.get(key, ''), extensions.get(key),
+                                                   previous=prior_document, previous_baseline=baseline,
+                                                   transaction_revision=prior_document.metadata['transaction_revision'])
+            detail_extensions = parse_document(encoded_detail).metadata['extensions']
         files[path] = encoded_detail
         from idea_proposal_evidence import decode_proposal
-        detail = parse_document(encoded_detail)
-        for link in agent_proposal_links(detail.metadata['extensions'], key):
+        for link in agent_proposal_links(detail_extensions, key):
             relative = link['path']
             require(relative in proposal_evidence, 'Missing linked agent proposal bytes: ' + relative, 'corrupt_store')
             raw = proposal_evidence[relative]
@@ -739,7 +1001,7 @@ def encode_state(state, *, notes=None, extensions=None, previous=None, previous_
             files[relative] = raw
             required_proposals.add(relative)
         from idea_asset_evidence import decode_record
-        for link in asset_links(detail.metadata['extensions'], key):
+        for link in asset_links(detail_extensions, key):
             relative = link['path']
             require(relative in asset_evidence, 'Missing linked asset evidence bytes: '+relative, 'corrupt_store')
             raw = asset_evidence[relative]
@@ -748,7 +1010,7 @@ def encode_state(state, *, notes=None, extensions=None, previous=None, previous_
             files[relative] = raw
             required_assets.add(relative)
         from idea_handoff_evidence import decode_record as decode_handoff
-        for link in handoff_links(detail.metadata['extensions'], key):
+        for link in handoff_links(detail_extensions, key):
             relative = link['path']
             require(relative in handoff_evidence, 'Missing linked handoff bytes: '+relative, 'corrupt_store')
             raw = handoff_evidence[relative]

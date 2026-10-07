@@ -15,9 +15,10 @@ from idea_workflow import source_digest
 BIND = 'binding_'+'1'*32
 SID = 'session_'+'2'*32
 IDEA = 'idea_'+'3'*32
-SHAPE = dict(outcome='Clean lid', scope='small-change', scope_reason='One lid',
-             alternatives=[dict(route='Clean existing lid', reason='Less work')],
-             assumptions=[], next_slice='Check lid', learning=[])
+EXPLORATION = dict(outcome='Clean lid', scope='small-change', scope_reason='One lid',
+                   alternatives=[dict(route='Clean existing lid', reason='Less work')],
+                   assumptions=[], next_slice='Check lid', learning=[], investment=None, experiment=None,
+                   sketch=[dict(title='Check the lid', why_next='Cheapest test', done_when='Lid is checked', method=None)])
 
 
 class Clock:
@@ -45,15 +46,15 @@ class BrokerTests(unittest.TestCase):
 
     def envelope(self, key='request1'):
         return dict(request_id=key, idea_id=IDEA, expected_revision=2,
-                    expected_draft_version=3, operation='shape',
-                    source_digest=source_digest('shape', 2, self.source['data']))
+                    expected_draft_version=3, operation='exploration',
+                    source_digest=source_digest('exploration', 2, self.source['data']))
 
     def enqueue(self, key='request1'):
         return self.broker.enqueue(BIND, 'gen1', self.envelope(key), self.source)
 
     def reply(self):
         event = self.broker.events(BIND, 'gen1', SID, 0, 0)['events'][0]
-        return dict({k:v for k,v in event.items() if k not in ('sequence','data')}, proposal=copy.deepcopy(SHAPE))
+        return dict({k:v for k,v in event.items() if k not in ('sequence','data')}, proposal=copy.deepcopy(EXPLORATION))
 
     def code(self, code, fn):
         with self.assertRaises(IdeaError) as caught: fn()
@@ -294,7 +295,7 @@ class BrokerTests(unittest.TestCase):
         talk = self.broker.conversation(BIND,'gen1')
         self.assertEqual([f['sequence'] for f in talk['fills']], [1, 2])
         self.assertEqual(talk['fills'][0]['fields'], dict(outcome='Agreed result'))
-        self.assertEqual((talk['operation'], talk['idea_id'], talk['accepted_revision']), ('shape', IDEA, 2))
+        self.assertEqual((talk['operation'], talk['idea_id'], talk['accepted_revision']), ('exploration', IDEA, 2))
         self.assertEqual(self.saved, [], 'a fill is never a persisted proposal or a draft write')
         self.assertEqual(self.reply()['request_id'], 'request1')  # still open: a full reply may follow
         self.assertEqual(self.broker.respond(BIND,'gen1',self.reply())['status'], 'completed')
@@ -312,12 +313,17 @@ class BrokerTests(unittest.TestCase):
     def test_fill_keeps_method_selection_budget_memory_and_actual_position_human(self):
         source = dict(accepted_revision=2, draft_version=3, data={'capture': {'raw_text': 'x'}})
         from idea_proposals import _default_fill
-        self.assertEqual(_default_fill('method', {'reason': 'Agreed reason'}), {'reason': 'Agreed reason'})
-        for fields in ({'selection': 'bounded-plan'}, {'investment': {'cap': 4, 'unit': 'hours', 'boundary': 'x'}},
-                       {'memory': {'status': 'found', 'sources': ['decision:x'], 'rationale': 'x'}}):
+        # v3 (R8): a method fill is the agent's memory result only; reason, selection and budget stay the human's.
+        memory = dict(status='varied', sources=[], rationale=None, preferred_method=None)
+        self.assertEqual(_default_fill('method', {'memory': memory}), {'memory': memory})
+        for fields in ({'reason': 'Agreed reason'}, {'selection': 'bounded-plan'},
+                       {'investment': {'cap': 4, 'unit': 'hours', 'boundary': 'x'}},
+                       {'memory': memory, 'selection': 'bounded-plan'}):
             with self.subTest(fields=fields):
                 with self.assertRaises(IdeaError) as caught: _default_fill('method', fields)
                 self.assertEqual(caught.exception.code, 'invalid_fill')
+        found = dict(status='found', sources=['decision:x'], rationale='x', preferred_method=None)
+        with self.assertRaises(IdeaError): _default_fill('method', {'memory': found})
         self.assertEqual(_default_fill('assessment', {'proposed_position': 2}), {'proposed_position': 2})
         for fields in ({'actual_position': 2}, {'position': {'actual_position': 2}}, {'proposed_position': 0}, {'proposed_position': True}):
             with self.subTest(fields=fields):
@@ -325,10 +331,34 @@ class BrokerTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 'invalid_fill')
         with self.assertRaises(IdeaError): _default_fill('memory', {'status': 'found'})
 
+    def test_visual_brief_reply_carries_prototype_skill_as_a_closed_enum(self):
+        from idea_proposals import _default_proposal
+        for value in ('available', 'unavailable'):
+            self.assertEqual(_default_proposal('visual_brief', {'prototype_skill': value}), {'prototype_skill': value})
+        for bad in ({'prototype_skill': 'maybe'}, {'prototype_skill': True}, {'prototype_skill': None}, {},
+                    {'prototype_skill': 'available', 'extra': 1}, {'other': 'available'}, 'available'):
+            with self.subTest(bad=bad), self.assertRaises(IdeaError) as caught:
+                _default_proposal('visual_brief', bad)
+            self.assertEqual(caught.exception.code, 'invalid_proposal')
+
+    def test_visualize_fill_is_the_prototype_design_set_only_never_acceptance(self):
+        from idea_proposals import _default_fill, FILL_KEYS
+        assets = ['asset_'+'a'*32, 'asset_'+'b'*32]
+        good = {'source': 'prototype', 'assets': assets}
+        self.assertEqual(_default_fill('visual_brief', good), good)
+        self.assertEqual(FILL_KEYS['visual_brief'], frozenset(('source', 'assets')))
+        for bad in ({'disposition': 'accepted_set'}, {'disposition': 'skipped'}, {'design_set_id': 'set_'+'c'*32},
+                    {'reason': 'x'}, dict(good, disposition='accepted_set'), {'source': 'claude_design', 'assets': assets},
+                    {'source': 'prototype'}, {'assets': assets}, {'source': 'prototype', 'assets': ['nope']}):
+            with self.subTest(bad=bad), self.assertRaises(IdeaError) as caught:
+                _default_fill('visual_brief', bad)
+            self.assertEqual(caught.exception.code, 'invalid_fill')
+        self.assertFalse(hasattr(self.broker, 'accept'))
+
     def test_fill_needs_a_delivered_open_request_with_its_exact_correlation(self):
         self.enqueue()
         undelivered = dict(request_id='request1', session_id=SID, idea_id=IDEA, accepted_revision=2, draft_version=3,
-                           operation='shape', source_digest=source_digest('shape', 2, self.source['data']), fields=dict(outcome='x'))
+                           operation='exploration', source_digest=source_digest('exploration', 2, self.source['data']), fields=dict(outcome='x'))
         self.code('request_not_delivered', lambda: self.broker.fill(BIND,'gen1',undelivered))
         self.code('response_mismatch', lambda: self.fill(dict(outcome='x'), draft_version=4))
         self.code('request_not_found', lambda: self.fill(dict(outcome='x'), request_id='other'))
@@ -357,14 +387,14 @@ class BrokerTests(unittest.TestCase):
                       source_digest=source_digest('method', 2, self.source['data']))
         self.assertEqual(self.broker.enqueue(BIND,'gen1',method,self.source)['status'],'pending')
         self.code('request_cancelled', lambda: self.broker.fill(BIND,'gen1',dict(
-            request_id='request1', session_id=SID, idea_id=IDEA, accepted_revision=2, draft_version=3, operation='shape',
-            source_digest=source_digest('shape', 2, self.source['data']), fields=dict(outcome='late'))))
+            request_id='request1', session_id=SID, idea_id=IDEA, accepted_revision=2, draft_version=3, operation='exploration',
+            source_digest=source_digest('exploration', 2, self.source['data']), fields=dict(outcome='late'))))
         self.code('request_busy', lambda: self.broker.enqueue(BIND,'gen1',dict(method, request_id='request3'),self.source))
 
     # --- Review fill-r1 ---
     def other(self, key, operation='method', idea=IDEA):
         return dict(self.envelope(key), operation=operation, idea_id=idea,
-                    source_digest=source_digest(operation if operation != 'assessment' else 'shape', 2, self.source['data']))
+                    source_digest=source_digest(operation if operation != 'assessment' else 'exploration', 2, self.source['data']))
 
     def test_a_pinned_uncertain_reply_is_never_superseded(self):
         # Blocker: superseding a pinned reply left committed_uncertain unreconcilable.
@@ -556,7 +586,7 @@ class BrokerTests(unittest.TestCase):
         for index in range(MAX_RECORDS):
             self.enqueue('r'+str(index));self.broker.respond(BIND,'gen1',self.reply())
         self.code('request_capacity',lambda:self.enqueue('overflow'))
-        first=dict(self.saved[0]['correlation'],proposal=SHAPE)
+        first=dict(self.saved[0]['correlation'],proposal=EXPLORATION)
         self.assertEqual(self.broker.respond(BIND,'gen1',first)['status'],'completed')
 
     def test_binding_and_generation_tombstones_bounded(self):
@@ -730,3 +760,44 @@ class AssessmentBrokerTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class MovedIdeaAgentGuardTests(unittest.TestCase):
+    """Every agent entry point that writes or queues work refuses a moved idea with idea_moved and the home."""
+    HOME = '/work/Atlas/idea.md'
+
+    def owner(self):
+        from contextlib import contextmanager
+        import idea_launch
+        info = dict(lifecycle='moved', home=self.HOME, delivery=None)
+        class Store:
+            @contextmanager
+            def transaction(self, write=False):
+                yield dict(ideas={IDEA: dict(revision=2)})
+            def lifecycle(self, idea_id):
+                return info
+        owner = idea_launch.OwnerService.__new__(idea_launch.OwnerService)
+        owner.store = Store(); owner.policy = unittest.mock.Mock(); owner.broker = unittest.mock.Mock()
+        owner.live_context = unittest.mock.Mock(return_value=None)  # no agent connected: idea_moved must still win
+        return owner
+
+    def refused(self, call):
+        with self.assertRaises(IdeaError) as caught: call()
+        self.assertEqual(caught.exception.code, 'idea_moved')
+        self.assertEqual(caught.exception.details['home'], self.HOME)
+
+    def test_propose_fill_asset_and_respond_refuse_a_moved_idea_and_queue_nothing(self):
+        owner = self.owner(); context = unittest.mock.Mock()
+        payload = dict(idea_id=IDEA, accepted_revision=2, request_id='r', revision=2)
+        self.refused(lambda: owner.propose(unittest.mock.Mock(), None, dict(idea_id=IDEA, operation='assessment')))
+        for operation in ('fill', 'asset', 'respond'):
+            with self.subTest(operation=operation):
+                self.refused(lambda: owner.agent(operation, context, dict(payload)))
+        self.assertEqual(owner.broker.mock_calls, [])
+
+    def test_events_and_session_close_stay_open_on_a_moved_idea(self):
+        owner = self.owner(); context = unittest.mock.Mock()
+        owner.agent('events', context, dict(session_id=SID, after=0, timeout=0))
+        owner.agent('session-close', context, {})
+        owner.broker.events.assert_called_once()
+        owner.policy.close_agent.assert_called_once()

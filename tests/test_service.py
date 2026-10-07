@@ -143,10 +143,10 @@ class ServiceTests(unittest.TestCase):
 
     def test_advanced_draft_available_but_accept_missing_handler_unavailable(self):
         self.capture();self.service.accept(self.payload())
-        value=fields()['shape'];draft=self.payload('shape',value,key='draft-shape');draft.pop('proposal_id');draft.pop('expected_backlog_revision')
+        value=fields()['method'];draft=self.payload('method',value,key='draft-method');draft.pop('proposal_id');draft.pop('expected_backlog_revision')
         result=self.service.draft(draft);self.assertEqual(result['revision'],2)
-        self.assert_code('step_unavailable',lambda:self.service.accept(self.payload('shape',value,key='shape')))
-        self.assertEqual(self.service.state()['drafts']['shape'],value)
+        self.assert_code('step_unavailable',lambda:self.service.accept(self.payload('method',value,key='method')))
+        self.assertEqual(self.service.state()['drafts']['method'],value)
         self.assert_code('derived_step',lambda:self.service.accept(self.payload('review',dict(handoff_id='handoff-fixture',source_revision=2),key='review')))
 
     def test_trusted_handler_guards_proposal_source_and_atomic_apply(self):
@@ -156,22 +156,22 @@ class ServiceTests(unittest.TestCase):
             checks.append((context.session_id,idea['revision'],source['source_digest']))
             if payload['proposal_id']!='current-proposal':raise IdeaError('stale_source','Fixture proposal does not match current source')
         def apply(state,idea,payload,source,context):applied.append(idea['revision'])
-        self.service=Service(self.store,{},self.context,handlers={'shape':TrustedStepHandler(validate,apply)})
-        value=fields()['shape'];payload=self.payload('shape',value,key='shape')
+        self.service=Service(self.store,{},self.context,handlers={'method':TrustedStepHandler(validate,apply)})
+        value=fields()['method'];payload=self.payload('method',value,key='method')
         self.assert_code('stale_source',lambda:self.service.accept(payload));self.assertEqual(self.service.state()['revision'],2)
         payload['proposal_id']='current-proposal';result=self.service.accept(payload)
         self.assertEqual(result['revision'],3);self.assertEqual(len(applied),1)
         replay=Service(self.store,{},self.context)
         self.assertEqual(replay.accept(payload),result) # handler absent, receipt first
-        again=self.payload('shape',value,key='shape-noop');again['proposal_id']='current-proposal'
+        again=self.payload('method',value,key='method-noop');again['proposal_id']='current-proposal'
         self.assertEqual(self.service.accept(again)['write_state'],'no_op');self.assertEqual(len(applied),1)
         self.assertEqual(checks[0][0],self.sid)
 
     def test_trusted_validation_cannot_mutate_and_registry_is_fixed(self):
         self.capture();self.service.accept(self.payload())
         def invalid(state,*args):state['backlog_revision']+=1
-        service=Service(self.store,{},self.context,handlers={'shape':TrustedStepHandler(invalid)})
-        self.assert_code('invalid_handler',lambda:service.accept(self.payload('shape',fields()['shape'],key='shape')))
+        service=Service(self.store,{},self.context,handlers={'method':TrustedStepHandler(invalid)})
+        self.assert_code('invalid_handler',lambda:service.accept(self.payload('method',fields()['method'],key='method')))
         self.assertEqual(self.domain()['backlog_revision'],1)
         with self.assertRaises(IdeaError):Service(self.store,{},self.context,handlers={'arbitrary.module':TrustedStepHandler(lambda *args:None)})
 
@@ -186,6 +186,27 @@ class ServiceTests(unittest.TestCase):
         current=self.service.state();self.assertEqual(current['steps']['assess']['status'],'review-needed')
         self.assertEqual(self.domain()['ideas'][key]['workflow']['steps']['assess']['acceptance'],old)
         self.assertIn('assess',result['invalidated'])
+
+    def accepted_change_marks_exploration(self,step,changed):
+        value=complete();key=value['idea_id']
+        with self.store.transaction(write=True) as state:
+            state['ideas'][key]=value;state['order']=[key];state['backlog_revision']=1;self.store.commit(state)
+        self.context.selected_idea_id=key
+        self.assertEqual(self.service.state()['steps']['exploration']['status'],'saved')
+        old=copy.deepcopy(value['workflow']['steps']['exploration']['acceptance'])
+        service=Service(self.store,{},self.context,handlers={step:TrustedStepHandler(lambda *args:None)})
+        result=service.accept(self.payload(step,changed,key=step+'-change'))
+        self.assertIn('exploration',result['invalidated'])
+        self.assertEqual(service.state()['steps']['exploration']['status'],'review-needed')
+        self.assertEqual(self.domain()['ideas'][key]['workflow']['steps']['exploration']['acceptance'],old)
+
+    def test_method_change_after_exploration_marks_exploration_review_needed(self):
+        changed=fields()['method'];changed['selection']='adaptive-slices'
+        self.accepted_change_marks_exploration('method',changed)
+
+    def test_discovery_change_after_exploration_marks_exploration_review_needed(self):
+        changed=fields()['discovery'];changed['problem']='A different problem'
+        self.accepted_change_marks_exploration('discovery',changed)
 
     def test_assess_handler_composes_placement_with_backlog_cas_in_same_commit(self):
         value=complete();key=value['idea_id']

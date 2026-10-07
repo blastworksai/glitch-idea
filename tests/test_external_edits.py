@@ -54,8 +54,7 @@ class ExternalEditTests(unittest.TestCase):
 
     def test_legacy_null_inputs_import_once_with_observer_not_declared_editor(self):
         initial = self.seed(original_idea())
-        value = dict(fields()['shape'],method='bounded-plan',method_reason='Known')
-        self.edit(lambda m:m['idea'].update(shape=value,ratings=dict(urgency=4,importance=8,actor='pretend-editor',timestamp='pretend-time')))
+        self.edit(lambda m:m['idea'].update(ratings=dict(urgency=4,importance=8,actor='pretend-editor',timestamp='pretend-time')))
         current = self.show()['ideas'][KEY]
         self.assertEqual(current['revision'],2)
         self.assertEqual(current['origin'],initial['ideas'][KEY]['origin'])
@@ -66,18 +65,25 @@ class ExternalEditTests(unittest.TestCase):
         self.assertNotIn('workflow',current)
         self.assertEqual(self.show()['ideas'][KEY],current)
 
+    def test_retired_shape_record_cannot_be_edited_or_acquired(self):
+        # v3 retired the shape record: no external edit may fill it, change it or mirror it into the workflow.
+        retired=dict(outcome='Old',alternatives=[{'route':'Route','reason':'Reason'}],assumptions=[],scope='small-change',
+                     scope_reason='One lid',next_slice='Check lid',learning=[],method='bounded-plan',method_reason='Known')
+        self.seed(original_idea())
+        self.refused(lambda m:m['idea'].update(shape=retired),'external_edit_conflict')
+
     def test_legacy_rating_mirrors_draft_and_invalidates_self_and_dependents(self):
         initial = self.seed()
-        history = (self.root/'history'/KEY/'r6.md').read_bytes()
+        history = (self.root/'history'/KEY/'r7.md').read_bytes()
         self.edit(lambda m:m['idea']['ratings'].update(urgency=9))
         current = self.show()['ideas'][KEY]
-        self.assertEqual(current['revision'],7)
+        self.assertEqual(current['revision'],8)
         self.assertEqual(current['workflow']['drafts']['priorities']['urgency'],9)
         for step in ('priorities','assess'):
             self.assertIn('priorities',current['workflow']['steps'][step]['invalidated_by'])
             self.assertEqual(current['workflow']['steps'][step]['acceptance'],initial['ideas'][KEY]['workflow']['steps'][step]['acceptance'])
         self.assertEqual(derive_state(current)['steps']['priorities']['status'],'unsaved')
-        self.assertEqual((self.root/'history'/KEY/'r6.md').read_bytes(),history)
+        self.assertEqual((self.root/'history'/KEY/'r7.md').read_bytes(),history)
         self.assertEqual(self.show()['ideas'][KEY],current)
 
     def test_capture_edit_preserves_origin_and_persisted_partial_buffers(self):
@@ -92,15 +98,19 @@ class ExternalEditTests(unittest.TestCase):
         self.assertEqual(current['workflow']['drafts']['capture']['raw_text'],'Revised current wording')
         self.assertEqual(current['workflow']['drafts']['priorities'],{'urgency':6,'importance':None})
         self.assertEqual(current['workflow']['current_step'],'priorities')
-        self.assertIn('capture',current['workflow']['steps']['shape']['invalidated_by'])
+        for step in ('method','discovery','exploration'):
+            self.assertIn('capture',current['workflow']['steps'][step]['invalidated_by'])
 
-    def test_workflow_shape_mirrors_legacy_and_conflicting_aliases_refused(self):
+    def test_workflow_exploration_edit_becomes_draft_and_retired_shape_alias_refused(self):
         self.seed()
-        self.edit(lambda m:m['idea']['workflow']['steps']['shape']['fields'].update(outcome='New outcome'))
-        self.assertEqual(self.show()['ideas'][KEY]['shape']['outcome'],'New outcome')
+        self.edit(lambda m:m['idea']['workflow']['steps']['exploration']['fields'].update(outcome='New outcome'))
+        current=self.show()['ideas'][KEY]
+        self.assertEqual(current['workflow']['drafts']['exploration']['outcome'],'New outcome')
+        self.assertIsNone(current['shape'])
         def conflict(m):
-            m['idea']['shape']['outcome']='Legacy different'
-            m['idea']['workflow']['steps']['shape']['fields']['outcome']='Workflow different'
+            m['idea']['shape']=dict(outcome='Legacy different',alternatives=[{'route':'Route','reason':'Reason'}],assumptions=[],
+                scope='small-change',scope_reason='One lid',next_slice='Check lid',learning=[],method='bounded-plan',method_reason='Known')
+            m['idea']['workflow']['steps']['exploration']['fields']['outcome']='Workflow different'
         self.refused(conflict,'external_edit_conflict')
 
     def test_assessment_input_recomputed_score_only_refused(self):
@@ -158,15 +168,16 @@ class ExternalEditTests(unittest.TestCase):
         self.assertIsNone(current['workflow']['drafts']['priorities']['importance'])
         self.assertEqual(current['ratings'],initial['ideas'][KEY]['ratings'])
         self.assertEqual(current['workflow']['steps']['priorities']['acceptance'],initial['ideas'][KEY]['workflow']['steps']['priorities']['acceptance'])
-        self.assertEqual(current['revision'],7)
+        self.assertEqual(current['revision'],8)
 
-    def test_partial_shape_source_stays_draft_when_legacy_mirror_is_incomplete(self):
+    def test_partial_exploration_source_stays_draft_without_acceptance(self):
         initial=self.seed()
-        self.edit(lambda m:m['idea']['workflow']['steps']['shape']['fields'].update(alternatives=[{'route':'Partial'}]))
+        self.edit(lambda m:m['idea']['workflow']['steps']['exploration']['fields'].update(alternatives=[{'route':'Partial'}]))
         current=self.show()['ideas'][KEY]
-        self.assertEqual(current['workflow']['drafts']['shape']['alternatives'],[{'route':'Partial'}])
+        self.assertEqual(current['workflow']['drafts']['exploration']['alternatives'],[{'route':'Partial'}])
         self.assertEqual(current['shape'],initial['ideas'][KEY]['shape'])
-        self.assertIn('shape',current['workflow']['steps']['shape']['invalidated_by'])
+        self.assertEqual(current['workflow']['steps']['exploration']['acceptance'],initial['ideas'][KEY]['workflow']['steps']['exploration']['acceptance'])
+        self.assertIn('exploration',current['workflow']['steps']['exploration']['invalidated_by'])
         self.assertEqual(self.show()['ideas'][KEY],current)
 
     def test_comments_and_generated_body_conflict_preserve_file(self):
@@ -185,7 +196,7 @@ class ExternalEditTests(unittest.TestCase):
         for key in initial['order']:self.edit(lambda m:m['idea']['ratings'].update(urgency=9),key)
         current=self.show()
         self.assertEqual(current['transaction_revision'],initial['transaction_revision']+1)
-        self.assertEqual([v['revision'] for v in current['ideas'].values()],[7,7])
+        self.assertEqual([v['revision'] for v in current['ideas'].values()],[8,8])
         self.assertEqual(self.show(),current)
 
     def test_import_cas_preserves_concurrent_outsider_edit(self):
@@ -210,7 +221,7 @@ class ExternalEditTests(unittest.TestCase):
             with self.assertRaises(IdeaError) as caught:self.show()
         self.assertTrue(caught.exception.details['committed'])
         current=self.show()['ideas'][KEY]
-        self.assertEqual(current['revision'],7)
+        self.assertEqual(current['revision'],8)
         self.assertEqual(self.show()['ideas'][KEY],current)
 
 if __name__=='__main__':unittest.main()

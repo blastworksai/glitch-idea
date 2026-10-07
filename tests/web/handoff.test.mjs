@@ -6,9 +6,9 @@ const web = new URL('../../glitch-idea/web/', import.meta.url);
 const source = name => readFile(new URL(name, web), 'utf8');
 const url = text => 'data:text/javascript;base64,' + Buffer.from(text).toString('base64');
 const apiUrl = url(await source('api.js')), foldsUrl = url(await source('folds.js'));
-const reviewUrl = url(await source('steps/review.js'));
+const reviewUrl = url((await source('steps/review.js')).replace("'../folds.js'", JSON.stringify(foldsUrl)));
 const {render: review, copyCurrent} = await import(reviewUrl);
-const {render: ideas} = await import(url((await source('ideas.js')).replace("'./steps/review.js'", JSON.stringify(reviewUrl))));
+const {render: ideas} = await import(url((await source('ideas.js')).replace("'./steps/review.js'", JSON.stringify(reviewUrl)).replace("'./folds.js'", JSON.stringify(foldsUrl))));
 const {Flow, STEPS} = await import(foldsUrl);
 const {IdeaApi} = await import(apiUrl);
 const appSource = (await source('app.js')).replace("'./api.js'", JSON.stringify(apiUrl)).replace("'./folds.js'", JSON.stringify(foldsUrl));
@@ -163,7 +163,7 @@ test('manual confirmation rejects a changed packet and never silently regenerate
 
 test('clipboard await rechecks dirty pending proposal paused disposal and selected idea before returning to Ideas', async () => {
   for (const change of [f => f.edit('capture', {raw_text: 'New human words'}), f => f.pending = {ambiguous: true},
-    f => f.proposalPending = {key: 'shape'}, f => f.paused = true, f => f.dispose(), f => f.state.idea_id = OTHER]) {
+    f => f.proposalPending = {key: 'exploration'}, f => f.paused = true, f => f.dispose(), f => f.state.idea_id = OTHER]) {
     const wait = deferred(), entered = deferred(), h = harness({clipboard: {writeText: async () => {entered.resolve(); await wait.promise;}}});
     const copying = h.get('review-copy').click(); await entered.promise; change(h.flow); wait.resolve(); await copying;
     assert.equal(h.flow.view, 'workflow'); assert.equal(h.calls.filter(c => c.payload !== null).length, 0);
@@ -238,9 +238,9 @@ async function appFixture(run, prepare = () => {}) {
   finally {flow?.dispose(); for (const [name, descriptor] of originals) {if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name];}}
 }
 
-test('actual app uses literal six-module loader and rejects failed/malformed packaged modules', async () => {
+test('actual app uses literal seven-module loader and rejects failed/malformed packaged modules', async () => {
   const paths = []; await loadStepModules(async path => {paths.push(path); return {ok: true, status: 200};}, async () => ({render: review, renderUploads: () => {}}));
-  assert.deepEqual(paths, ['./steps/shape.js', './steps/method.js', './steps/visualize.js', './steps/assess.js', './steps/review.js', './ideas.js']);
+  assert.deepEqual(paths, ['./steps/discovery.js', './steps/exploration.js', './steps/method.js', './steps/visualize.js', './steps/assess.js', './steps/review.js', './ideas.js']);
   await assert.rejects(loadStepModules(async () => ({status: 500, ok: false})), /Cannot load/);
   await assert.rejects(loadStepModules(async () => ({status: 200, ok: true}), async () => ({})), /Invalid packaged/);
 });

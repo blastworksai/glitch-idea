@@ -13,10 +13,13 @@ import importlib
 from idea_service import TrustedStepHandler
 from idea_workflow import STEP_ORDER
 
-STEP_MODULES = (
-    ('shape', 'idea_steps.shape'), ('method', 'idea_steps.method'),
-    ('visualize', 'idea_steps.visualize'), ('assess', 'idea_steps.assess'),
-)
+_STEP_MODULE_NAMES = {
+    'method': 'idea_steps.method', 'discovery': 'idea_steps.discovery',
+    'exploration': 'idea_steps.exploration', 'visualize': 'idea_steps.visualize',
+    'assess': 'idea_steps.assess',
+}
+# Follows the derived workflow order (one setting decides Methods vs Discovery).
+STEP_MODULES = tuple((step, _STEP_MODULE_NAMES[step]) for step in STEP_ORDER if step in _STEP_MODULE_NAMES)
 PROVIDER_MODULES = ('idea_proposals', 'idea_assets', 'idea_assessment', 'idea_handoff')
 # route_id -> method, exact path or one opaque ID prefix, body kind
 ROUTE_SPECS = {

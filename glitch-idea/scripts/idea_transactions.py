@@ -6,7 +6,10 @@ recover before reading authority; arbitrary filesystem readers can see mixed
 files until IDEAS.md is published last. Not qualified on network/synced stores.
 
 Journal is transient recovery state, not domain authority. No rollback over new
-state. No arbitrary delete API. _checkpoint is solely an injected test callback.
+state. No arbitrary delete API: the only removable user data are the migrated
+legacy state.json and one idea detail file moved out of the store, which needs
+its own immutable pointer in the same transaction. _checkpoint is solely an
+injected test callback.
 """
 import os
 from pathlib import Path
@@ -27,8 +30,10 @@ JOURNAL = '.transactions'
 FROZEN = 'migration-recovery/v1-state.json'
 RECEIPT = 'migration-recovery/receipt.json'
 _ID = r'idea_[0-9a-f]{32}'
+_IDEA_DETAIL = re.compile(r'(' + _ID + r')\.md')
+_DELETIONS = ('freeze-delete', 'move-out')
 _TX = re.compile(r'txn_[0-9a-f]{32}')
-_ALLOWED = re.compile(r'(?:IDEAS\.md|' + _ID + r'\.md|history/(?:' + _ID + r'/(?:r[1-9][0-9]*|metadata/[0-9a-f]{64})|backlog/r[1-9][0-9]*)\.md|plan-evidence/plan_[0-9a-f]{32}\.md|archive/' + _ID + r'/r[1-9][0-9]*\.json|session-recovery/session_[0-9a-f]{32}\.json|assets/evidence/[0-9a-f]{64}\.md)')
+_ALLOWED = re.compile(r'(?:IDEAS\.md|' + _ID + r'\.md|history/(?:' + _ID + r'/(?:r[1-9][0-9]*|metadata/[0-9a-f]{64}|moved|delivered)|backlog/r[1-9][0-9]*)\.md|plan-evidence/plan_[0-9a-f]{32}\.md|archive/' + _ID + r'/r[1-9][0-9]*\.json|session-recovery/session_[0-9a-f]{32}\.json|assets/evidence/[0-9a-f]{64}\.md)')
 
 
 def _conflict(message, **details):
@@ -71,6 +76,21 @@ def _safe(root, relative, *, directory=False):
         _check(stat.S_ISDIR(info.st_mode) if is_directory else stat.S_ISREG(info.st_mode),
                'Unexpected filesystem object: ' + relative)
     return path
+
+
+def _pointer_path(path):
+    return 'history/' + path[:-3] + '/moved.md'
+
+
+def _check_pointer(raw, path, before):
+    """The moved pointer must name this exact idea and the exact bytes being removed."""
+    import idea_markdown
+    try:
+        pointer = idea_markdown.decode_moved(raw)
+    except IdeaError as exc:
+        _conflict('Moved pointer is invalid: ' + str(exc), path=path)
+    _check(pointer['idea_id'] + '.md' == path and pointer['moved_sha256'] == before,
+           'Moved pointer does not match the file being removed: ' + path, path=path)
 
 
 def _allowed(path, migration=False):
@@ -141,11 +161,16 @@ def _validate_manifest(value, tx):
     _check(type(entries) is list and 0 < len(entries) <= MAX_ENTRIES, 'Transaction entry count exceeds limit')
     paths = set()
     total = 0
+    moves = []
     for n, entry in enumerate(entries):
         _check(type(entry) is dict and set(entry) == {'path','before','after','before_size','after_size','operation','immutable'}, 'Unexpected transaction entry schema')
         path = entry['path']
-        deletion = value['migration'] and path == 'state.json' and entry['operation'] == 'freeze-delete'
+        legacy = value['migration'] and path == 'state.json' and entry['operation'] == 'freeze-delete'
+        move = not value['migration'] and entry['operation'] == 'move-out' and type(path) is str and _IDEA_DETAIL.fullmatch(path) is not None
+        deletion = legacy or move
         _check((_allowed(path, value['migration']) and entry['operation'] == 'write') or deletion, 'Unknown transaction target path')
+        if move:
+            moves.append(path)
         _check(path not in paths, 'Duplicate transaction target')
         paths.add(path)
         _check(_hash(entry['before']) and _hash(entry['after']), 'Invalid before/after hash')
@@ -155,18 +180,31 @@ def _validate_manifest(value, tx):
             total += size
         _check(type(entry['immutable']) is bool and entry['immutable'] == (not _mutable(path) and not deletion), 'Unexpected mutable/immutable policy')
         if deletion:
-            _check(entry['before'] is not None and entry['after'] is None, 'Invalid legacy freeze-delete')
+            _check(entry['before'] is not None and entry['after'] is None, 'Invalid legacy freeze-delete' if legacy else 'Invalid move-out')
         else:
             _check(entry['after'] is not None, 'Missing after-image hash')
             _check(not entry['immutable'] or entry['before'] in (None, entry['after']), 'Immutable evidence cannot be changed')
     _check(total <= MAX_JOURNAL_BYTES, 'Aggregate transaction bytes exceed limit')
+    _check(len(moves) <= 1, 'At most one move-out per transaction')
+    for path in moves:
+        pointer = _pointer_path(path)
+        witness = next((e for e in entries if e['path'] == pointer), None)
+        _check(witness is not None and witness['operation'] == 'write' and witness['after'] is not None and 'IDEAS.md' in paths,
+               'move-out requires the idea pointer and the index in the same transaction: ' + path)
     if value['migration']:
         lookup = {entry['path']:entry for entry in entries}
         _check({'state.json', FROZEN, RECEIPT, 'IDEAS.md'} <= paths, 'Migration requires frozen source, receipt, index and exact legacy freeze-delete')
         _check(lookup[FROZEN]['after'] == lookup['state.json']['before'], 'Frozen legacy bytes do not match source')
-    expected_order = sorted(entries, key=lambda entry: (2 if entry['operation'] == 'freeze-delete' else 1 if entry['path'] == 'IDEAS.md' else 0, entry['path']))
+    expected_order = sorted(entries, key=lambda entry: (2 if entry['operation'] in _DELETIONS else 1 if entry['path'] == 'IDEAS.md' else 0, entry['path']))
     _check(entries == expected_order, 'Transaction publication order is invalid')
     return value
+
+
+def _check_pointer_publish(raw, path, before):
+    try:
+        _check_pointer(raw, path, before)
+    except IdeaError as exc:
+        raise IdeaError('invalid_input', str(exc)) from exc
 
 
 def _staged_path(root, tx, n, kind):
@@ -251,13 +289,16 @@ def _roll_forward(root, tx, value, callback):
             hashed = None if raw is None else digest(raw)
             _check(hashed in (entry['before'], entry['after']), 'Target changed during publication: ' + entry['path'], path=entry['path'])
             if hashed != entry['after']:
-                if entry['operation'] == 'freeze-delete':
+                if entry['operation'] in _DELETIONS:
                     # Verify the exact frozen copy, receipt and published index
                     # again at the destructive boundary; no guessed rollback.
                     lookup = {e['path']:e for e in value['entries']}
-                    for key in (FROZEN, RECEIPT, 'IDEAS.md'):
+                    move = entry['operation'] == 'move-out'
+                    for key in ((_pointer_path(entry['path']), 'IDEAS.md') if move else (FROZEN, RECEIPT, 'IDEAS.md')):
                         actual = _read(_safe(root, key))
                         _check(actual is not None and digest(actual) == lookup[key]['after'], 'Migration prerequisite changed: ' + key)
+                        if move and key != 'IDEAS.md':
+                            _check_pointer(actual, entry['path'], entry['before'])
                     target.unlink()
                     grade = _grade(grade, sync_directory(target.parent))
                 else:
@@ -345,13 +386,15 @@ def recover(root, *, _checkpoint=None):
         return WriteResult('uncertain' if committed else 'not-published', UNCERTAIN if committed else grade, exc)
 
 
-def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None, _checkpoint=None):
+def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None, move_out=None, _checkpoint=None):
     """Stage and publish complete after-images under caller-held store lock.
 
     expected supplies every changed path's prior SHA-256 or None if absent.
     Evidence is immutable. A migration must additionally supply exact frozen
     state bytes + receipt + IDEAS.md, and an expected legacy source digest.
-    state.json is the sole removable user-data path and only through migration.
+    state.json is removable only through migration. move_out names one idea
+    detail file to remove after its pointer (a change) and IDEAS.md are
+    published; the pointer must record that file's exact SHA-256.
     On a prepared I/O error, publication is uncertain: reread/recover, never
     assume no change or retry blindly. Callback exceptions are test-only.
     """
@@ -363,6 +406,8 @@ def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None,
     require(0 < len(changes) <= MAX_ENTRIES and type(freeze_legacy) is bool, 'Invalid transaction size/migration flag')
     require(not freeze_legacy or (_hash(legacy_sha256) and legacy_sha256 is not None and {FROZEN, RECEIPT, 'IDEAS.md'} <= set(changes)), 'Migration requires exact legacy hash, frozen copy, receipt and index')
     require(freeze_legacy or legacy_sha256 is None, 'Legacy hash is only accepted for migration')
+    require(move_out is None or (not freeze_legacy and type(move_out) is str and _IDEA_DETAIL.fullmatch(move_out) is not None
+                                 and move_out not in changes and _pointer_path(move_out) in changes), 'move-out needs an idea detail path and its pointer, never with migration')
     entries, copies = [], {}
     for path, after in changes.items():
         require(_allowed(path, freeze_legacy), 'Unknown transaction target: ' + str(path))
@@ -382,7 +427,13 @@ def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None,
         require(raw is not None and digest(raw) == legacy_sha256 and digest(changes[FROZEN]) == legacy_sha256, 'Legacy source does not match exact frozen copy', 'save_conflict')
         entries.append(dict(path='state.json',before=legacy_sha256,after=None,before_size=len(raw),after_size=0,operation='freeze-delete',immutable=False))
         copies['state.json'] = (raw, None)
-    entries.sort(key=lambda entry: (2 if entry['operation'] == 'freeze-delete' else 1 if entry['path'] == 'IDEAS.md' else 0, entry['path']))
+    if move_out is not None:
+        raw = _read(_safe(root, move_out))
+        require(raw is not None, 'move-out source is missing', 'save_conflict')
+        _check_pointer_publish(changes[_pointer_path(move_out)], move_out, digest(raw))
+        entries.append(dict(path=move_out,before=digest(raw),after=None,before_size=len(raw),after_size=0,operation='move-out',immutable=False))
+        copies[move_out] = (raw, None)
+    entries.sort(key=lambda entry: (2 if entry['operation'] in _DELETIONS else 1 if entry['path'] == 'IDEAS.md' else 0, entry['path']))
     tx = 'txn_' + uuid.uuid4().hex
     value = dict(schema_version=1,transaction_id=tx,phase='staging',migration=freeze_legacy,entries=entries)
     _validate_manifest(value, tx)

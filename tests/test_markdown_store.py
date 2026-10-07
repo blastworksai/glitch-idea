@@ -270,11 +270,12 @@ class MarkdownStoreTests(unittest.TestCase):
         self.capture()
         shaped = Path(self.temp.name)/'shape.json'
         shaped.write_bytes(encoded(dict(outcome='Reduce manual work',scope='capability',scope_reason='One reusable ability',
-            alternatives=[dict(route='Reuse',reason='Check existing route')],method='bounded-plan',method_reason='Bounded change',
-            assumptions=[],next_slice='One trial',learning=[])))
+            alternatives=[dict(route='Reuse',reason='Check existing route')],
+            assumptions=[],next_slice='One trial',learning=[],investment=None,experiment=None,
+            sketch=[dict(title='Trial slice',why_next='Smallest trial',done_when='Trial observed',method='bounded-plan')])))
         assessed = Path(self.temp.name)/'assessment.json'
         assessed.write_bytes(encoded(dict(method='wsjf',version='1',inputs={'value':3,'time_criticality':2,'enablement':1,'effort':1},basis='fixture',assumptions=[],confidence='low',provenance='fixture')))
-        for arguments in [('shape',KEY,'--expected-revision',1,'--file',shaped,'--actor','operator'),
+        for arguments in [('exploration',KEY,'--expected-revision',1,'--file',shaped,'--actor','operator'),
                           ('rate',KEY,'--expected-revision',2,'--urgency',4,'--importance',8,'--actor','operator'),
                           ('assess',KEY,'--expected-revision',3,'--file',assessed,'--actor','operator')]:
             code, result = self.cli(*arguments)

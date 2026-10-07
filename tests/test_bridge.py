@@ -312,9 +312,9 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual((status,error),(500,dict(ok=False,code='session_persistence_failed')))
 
     def test_legacy_workflow_selected_draft_duplication_justifies_inherited_bound(self):
-        idea=captured();value={'outcome':'x'*4000}
-        idea=save_draft(idea,'shape',value,expected_revision=idea['revision'],expected_draft_version=0)['idea']
-        idea['workflow']['current_step']='shape'
+        idea=captured();value={'outcome':'x'*4000,'scope':'small-change','next_slice':'Check lid','sketch':[{'title':'Check the lid','done_when':'Lid is checked'}]}
+        idea=save_draft(idea,'exploration',value,expected_revision=idea['revision'],expected_draft_version=0)['idea']
+        idea['workflow']['current_step']='exploration'
         # Actual validated legacy JSON Store branch; no giant fixture required.
         with self.store.transaction() as state:
             legacy=copy.deepcopy(state)
@@ -324,8 +324,8 @@ class BridgeTests(unittest.TestCase):
         (legacy_root/'state.json').write_bytes(encoded(legacy))
         with Store(legacy_root).transaction() as state:
             projection=derive_state(state['ideas'][idea['idea_id']])
-        self.assertEqual(projection['drafts']['shape'],value)
-        self.assertEqual(projection['draft'],dict(step='shape',fields=value))
+        self.assertEqual(projection['drafts']['exploration'],value)
+        self.assertEqual(projection['draft'],dict(step='exploration',fields=value))
         once=json.dumps(value,separators=(',',':')).encode()
         twice=json.dumps(projection,separators=(',',':')).encode()
         self.assertGreater(len(twice),2*len(once))
@@ -350,7 +350,7 @@ class BridgeTests(unittest.TestCase):
         for path in ('/?token=never', '/api/v1/state?idea_id=x', '/api/v1/state?idea_id=x&idea_id=y', '/api/v1/state?other=1', '/app.js?x=1',
                      '/steps/review.js?x=1', '/ideas.js?x=1'):
             self.assertEqual(self.request(path)[0], 400, path)
-        status, body, headers = self.request('/steps/shape.js')
+        status, body, headers = self.request('/steps/exploration.js')
         self.assertEqual(status, 200)
         self.assertIn(b'export function render(', body)
         self.assertEqual(headers['Content-Type'], 'text/javascript; charset=utf-8')
@@ -551,7 +551,7 @@ class OwnerHandoffBridgeTests(unittest.TestCase):
             connection.close()
 
     def open_browser(self,selected=None,binding_id=None):
-        opened = self.client.open_binding('new' if binding_id is None else 'resume',binding_id,selected)
+        opened = self.client.open_binding('new' if binding_id is None else 'resume',binding_id,selected,timeout=5)  # the session-open verb's own budget
         status,result,headers = self.wire('/api/v1/pair',{'code':opened['pairing_code']},
                                         extra={'X-Idea-Binding':opened['binding_id']})
         self.assertEqual(status,200,result)
@@ -646,7 +646,7 @@ class OwnerHandoffBridgeTests(unittest.TestCase):
         before = self.api('state')
         self.api('draft',dict(request_id='selection-buffer',idea_id=self.key,
             expected_revision=before['revision'],expected_draft_version=before['draft_version'],
-            step='shape',fields={'outcome':'Private selection preserves this draft'}))
+            step='exploration',fields={'outcome':'Private selection preserves this draft'}))
         state = self.api('state'); files = self.files()
         expected = dict(ok=True,code='ok',session_id=self.first['session_id'],idea_id=None,
                         revision=0,draft_version=0,backlog_revision=state['backlog_revision'])
@@ -809,6 +809,105 @@ class OwnerHandoffBridgeTests(unittest.TestCase):
             if relative.startswith(('history/','assets/')):
                 self.assertEqual(after[relative],raw,relative)
 
+    # A moved or delivered idea is a read-only pointer on every real browser route.
+    def move_idea(self):
+        from idea_domain import digest
+        body = '# Plan\n\nPlan body\n'
+        with self.owner.store.transaction(write=True) as state:
+            revision = state['ideas'][self.key]['revision']
+            plan = dict(plan_id='plan_'+'3'*32,idea_id=self.key,idea_revision=revision,
+                        path=str(self.root/'plan-evidence'/('plan_'+'3'*32+'.md')),source_path='/work/plan.md',
+                        content=body,sha256=digest(body.encode()),actor='operator',
+                        timestamp='2026-10-01T00:00:00Z',validation=dict(builtin='idea-trace-and-sections-v1'))
+            target = self.directory/'project'; target.mkdir(exist_ok=True)
+            return self.owner.store.move_out(state,self.key,expected_revision=revision,plan=plan,
+                workspace_name='Atlas',workspace_path=str(target),actor='operator')
+
+    def refused(self,path,payload=None,**options):
+        status,body,_ = self.wire(path,payload,browser=self.first,**options)
+        self.assertEqual((status,body['code']),(409,'idea_moved'),body)
+        return body
+
+    def test_every_browser_route_on_a_moved_idea_is_409_idea_moved_with_the_home(self):
+        before = self.api('state')
+        home = self.move_idea()['home']
+        calls = (
+            ('draft',dict(request_id='moved-draft',idea_id=self.key,expected_revision=before['revision'],
+                expected_draft_version=before['draft_version'],step='exploration',fields={'outcome':'x'})),
+            ('accept',dict(request_id='moved-accept',idea_id=self.key,expected_revision=before['revision'],
+                expected_draft_version=before['draft_version'],step='priorities',
+                fields=dict(urgency=7,importance=8),proposal_id=None,expected_backlog_revision=None)),
+            ('navigate',dict(request_id='moved-nav',idea_id=self.key,expected_revision=before['revision'],
+                expected_draft_version=before['draft_version'],step='priorities')),
+            ('rerank',dict(request_id='moved-rank',idea_id=self.key,expected_backlog_revision=before['backlog_revision'],
+                position=1,reason=None)),
+            ('handoff',self.payload('moved-handoff')),
+        )
+        files = self.files()
+        for name,payload in calls:
+            with self.subTest(route=name):
+                body = self.refused('/api/v1/'+name,payload)
+                self.assertEqual(body['home'],home)
+        self.assertEqual(self.files(),files)
+
+    def test_propose_on_a_moved_idea_is_409_idea_moved_with_the_home_and_writes_nothing(self):
+        before = self.api('state')
+        home = self.move_idea()['home']
+        with self.owner.store.transaction() as state:
+            current = state['ideas'][self.key]['revision']
+        files = self.files()
+        body = self.refused('/api/v1/propose',dict(request_id='moved-propose',idea_id=self.key,expected_revision=current,expected_draft_version=before['draft_version'],operation='assessment',source_digest='0'*64))
+        self.assertEqual(body['home'],home)
+        self.assertEqual(self.files(),files)
+
+    def test_markdown_route_on_a_moved_idea_is_idea_moved_never_404_or_the_old_file(self):
+        self.assertEqual(self.wire('/api/v1/ideas/'+self.key+'/markdown',browser=self.first)[0],200)
+        home = self.move_idea()['home']
+        body = self.refused('/api/v1/ideas/'+self.key+'/markdown')
+        self.assertEqual(body['home'],home)
+
+    def test_rows_and_state_carry_lifecycle_home_delivered_ref_and_read_only(self):
+        row = self.api('ideas')['ideas'][0]
+        self.assertEqual((row['lifecycle'],row['home'],row['delivered_ref'],row['read_only']),('active',None,None,False))
+        self.assertNotIn(row['status'],('moved','delivered'))
+        state = self.api('state')
+        self.assertEqual((state['lifecycle'],state['home'],state['delivered_ref'],state['default_workspace']),('active',None,None,None))
+        home = self.move_idea()['home']
+        row = self.api('ideas')['ideas'][0]
+        self.assertEqual((row['status'],row['lifecycle'],row['home'],row['delivered_ref'],row['read_only'],row['position']),
+                         ('moved','moved',home,None,True,1))
+        self.assertEqual(self.api('state')['home'],home)
+        with self.owner.store.transaction(write=True) as state:
+            self.owner.store.deliver(state,self.key,ref='PR 42',actor='operator')
+        row = self.api('ideas')['ideas'][0]
+        self.assertEqual((row['status'],row['lifecycle'],row['delivered_ref'],row['read_only']),('delivered','delivered','PR 42',True))
+        state = self.api('state')
+        self.assertEqual((state['lifecycle'],state['delivered_ref']),('delivered','PR 42'))
+        self.refused('/api/v1/ideas/'+self.key+'/markdown')
+
+    def test_state_carries_the_trusted_default_workspace(self):
+        self.stop_owner()
+        folder = self.directory/'default'; folder.mkdir()
+        self.owner = OwnerService(Runtime(self.root,self.private).acquire_owner(),dict(default_workspace=dict(name='Atlas',path=str(folder))))
+        self.owner.start()
+        self.first = self.open_browser(self.key)
+        self.assertEqual(self.api('state')['default_workspace'],dict(name='Atlas',path=str(folder)))
+
+    def test_error_statuses_for_the_new_lifecycle_codes(self):
+        for code in ('idea_moved','not_moved','delivery_conflict'):
+            self.assertEqual(bridge.error_status(code),409)
+        self.assertEqual(bridge.error_status('same_workspace'),400)
+
+    def test_five_hundred_character_delivery_ref_round_trips_and_501_refuses(self):
+        self.move_idea()
+        with self.owner.store.transaction(write=True) as state:
+            self.owner.store.deliver(state,self.key,ref='r'*500,actor='operator')
+        self.assertEqual(self.api('ideas')['ideas'][0]['delivered_ref'],'r'*500)
+        from idea_domain import delivery_ref
+        self.assertEqual(delivery_ref('r'*500),'r'*500)
+        with self.assertRaises(IdeaError):
+            delivery_ref('r'*501)
+
 
 class RegistryTests(unittest.TestCase):
     def missing(self, name):
@@ -849,14 +948,14 @@ const source = readFileSync(web + '/app.js', 'utf8').replace("'./api.js'", JSON.
 const app = await import(data(source));
 const seen = [];
 await app.loadStepModules(async url => {seen.push(url); return {status:404};}, () => {throw Error('must not import missing');});
-assert.deepEqual(seen, ['./steps/shape.js','./steps/method.js','./steps/visualize.js','./steps/assess.js','./steps/review.js','./ideas.js']);
+assert.deepEqual(seen, ['./steps/discovery.js','./steps/exploration.js','./steps/method.js','./steps/visualize.js','./steps/assess.js','./steps/review.js','./ideas.js']);
 await assert.rejects(app.loadStepModules(async () => ({status:503,ok:false})), /Cannot load packaged/);
 await assert.rejects(app.loadStepModules(async () => ({status:200,ok:true}), async () => ({})), /Invalid packaged/);
 await assert.rejects(app.loadStepModules(async () => ({status:200,ok:true}), async () => ({render(){}})), /Invalid packaged upload renderer/);
 await assert.rejects(app.loadStepModules(async () => ({status:200,ok:true}), async () => {throw Error('dependency failure');}), /dependency failure/);
 let completed = 0;
 await app.loadStepModules(async () => ({status:200,ok:true}), async () => {await Promise.resolve(); completed++; return {render(){},renderUploads(){}};});
-assert.equal(completed,6);
+assert.equal(completed,7);
 assert.equal(typeof app.registerIdeas,'function');
 assert.throws(() => app.registerIdeas(null), /Invalid packaged Ideas renderer/);
 const id = 'idea_' + 'a'.repeat(32);

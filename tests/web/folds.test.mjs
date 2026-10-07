@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 const web = new URL('../../glitch-idea/web/', import.meta.url);
 const moduleFrom = async name => import('data:text/javascript;base64,' + Buffer.from(await readFile(new URL(name, web), 'utf8')).toString('base64'));
-const {Flow, STEPS, statusLabel, statusGlyph, validCapture, validPriorities} = await moduleFrom('folds.js');
+const {Flow, STEPS, FILL_KEYS, stepsFor, dependentsFor, discoveryFields, explorationFields, validDiscovery, validExploration, validMethod,
+  statusLabel, statusGlyph, validCapture, validPriorities} = await moduleFrom('folds.js');
 const {IdeaApi, ApiError} = await moduleFrom('api.js');
 const IDEA = 'idea_00000000000000000000000000000001';
 const BINDING = 'binding_' + '1'.repeat(32);
@@ -54,8 +55,10 @@ function harness(initial = state()) {
   return {flow, api, writes, reads, receipts, current};
 }
 
-test('fixed seven-step vocabulary and truthful saved/skipped glyphs', () => {
-  assert.deepEqual(STEPS.map(step => step.key), ['capture', 'priorities', 'shape', 'method', 'visualize', 'assess', 'review']);
+test('fixed eight-step vocabulary and truthful saved/skipped glyphs', () => {
+  assert.deepEqual(STEPS.map(step => step.key), ['capture', 'priorities', 'method', 'discovery', 'exploration', 'visualize', 'assess', 'review']);
+  assert.deepEqual(STEPS.map(step => step.title), ['Capture', 'Priorities', 'Methods', 'Discovery', 'Exploration', 'Visualize', 'Assess', 'Review']);
+  assert.ok(Object.isFrozen(STEPS));
   assert.equal(statusGlyph('saved'), '✓');
   assert.notEqual(statusGlyph('skipped'), '✓');
   assert.equal(statusLabel('review-needed'), 'Review needed');
@@ -99,11 +102,11 @@ test('accepted and partial draft fields hydrate across reload without invented v
 
 test('local edits suppress saved check and show transitive review', () => {
   const initial = state();
-  for (const key of ['shape', 'method', 'visualize', 'assess', 'review']) initial.steps[key] = {status: 'saved', accepted_revision: 1, evidence_id: key};
+  for (const key of ['method', 'discovery', 'exploration', 'visualize', 'assess', 'review']) initial.steps[key] = {status: 'saved', accepted_revision: 1, evidence_id: key};
   const {flow} = harness(initial);
   flow.edit('capture', {...CAPTURE, raw_text: 'changed'});
   assert.equal(flow.status('capture'), 'unsaved');
-  for (const key of ['shape', 'method', 'visualize', 'assess', 'review']) assert.equal(flow.status(key), 'review-needed');
+  for (const key of ['method', 'discovery', 'exploration', 'visualize', 'assess', 'review']) assert.equal(flow.status(key), 'review-needed');
   assert.equal(flow.status('priorities'), 'current');
 });
 
@@ -126,7 +129,7 @@ test('acceptance envelope carries accepted and draft CAS without changing rating
     expected_revision: 1, expected_draft_version: 0, step: 'priorities',
     fields: {urgency: 7, importance: 8}, proposal_id: null, expected_backlog_revision: null});
   assert.equal(flow.status('priorities'), 'saved');
-  assert.equal(flow.current, 'shape');
+  assert.equal(flow.current, 'method');
 });
 
 test('pause persists a partial draft with no accepted revision or green check', async () => {
@@ -316,17 +319,73 @@ test('network failure and committed:true retain ambiguity; malformed responses f
   await assert.rejects(malformed.state(), error => error.code === 'invalid_response');
 });
 
-test('original static shell has no unsafe HTML injection, assets or persisted secrets', async () => {
-  const app = await readFile(new URL('app.js', web), 'utf8');
-  const css = await readFile(new URL('styles.css', web), 'utf8');
-  const html = await readFile(new URL('index.html', web), 'utf8');
-  assert.doesNotMatch(app, /innerHTML|localStorage|sessionStorage|eval\(/);
-  assert.doesNotMatch(css + html, /@font-face|dc-runtime|bundle\.css|tokens\.json|<img/);
+// The static shell may load exactly these things and nothing else. Anything added must be argued into this list.
+const SHELL_LINKS=['./assets/bwpm/bundle.css','./styles.css'];
+const SHELL_SCRIPTS=['./app.js'];
+const SHELL_IMAGES=['./assets/logo.svg'];
+function assertStaticShell({app,css,html}) {
+  assert.doesNotMatch(app, /innerHTML|sessionStorage|eval\(|document\.write|setAttribute\('style'|\.cssText/);
+  // The only storage use is the theme word under its one fixed key.
+  const storage=app.split('\n').filter(line=>/localStorage/.test(line));
+  assert.ok(storage.every(line=>line.includes('THEME_KEY')), 'localStorage is only for the theme key');
+  assert.doesNotMatch(app.split('\n').filter(line=>!/localStorage/.test(line)).join('\n'), /localStorage|agent_token|Authorization/);
+  assert.doesNotMatch(css + html, /dc-runtime|tokens\.json|@import|javascript:|srcdoc|<iframe|<object|<embed|<base\b/i);
+  assert.doesNotMatch(css + html, /https?:\/\//i);
+  assert.deepEqual([...html.matchAll(/<link\b[^>]*\bhref="([^"]*)"/g)].map(m => m[1]), SHELL_LINKS);
+  assert.equal([...html.matchAll(/<link\b/g)].length, SHELL_LINKS.length);
+  assert.deepEqual([...html.matchAll(/<script\b[^>]*\bsrc="([^"]*)"/g)].map(m => m[1]), SHELL_SCRIPTS);
+  assert.equal([...html.matchAll(/<script\b/g)].length, SHELL_SCRIPTS.length, 'no inline script');
+  assert.deepEqual([...html.matchAll(/<img\b[^>]*\bsrc="([^"]*)"/g)].map(m => m[1]), SHELL_IMAGES);
+  assert.equal([...html.matchAll(/<img\b/g)].length, SHELL_IMAGES.length);
+  assert.doesNotMatch(html, /\son[a-z]+\s*=/i, 'no inline event handlers');
+  assert.doesNotMatch(html, /\sstyle\s*=|<style\b/i, 'no inline style');
+  // Stylesheet urls: only the packaged local fonts.
+  for (const [, target] of css.matchAll(/url\(\s*["']?([^"')]+)/g)) assert.match(target, /^\.\/assets\/fonts\/[A-Za-z-]+\.woff2$/);
   assert.match(app, /aria-pressed/);
   assert.match(app, /aria-expanded/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(css, /min-width: 44px/);
   assert.match(html, /type="module"/);
+  // The APIV line stays a list for assistive technology.
+  const apiv=/<ol class="g-apiv"([^>]*)>(.*?)<\/ol>/.exec(html);
+  assert.ok(apiv, 'APIV is an ol.g-apiv');
+  const items=[...apiv[2].matchAll(/<li\b([^>]*)>(.*?)<\/li>/g)];
+  assert.equal(items.length, 4);
+  assert.match(items[0][1], /aria-current="step"/);
+  assert.match(items[0][2].replace(/<[^>]*>/g, ''), /^Align.*\/glitch-plan/);
+  assert.doesNotMatch(html, /class="g-apiv"[^>]*role="img"/);
+  for (const [, sel, body] of css.matchAll(/([^{}]*\.g-apiv[^{}]*)\{([^}]*)\}/g)) assert.doesNotMatch(body, /display\s*:\s*none/, 'APIV must not be display:none: ' + sel.trim());
+}
+
+test('original static shell has no unsafe HTML injection, assets or persisted secrets', async () => {
+  const app = await readFile(new URL('app.js', web), 'utf8');
+  const css = await readFile(new URL('styles.css', web), 'utf8');
+  const html = await readFile(new URL('index.html', web), 'utf8');
+  assertStaticShell({app, css, html});
+});
+
+test('the static shell check refuses each kind of unsafe or extra asset', async () => {
+  const app = await readFile(new URL('app.js', web), 'utf8');
+  const css = await readFile(new URL('styles.css', web), 'utf8');
+  const html = await readFile(new URL('index.html', web), 'utf8');
+  const bad = {
+    'a remote stylesheet': {html: html.replace('</head>', '<link rel="stylesheet" href="https://cdn.example/x.css"></head>')},
+    'a second local stylesheet': {html: html.replace('</head>', '<link rel="stylesheet" href="./extra.css"></head>')},
+    'an inline script': {html: html.replace('</head>', '<script>alert(1)</script></head>')},
+    'another script': {html: html.replace('</head>', '<script type="module" src="./other.js"></script></head>')},
+    'another image': {html: html.replace('</body>', '<img src="./assets/other.png" alt=""></body>')},
+    'an inline handler': {html: html.replace('<body>', '<body onload="x()">')},
+    'an inline style attribute': {html: html.replace('<body>', '<body style="color:red">')},
+    'an iframe srcdoc': {html: html.replace('</body>', '<iframe srcdoc="<b>x</b>"></iframe></body>')},
+    'innerHTML in the app': {app: app + '\nnode.innerHTML = x;'},
+    'a style attribute set from the app': {app: app + "\nnode.setAttribute('style', 'x');"},
+    'a persisted secret': {app: app + "\nlocalStorage.setItem('agent_token', t);"},
+    'sessionStorage in the app': {app: app + '\nsessionStorage.setItem("a","b");'},
+    'a remote font': {css: css + '\n@font-face { src: url("https://x.example/f.woff2"); }'},
+    'a stylesheet import': {css: '@import "./other.css";\n' + css},
+  };
+  assert.doesNotThrow(() => assertStaticShell({app, css, html}));
+  for (const [name, patch] of Object.entries(bad)) assert.throws(() => assertStaticShell({app, css, html, ...patch}), undefined, name + ' must be refused');
 });
 
 test('clean pause persists original selection with navigation envelope and no decision change', async () => {
@@ -428,4 +487,130 @@ test('failed dirty save stops pause before navigation and keeps the original sel
   assert.deepEqual(writes.map(write => write.operation), ['draft']);
   assert.deepEqual(flow.buffers.priorities, {urgency: 3, importance: null});
   assert.equal(flow.dirty.has('priorities'), true);
+});
+
+const SWAPPED = ['capture', 'priorities', 'discovery', 'method', 'exploration', 'visualize', 'assess', 'review'];
+test('stepsFor takes the server order, accepts only the Methods/Discovery swap, and falls back otherwise', () => {
+  assert.deepEqual(stepsFor(SWAPPED).map(step => step.key), SWAPPED);
+  assert.equal(stepsFor(SWAPPED)[2].title, 'Discovery');
+  assert.deepEqual(stepsFor(null), [...STEPS]);
+  const fallback = [...STEPS];
+  for (const bad of [undefined, 'method', [], STEPS.map(s => s.key).slice(1), [...SWAPPED, 'shape'],
+    ['priorities', 'capture', ...SWAPPED.slice(2)], [...SWAPPED.slice(0, 4), 'visualize', 'exploration', ...SWAPPED.slice(6)],
+    SWAPPED.map(key => key === 'method' ? 'shape' : key), [...SWAPPED.slice(0, 7), 'capture']]) {
+    assert.deepEqual(stepsFor(bad), fallback);
+  }
+});
+test('the Flow orders its steps from the state step_order', async () => {
+  const swapped = state({step_order: SWAPPED, current_step: 'discovery'});
+  const {flow} = harness(swapped);
+  assert.deepEqual(flow.steps.map(step => step.key), SWAPPED);
+  flow.load(state({step_order: ['nonsense']}));
+  assert.deepEqual(flow.steps.map(step => step.key), STEPS.map(step => step.key));
+  // canOpen uses the Flow's own order: with Discovery first it opens before Methods.
+  const first = harness(state({step_order: SWAPPED, current_step: 'priorities'}));
+  first.flow.state.steps.priorities.status = 'saved';
+  first.flow.load({...first.flow.state, steps: {...first.flow.state.steps, priorities: {status: 'saved', accepted_revision: 1, evidence_id: 'p'}}});
+  assert.equal(first.flow.canOpen('discovery'), true);
+  assert.equal(first.flow.canOpen('method'), false);
+  const plain = harness(state({current_step: 'priorities'}));
+  plain.flow.load({...plain.flow.state, steps: {...plain.flow.state.steps, priorities: {status: 'saved', accepted_revision: 1, evidence_id: 'p'}}});
+  assert.equal(plain.flow.canOpen('method'), true);
+  assert.equal(plain.flow.canOpen('discovery'), false);
+});
+test('DEPENDENTS mirror derive_dependencies under both orders', () => {
+  const later = ['visualize', 'assess', 'review'];
+  assert.deepEqual(dependentsFor(null), {
+    capture: ['method', 'discovery', 'exploration', ...later], priorities: ['method', 'discovery', 'exploration', ...later],
+    method: ['discovery', 'exploration', ...later], discovery: ['exploration', ...later],
+    exploration: later, visualize: ['review'], assess: ['review'], review: []});
+  assert.deepEqual(dependentsFor(SWAPPED), {
+    capture: ['discovery', 'method', 'exploration', ...later], priorities: ['discovery', 'method', 'exploration', ...later],
+    discovery: ['exploration', ...later], method: ['exploration', ...later],
+    exploration: later, visualize: ['review'], assess: ['review'], review: []});
+  // A changed Method makes Discovery stale in the default order, but not when Discovery comes first.
+  const stale = (order, source, target) => {
+    const initial = state({step_order: order});
+    for (const key of ['method', 'discovery']) initial.steps[key] = {status: 'saved', accepted_revision: 1, evidence_id: key};
+    const {flow} = harness(initial);
+    flow.edit('method', {...flow.buffers.method, reason: 'changed'});
+    return flow.status(target);
+  };
+  assert.equal(stale(null, 'method', 'discovery'), 'review-needed');
+  assert.equal(stale(SWAPPED, 'method', 'discovery'), 'saved');
+});
+
+const GOOD_DISCOVERY = {problem: 'p', audience: 'a', workaround: 'w', evidence: 'e', kill_criteria: 'k',
+  challenges: [{challenge: 'c', response: 'r'}],
+  prior_art: [{name: 'Tapeo', link: 'https://example.test/tapeo', does: 'Seals lids', differs: 'Ours is reusable', licence: 'MIT'}], prior_art_none: false, prior_art_searched: ''};
+const SKETCH = {title: 't', why_next: '', done_when: 'd', method: null};
+const GOOD_EXPLORATION = {outcome: 'o', alternatives: [{route: 'r', reason: 'x'}], assumptions: [], scope: 'capability',
+  scope_reason: 's', next_slice: 'n', learning: [], investment: null, experiment: null, sketch: [SKETCH]};
+test('default buffers match the server step fields exactly', () => {
+  const {flow} = harness();
+  assert.deepEqual(Object.keys(flow.buffers.discovery).sort(), ['audience', 'challenges', 'evidence', 'kill_criteria', 'prior_art', 'prior_art_none', 'prior_art_searched', 'problem', 'workaround']);
+  assert.deepEqual(Object.keys(flow.buffers.exploration).sort(), Object.keys(GOOD_EXPLORATION).sort());
+  assert.deepEqual(flow.buffers.exploration, {outcome: '', alternatives: [], assumptions: [], scope: null, scope_reason: '', next_slice: '',
+    learning: [], investment: null, experiment: null, sketch: []});
+  assert.deepEqual(Object.keys(flow.buffers.method).sort(), ['memory', 'reason', 'selection']);
+  assert.equal(flow.buffers.shape, undefined);
+});
+test('discovery acceptance needs five words and one meaningful challenge', () => {
+  assert.equal(validDiscovery(GOOD_DISCOVERY), true);
+  assert.equal(validDiscovery(flowless(GOOD_DISCOVERY, {problem: '  '})), false);
+  assert.equal(validDiscovery(flowless(GOOD_DISCOVERY, {kill_criteria: ''})), false);
+  assert.equal(validDiscovery(flowless(GOOD_DISCOVERY, {challenges: []})), false);
+  assert.equal(validDiscovery(flowless(GOOD_DISCOVERY, {challenges: [{challenge: 'c', response: ' '}]})), false);
+  assert.equal(validDiscovery({...GOOD_DISCOVERY, extra: 1}), false);
+  assert.equal(discoveryFields({problem: 'only'}, true), true);
+  assert.equal(discoveryFields({problem: 5}, true), false);
+});
+function flowless(base, change) { return {...copy(base), ...change}; }
+test('exploration acceptance: sketch limits and the accepted Method decides investment/experiment', () => {
+  assert.equal(validExploration(GOOD_EXPLORATION), true);
+  assert.equal(validExploration(GOOD_EXPLORATION, 'bounded-plan'), true);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {sketch: []})), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {sketch: [{...SKETCH, title: ' '}]})), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {sketch: [{...SKETCH, done_when: ''}]})), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {sketch: [{...SKETCH, method: 'nope'}]})), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {sketch: [{...SKETCH, method: 'adaptive-slices'}]})), true);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {sketch: Array(5).fill(SKETCH)})), true);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {sketch: Array(6).fill(SKETCH)})), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {scope: 'huge'})), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {alternatives: []})), false);
+  const investment = {cap: 3, unit: 'days', boundary: 'one slice'};
+  assert.equal(validExploration(GOOD_EXPLORATION, 'appetite-led'), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {investment}), 'appetite-led'), true);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {investment: {...investment, cap: 0}}), 'appetite-led'), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {investment: {...investment, unit: ' '}}), 'appetite-led'), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {investment}), 'bounded-plan'), false);
+  const experiment = {question: 'q', evidence: 'e', success_criterion: 's', stop_rule: 'r'};
+  assert.equal(validExploration(GOOD_EXPLORATION, 'experiment-led'), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {experiment}), 'experiment-led'), true);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {experiment: {...experiment, stop_rule: ''}}), 'experiment-led'), false);
+  assert.equal(validExploration(flowless(GOOD_EXPLORATION, {experiment}), 'appetite-led'), false);
+  assert.equal(explorationFields({sketch: Array(6).fill(SKETCH)}, true), false);
+  assert.equal(explorationFields({outcome: 'only'}, true), true);
+});
+test('method acceptance: reason optional, memory varied and preferred_method rule, no investment', () => {
+  const memory = {status: 'unavailable', sources: [], rationale: null, preferred_method: null};
+  const good = {selection: 'bounded-plan', reason: '', memory};
+  assert.equal(validMethod(good), true);
+  assert.equal(validMethod({...good, reason: null}), true);
+  assert.equal(validMethod({...good, investment: null, experiment: null}), false);
+  assert.equal(validMethod({...good, selection: null}), false);
+  const found = {status: 'found', sources: ['note'], rationale: 'because', preferred_method: 'adaptive-slices'};
+  assert.equal(validMethod({...good, memory: found}), true);
+  assert.equal(validMethod({...good, memory: {...found, preferred_method: null}}), false);
+  assert.equal(validMethod({...good, memory: {...memory, preferred_method: 'bounded-plan'}}), false);
+  assert.equal(validMethod({...good, memory: {status: 'varied', sources: ['note'], rationale: 'mixed', preferred_method: null}}), true);
+  assert.equal(validMethod({...good, memory: {status: 'varied', sources: [], rationale: null, preferred_method: 'bounded-plan'}}), false);
+  assert.equal(validMethod({...good, memory: {status: 'bogus', sources: [], rationale: null}}), false);
+});
+test('FILL_KEYS mirror the server: every step field for discovery and exploration, memory only for method', () => {
+  assert.deepEqual([...FILL_KEYS.discovery].sort(), Object.keys(GOOD_DISCOVERY).sort());
+  assert.deepEqual([...FILL_KEYS.exploration].sort(), Object.keys(GOOD_EXPLORATION).sort());
+  assert.deepEqual(FILL_KEYS.method, ['memory']);
+  assert.deepEqual(FILL_KEYS.assessment, ['assessment', 'proposed_position']);
+  assert.equal(FILL_KEYS.shape, undefined);
 });

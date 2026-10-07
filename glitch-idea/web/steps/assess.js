@@ -1,5 +1,5 @@
 // Explicit Assess editor; Flow/server own provenance and placement CAS.
-import {validAssess, assessmentFields, assessmentScore, insertionNeighbors, conversationStatus, filledNote} from '../folds.js';
+import {validAssess, assessmentFields, assessmentScore, insertionNeighbors, conversationStatus, filledNote, acceptBlockers} from '../folds.js';
 
 const METHODS = [['wsjf', 'WSJF'], ['rice', 'RICE'], ['kano', 'Kano']];
 // The operator reads local time, never a raw UTC stamp (same rule as ideas.js).
@@ -87,6 +87,8 @@ function decimal(raw, key, maximum = 1e12, whole = false) {
     valid: Number.isFinite(value) && value >= 0 && value <= maximum &&
       (key !== 'effort' || value > 0) && (!whole || (Number.isSafeInteger(value) && value > 0))};
 }
+// Buttons sit in a row of their own so a card never stretches them full width.
+const actions = (element, className, ...buttons) => { const row = element('div', '', className); row.append(...buttons); return row; };
 const literal = value => typeof value === 'string' ? value : JSON.stringify(value);
 function summary(value) {
   if (!value || !assessmentFields(value)) return 'Assessment incomplete';
@@ -99,7 +101,7 @@ export function render({body, foot, flow, element, button, field, connected, edi
   const active = flow.state?.idea_status === 'active';
   if (!active) {
     const notice = element('p', flow.state?.idea_status === 'archived' ?
-      'This idea is archived. Assess acceptance is unavailable. To reactivate it, explicitly redo and accept Shape. Archived history is kept; your assessment draft remains here.' :
+      'This idea is archived. Assess acceptance is unavailable. To reactivate it, explicitly redo and accept Exploration. Archived history is kept; your assessment draft remains here.' :
       'The idea status is unavailable. Reload current state before accepting an assessment. Your draft remains here.', 'notice');
     notice.id = 'assess-idea-status'; notice.setAttribute('role', 'status'); body.append(notice);
   }
@@ -132,26 +134,33 @@ export function render({body, foot, flow, element, button, field, connected, edi
     describe(input, id); return input;
   };
   const groupHelp = (group, id, text) => { group.append(help(id, text)); describe(group, id); };
-  const human = element('section', '', 'notice'); human.id = 'assess-human-ratings'; human.setAttribute('aria-label', 'Human priorities');
+  const human = element('section', '', 'g-card'); human.id = 'assess-human-ratings'; human.setAttribute('aria-label', 'Human priorities');
   human.append(element('h2', 'Your priorities'));
   const ratings = flow.state?.human_ratings;
-  human.append(element('p', 'Urgency: ' + (ratings ? ratings.urgency + ' of 10' : 'Unknown')),
-    element('p', 'Importance: ' + (ratings ? ratings.importance + ' of 10' : 'Unknown')));
+  // A read-only picture of each 1–10 rating; the sentence beside it is what assistive technology reads.
+  const readScale = value => {
+    const scale = element('div', '', 'g-scale'); scale.setAttribute('aria-hidden', 'true');
+    for (let n = 1; n <= 10; n++) { const cell = element('span', String(n), 'g-rate'); cell.setAttribute('aria-checked', String(value === n)); scale.append(cell); }
+    return scale;
+  };
+  human.append(element('p', 'Urgency: ' + (ratings ? ratings.urgency + ' of 10' : 'Unknown')), readScale(ratings?.urgency),
+    element('p', 'Importance: ' + (ratings ? ratings.importance + ' of 10' : 'Unknown')), readScale(ratings?.importance));
   if (ratings) human.append(element('p', 'Recorded by: ' + ratings.actor + (ratings.timestamp ? ' · ' + localTime(ratings.timestamp) : '')));
   human.append(element('p', 'Assessment inputs do not change your urgency or importance.', 'help')); body.append(human);
 
-  const methodGroup = element('fieldset'); methodGroup.append(element('legend', 'Assessment method'));
+  const methodGroup = element('fieldset', '', 'g-card'); methodGroup.append(element('legend', 'Assessment method'));
   filledNote({flow, key: 'assess', name: 'assessment', id: 'assess-assessment', element, target: methodGroup});
   groupHelp(methodGroup, 'assess-method-intro', FIELD_HELP.method);
+  const methodChoices = element('div', '', 'setup-actions'); methodGroup.append(methodChoices);
   for (const [value, title] of METHODS) {
     const choice = button(title, () => {
       if (current().assessment.method === value) return;
       rawEdits.delete(flow);
       edited('assess', {...current(), assessment: {...current().assessment, method: value,
         inputs: Object.fromEntries((INPUTS[value]?.map(([key]) => key) ?? ['category', 'hypothesis']).map(key => [key, null]))}});
-    });
+    }, 'g-choice');
     choice.id = 'assess-method-' + value; choice.setAttribute('aria-pressed', String(current().assessment.method === value));
-    choice.disabled = blocked(); methodGroup.append(choice);
+    choice.disabled = blocked(); methodChoices.append(choice);
   }
   const chosen = current().assessment.method, about = element('div'); about.id = 'assess-method-help'; about.setAttribute('role', 'note');
   if (chosen) about.append(element('p', METHOD_INFO[chosen][0], 'help'));
@@ -165,16 +174,17 @@ export function render({body, foot, flow, element, button, field, connected, edi
   for (const [key, title] of [['basis', 'Evidence and rationale'], ['provenance', 'Recorded provenance']]) {
     const value = current().assessment[key];
     if (value && typeof value === 'object') {
-      const group = element('fieldset'); group.append(element('legend', title)); groupHelp(group, 'assess-' + key + '-help', FIELD_HELP[key]);
+      const group = element('fieldset', '', 'g-card'); group.append(element('legend', title)); groupHelp(group, 'assess-' + key + '-help', FIELD_HELP[key]);
       Object.entries(value).forEach(([name, item], index) => textField(group, name, 'assess-' + key + '-' + index, item,
         next => changeAssessment(key, {...current().assessment[key], [name]: next})).required = true);
       body.append(group);
     } else helped(body, textField(body, title, 'assess-' + key, value, next => changeAssessment(key, next)), 'assess-' + key + '-help', FIELD_HELP[key]).required = true;
   }
-  const confidence = element('fieldset'); confidence.append(element('legend', 'Assessment confidence')); groupHelp(confidence, 'assess-confidence-help', FIELD_HELP.confidence);
+  const confidence = element('fieldset', '', 'g-card'); confidence.append(element('legend', 'Assessment confidence')); groupHelp(confidence, 'assess-confidence-help', FIELD_HELP.confidence);
+  const confidenceScale = element('div', '', 'g-scale'); confidence.append(confidenceScale);
   for (const value of ['low', 'medium', 'high']) {
     const choice = button(value, () => changeAssessment('confidence', value)); choice.id = 'assess-confidence-' + value;
-    choice.setAttribute('aria-pressed', String(current().assessment.confidence === value)); choice.disabled = blocked(); confidence.append(choice);
+    choice.setAttribute('aria-pressed', String(current().assessment.confidence === value)); choice.disabled = blocked(); confidenceScale.append(choice);
   }
   body.append(confidence);
   const numericField = (target, label, id, canonical, key, change, maximum, whole = false, helpText = null) => {
@@ -189,54 +199,58 @@ export function render({body, foot, flow, element, button, field, connected, edi
       error.id = id + '-error'; error.setAttribute('role', 'status'); describe(input, ...(helpText ? [id + '-help'] : []), error.id); target.append(error); }
     return input;
   };
-  const inputs = element('fieldset'); inputs.append(element('legend', 'Assessment inputs'));
+  const inputs = element('fieldset', '', 'g-card'); inputs.append(element('legend', 'Assessment inputs'));
   if (current().assessment.method === 'kano') groupHelp(inputs, 'assess-category-help', FIELD_HELP.category);
   else if (!current().assessment.method) inputs.append(element('p', 'Choose a method above to see its inputs.', 'help'));
   const method = current().assessment.method;
+  const grid = element('div', '', 'g-cols'); inputs.append(grid);
   for (const [key, label] of INPUTS[method] ?? []) {
-    numericField(inputs, label, 'assess-input-' + key, current().assessment.inputs[key], key,
+    const cell = element('div', '', 'field');
+    numericField(cell, label, 'assess-input-' + key, current().assessment.inputs[key], key,
       value => changeAssessment('inputs', {...current().assessment.inputs, [key]: value}), key === 'confidence' ? 1 : 1e12, false,
       INPUT_HELP[method][key] + BLANK);
     const readout = element('p', current().assessment.inputs[key] === null ? 'Unknown' : String(current().assessment.inputs[key]), 'help');
-    readout.id = 'assess-input-' + key + '-status'; inputs.append(readout);
+    readout.id = 'assess-input-' + key + '-status'; cell.append(readout); grid.append(cell);
   }
   if (method === 'kano') {
+    const categories = element('div', '', 'setup-actions'); inputs.append(categories);
     for (const category of CATEGORIES) { const choice = button(category, () => changeAssessment('inputs', {...current().assessment.inputs, category}));
-      choice.id = 'assess-kano-' + category; choice.setAttribute('aria-pressed', String(current().assessment.inputs.category === category)); choice.disabled = blocked(); inputs.append(choice); }
+      choice.id = 'assess-kano-' + category; choice.setAttribute('aria-pressed', String(current().assessment.inputs.category === category)); choice.disabled = blocked(); categories.append(choice); }
     const hypothesis = element('fieldset'); hypothesis.append(element('legend', 'Category hypothesis')); groupHelp(hypothesis, 'assess-hypothesis-help', FIELD_HELP.hypothesis);
+    const hypothesisChoices = element('div', '', 'setup-actions'); hypothesis.append(hypothesisChoices);
     for (const [value, title] of [[true, 'Hypothesis'], [false, 'Not a hypothesis']]) { const choice = button(title, () => changeAssessment('inputs', {...current().assessment.inputs, hypothesis: value}));
-      choice.id = 'assess-kano-hypothesis-' + value; choice.setAttribute('aria-pressed', String(current().assessment.inputs.hypothesis === value)); choice.disabled = blocked(); hypothesis.append(choice); }
+      choice.id = 'assess-kano-hypothesis-' + value; choice.setAttribute('aria-pressed', String(current().assessment.inputs.hypothesis === value)); choice.disabled = blocked(); hypothesisChoices.append(choice); }
     inputs.append(hypothesis, element('p', 'Kano remains categorical. It has no numeric ranking score.', 'help'));
   } else inputs.append(element('p', 'Leave an unknown value blank. Use a dot or comma for decimals. Effort must be positive; RICE confidence is between 0 and 1.', 'help'));
   body.append(inputs);
-  const assumptions = element('fieldset'); assumptions.append(element('legend', 'Assumptions')); groupHelp(assumptions, 'assess-assumptions-help', FIELD_HELP.assumptions);
+  const assumptions = element('fieldset', '', 'g-card'); assumptions.append(element('legend', 'Assumptions')); groupHelp(assumptions, 'assess-assumptions-help', FIELD_HELP.assumptions);
   current().assessment.assumptions.forEach((value, index) => {
     textField(assumptions, 'Assumption ' + (index + 1), 'assess-assumption-' + index, value,
       next => changeAssessment('assumptions', current().assessment.assumptions.map((item, offset) => offset === index ? next : item)));
     const remove = button('Remove assumption ' + (index + 1), () => changeAssessment('assumptions', current().assessment.assumptions.filter((_, offset) => offset !== index)));
-    remove.id = 'assess-remove-assumption-' + index; remove.disabled = blocked(); assumptions.append(remove);
+    remove.id = 'assess-remove-assumption-' + index; remove.disabled = blocked(); assumptions.append(actions(element, 'setup-actions', remove));
   });
   const add = button('Add assumption', () => changeAssessment('assumptions', [...current().assessment.assumptions, '']));
-  add.id = 'assess-add-assumption'; add.disabled = blocked() || current().assessment.assumptions.length >= 1000; assumptions.append(add); body.append(assumptions);
+  add.id = 'assess-add-assumption'; add.disabled = blocked() || current().assessment.assumptions.length >= 1000; assumptions.append(actions(element, 'setup-actions', add)); body.append(assumptions);
   const scoreStatus = element('p', scoreLine(current().assessment), 'notice'); scoreStatus.id = 'assess-score-status'; scoreStatus.setAttribute('role', 'status'); body.append(scoreStatus);
   const preview = element('p', 'Draft preview: ' + summary(current().assessment), 'notice'); preview.id = 'assess-preview'; preview.setAttribute('role', 'status'); body.append(preview);
   if (flow.state?.assessment_summary) { const {score: ignored, assessment_id, actor, timestamp, ...core} = flow.state.assessment_summary;
-    const saved = element('section', '', 'notice'); saved.id = 'assess-saved-summary';
+    const saved = element('section', '', 'g-card'); saved.id = 'assess-saved-summary';
     saved.append(element('h2', 'Latest saved assessment'), element('p', summary(core)));
     if (actor) saved.append(element('p', 'Recorded by: ' + actor + (timestamp ? ' · ' + localTime(timestamp) : ''))); body.append(saved); }
 
   const backlog = flow.state?.backlog, available = flow.state?.backlog_status?.available === true;
   const order = element('section'); order.id = 'assess-backlog'; order.setAttribute('aria-label', 'Actual backlog order');
   order.append(element('h2', 'Actual backlog order'));
-  if (available) { const list = element('ol');
-    backlog.comparisons.forEach(item => { const row = element('li'); row.id = 'assess-backlog-' + item.idea_id;
+  if (available) { const list = element('ol', '', 'sketch-cards');
+    backlog.comparisons.forEach(item => { const row = element('li', '', 'g-card'); row.id = 'assess-backlog-' + item.idea_id;
       row.append(element('span', item.idea_id + ' · ' + item.status), element('p', 'Human urgency/importance: ' + (item.ratings ? item.ratings.urgency + '/' + item.ratings.importance : 'Unknown')));
       if (item.assessment) { const {score: ignored, assessment_id, actor, timestamp, ...core} = item.assessment; row.append(element('p', summary(core))); }
       else row.append(element('p', 'Assessment: Unknown')); list.append(row); });
     order.append(list, element('p', 'Observed backlog revision: ' + backlog.revision + '. Scores do not reorder this list.', 'help'));
   } else order.append(element('p', 'The complete current backlog is unavailable. Placement cannot be accepted; your draft remains.', 'notice'));
   body.append(order);
-  const placement = element('fieldset'); placement.append(element('legend', 'Your placement'));
+  const placement = element('fieldset', '', 'g-card'); placement.append(element('legend', 'Your placement'));
   const selected = flow.selectedProposals.assess;
   const selectedItem = flow.proposals('assess').find(item => item.proposal_id === selected);
   if (selected) { const original = element('p', 'Original proposed position: ' + (selectedItem?.proposal?.position.proposed_position ?? 'Unavailable')); original.id = 'assess-proposed-position'; placement.append(original); }
@@ -266,7 +280,7 @@ export function render({body, foot, flow, element, button, field, connected, edi
     const stop = button('Stop waiting', handle(() => {flow.cancelProposal('user_cancelled'); flow.onChange();})); stop.id = 'assess-stop-waiting'; stop.disabled = blocked(); assistance.append(stop); }
   if (flow.proposalError) { const error = element('p', REASONS[flow.proposalError.code] ?? 'AI assessment could not complete this request. Your draft remains.', 'notice');
     error.id = 'assess-proposal-error'; error.setAttribute('role', 'status'); assistance.append(error); }
-  for (const item of flow.proposals('assess')) { const card = element('section', '', 'notice'); card.id = 'assess-proposal-' + item.proposal_id;
+  for (const item of flow.proposals('assess')) { const card = element('section', '', 'g-card'); card.id = 'assess-proposal-' + item.proposal_id;
     card.append(element('h2', 'Proposed assessment'));
     if (item.proposal) { const a = item.proposal.assessment; card.append(element('p', summary(a)), element('p', 'Version: ' + a.version),
       element('p', 'Evidence and rationale: ' + literal(a.basis)), element('p', 'Confidence: ' + a.confidence), element('p', 'Provenance: ' + literal(a.provenance)),
@@ -289,7 +303,17 @@ export function render({body, foot, flow, element, button, field, connected, edi
   }), 'primary');
   accept.id = 'assess-accept'; accept.disabled = !active || blocked() || flow.busy || !validAssess(current()) || !validRaw || !available || !neighborsCurrent || !eligible ||
     position.proposed_position > backlog.order.length;
-  foot.append(accept);
+  // Every disabled Accept says what is missing: content blockers from the Flow plus this view's own local ones.
+  if (accept.disabled) {
+    const reasons = acceptBlockers('assess', current(), flow);
+    if (!validRaw) reasons.push('Fix the numbers marked invalid, or leave them blank.');
+    if (!neighborsCurrent && available && !reasons.some(r => /neighbouring/.test(r))) reasons.push('Reload to refresh the neighbouring ideas.');
+    if (!eligible) reasons.push('The suggestion you used can no longer be accepted.');
+    if (reasons.length) {
+      const why = element('p', reasons.join(' '), 'foot-message accept-reason'); why.id = 'assess-accept-reason';
+      accept.setAttribute('aria-describedby', why.id); accept.title = why.textContent; foot.append(accept, why);
+    } else foot.append(accept);
+  } else foot.append(accept);
   if (selected && !eligible) {
     // The human path stays one explicit click away when a used suggestion stops being acceptable.
     // Unlinking only: it reveals the proposed position for editing, then the human accepts.

@@ -121,8 +121,8 @@ test('the view renders the heading, the question and the two stores as one radio
   await mounted(settingsHandler(), async h => {
     assert.match(h.text(), /Where do your ideas live\?/);
     const native = h.find('setup-native'), own = h.find('setup-api');
-    assert.match(native.textContent, /Glitch native — Markdown files in this Glitch store/);
-    assert.match(own.textContent, /Your own workflow — through its API/);
+    assert.match(native.text(), /Glitch native\s+Markdown files in this Glitch store/);
+    assert.match(own.text(), /Your own workflow\s+Through its API/);
     assert.equal(native.role, 'radio'); assert.equal(native['aria-checked'], 'true'); assert.equal(own['aria-checked'], 'false');
     assert.equal(h.find('setup-url'), null, 'no API fields while native is chosen');
     await own.click(); await settle();
@@ -143,7 +143,7 @@ test('the status line says saving to the workflow is not switched on yet when ap
     assert.match(h.find('setup-status').textContent, /still saved in Glitch/);
     assert.equal(h.find('setup-url').value, 'https://w.example');
     assert.equal(h.find('setup-key').value, '', 'the key field is never filled from the server');
-    assert.equal(h.find('setup-key').placeholder, 'A key is saved — leave empty to keep it');
+    assert.equal(h.find('setup-key').placeholder, 'A key is saved. Leave empty to keep it');
     assert.ok(h.find('setup-remove-key'));
   });
 });

@@ -1,5 +1,6 @@
 {
   "store_path": "ideas",
   "plan_validator_argv": null,
-  "validator_timeout_seconds": 30
+  "validator_timeout_seconds": 30,
+  "default_workspace": {"name": "ideas", "path": "/home/you/ideas"}
 }

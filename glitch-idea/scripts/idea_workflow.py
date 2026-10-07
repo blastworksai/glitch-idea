@@ -13,29 +13,66 @@ import re
 from idea_domain import (ASSESS_KEYS, MAX_INPUT, MAX_NUMBER, IdeaError,
                          assessment, check_id, integer, require, shape, text)
 
-WORKFLOW_VERSION = 2
-STEP_ORDER = ('capture', 'priorities', 'shape', 'method', 'visualize', 'assess', 'review')
-STEP_STATUSES = ('todo', 'current', 'saved', 'review-needed', 'unsaved', 'skipped', 'not-applicable')
+WORKFLOW_VERSION = 3
+UNSUPPORTED_VERSION_CODE = 'unsupported_idea_version'
+UNSUPPORTED_VERSION_MESSAGE = 'This idea was made with an older glitch-idea. Capture it again.'
+# The one setting for the order of Methods and Discovery. Everything else
+# (STEP_ORDER, DEPENDENCIES) is derived from it; Exploration always follows both.
+DISCOVERY_BEFORE_METHODS = False
+MAX_SKETCH = 5
+
+
+def derive_step_order(discovery_first):
+    middle = ('discovery', 'method') if discovery_first else ('method', 'discovery')
+    return ('capture', 'priorities') + middle + ('exploration', 'visualize', 'assess', 'review')
+
+
+def derive_dependencies(discovery_first):
+    """Consumed-input edges for either order; every edge points to an earlier step."""
+    return {
+        'capture': (), 'priorities': (),
+        'method': ('capture', 'priorities'),
+        'discovery': ('capture', 'priorities') + (() if discovery_first else ('method',)),
+        'exploration': ('discovery', 'method') if discovery_first else ('method', 'discovery'),
+        'visualize': ('capture', 'discovery', 'exploration'),
+        'assess': ('capture', 'priorities', 'discovery', 'exploration'),
+        'review': derive_step_order(discovery_first)[:-1],
+    }
+
+
+STEP_ORDER = derive_step_order(DISCOVERY_BEFORE_METHODS)
+STEP_STATUSES = ('todo', 'current', 'saved', 'review-needed', 'unsaved', 'skipped')
 SCOPES = ('small-change', 'capability', 'project', 'epic')
 METHODS = ('bounded-plan', 'adaptive-slices', 'appetite-led', 'experiment-led')
-MEMORY_STATUSES = ('found', 'searched_no_preference', 'unavailable', 'error')
+MEMORY_STATUSES = ('found', 'varied', 'searched_no_preference', 'unavailable', 'error')
 STEP_FIELDS = {
     'capture': frozenset(('raw_text', 'workspace')),
     'priorities': frozenset(('urgency', 'importance')),
-    'shape': frozenset(('outcome', 'scope', 'scope_reason', 'alternatives', 'assumptions', 'next_slice', 'learning')),
-    'method': frozenset(('selection', 'reason', 'investment', 'experiment', 'memory')),
+    'method': frozenset(('selection', 'reason', 'memory')),
+    'discovery': frozenset(('problem', 'audience', 'workaround', 'evidence', 'kill_criteria', 'challenges',
+                            'prior_art', 'prior_art_none', 'prior_art_searched')),
+    'exploration': frozenset(('outcome', 'alternatives', 'assumptions', 'scope', 'scope_reason', 'next_slice',
+                              'learning', 'investment', 'experiment', 'sketch')),
     'visualize': frozenset(('disposition', 'reason', 'design_set_id', 'brief_evidence_id')),
     'assess': frozenset(('assessment', 'position')),
     'review': frozenset(('handoff_id', 'source_revision')),
 }
+# Fields a step may carry beyond its frozen set; absent is valid, so every stored record keeps its shape.
+OPTIONAL_FIELDS = {'visualize': frozenset(('source', 'assets'))}
+# Fields an accepted record stored before they existed may lack when it is RE-READ (legacy=True).
+# Acceptance never uses this: a new acceptance, and a re-acceptance, requires every field.
+LEGACY_ABSENT_OK = {'discovery': frozenset(('prior_art', 'prior_art_none', 'prior_art_searched'))}
+MAX_PRIOR_ART = 8
 RECEIPT_FIELDS = frozenset(('accepted_revision', 'evidence_id', 'source_revision',
                           'source_digest', 'dependencies', 'actor', 'timestamp'))
 SNAPSHOT_FIELDS = frozenset(('revision', 'shape', 'ratings', 'assessments', 'actor', 'action', 'timestamp'))
 
 
-def _object(value, keys, name, partial=False):
+def _object(value, keys, name, partial=False, optional=()):
     require(type(value) is dict and all(type(k) is str for k in value), name+' must be an object')
-    require(set(value) <= set(keys), name+' contains unsupported fields')
+    require(set(value) <= set(keys) | set(optional), name+' contains unsupported fields')
+    if not partial:
+        keys = set(keys) | (set(value) & set(optional))
     if not partial:
         require(set(value) == set(keys), name+' must contain exactly: '+', '.join(sorted(keys)))
 
@@ -98,6 +135,30 @@ def _alternatives(value, name):
         _nested(item, {'route', 'reason'}, name, {'route': _draft_text, 'reason': _draft_text})
 
 
+def _challenges(value, name):
+    _list(value, name)
+    for item in value:
+        _nested(item, {'challenge', 'response'}, name, {'challenge': _draft_text, 'response': _draft_text})
+
+
+def _prior_art(value, name):
+    _list(value, name)
+    require(len(value) <= MAX_PRIOR_ART, name+' holds at most '+str(MAX_PRIOR_ART)+' items')
+    for item in value:
+        _object(item, {'name', 'link', 'does', 'differs', 'licence'}, name)
+        for key, text in item.items():
+            _draft_text(text, name+'.'+key)
+
+
+def _sketch(value, name):
+    _list(value, name)
+    require(len(value) <= MAX_SKETCH, name+' holds at most '+str(MAX_SKETCH)+' items')
+    for item in value:
+        _nested(item, {'title', 'why_next', 'done_when', 'method'}, name,
+                {'title': _draft_text, 'why_next': _draft_text, 'done_when': _draft_text,
+                 'method': lambda v, n: _enum(v, METHODS, n)})
+
+
 def _investment(value, name):
     _nested(value, {'cap', 'unit', 'boundary'}, name,
             {'cap': _positive_number, 'unit': _draft_text, 'boundary': _draft_text})
@@ -109,9 +170,23 @@ def _experiment(value, name):
 
 
 def _memory(value, name):
-    _nested(value, {'status', 'sources', 'rationale'}, name,
+    _nested(value, {'status', 'sources', 'rationale', 'preferred_method'}, name,
             {'status': lambda v, n: _enum(v, MEMORY_STATUSES, n),
-             'sources': _text_list, 'rationale': _draft_text})
+             'sources': _text_list, 'rationale': _draft_text,
+             'preferred_method': lambda v, n: _enum(v, METHODS, n)})
+
+
+def check_memory_preference(memory, name='memory'):
+    """preferred_method is required exactly when the status is 'found', null otherwise.
+
+    An absent key reads as null. A memory with no status yet (a partial draft) is not judged.
+    """
+    status = memory.get('status')
+    preferred = memory.get('preferred_method')
+    if status == 'found':
+        require(type(preferred) is str and preferred in METHODS, name+'.preferred_method is required when memory is found')
+    elif status is not None:
+        require(preferred is None, name+'.preferred_method must be null unless memory is found')
 
 
 def _basis(value, name):
@@ -177,16 +252,32 @@ def _position(value, name):
              'neighbors': _neighbors, 'override_reason': _draft_text})
 
 
+VISUAL_DISPOSITIONS = ('accepted_set', 'skipped')  # 'not-applicable' is gone; an old value is simply invalid
+VISUAL_SOURCES = ('claude_design', 'prototype')
+PROTOTYPE_SKILL = ('available', 'unavailable')
+
+
+def _asset_ids(value, name):
+    require(type(value) is list and 1 <= len(value) <= 20, name+' must list 1-20 asset IDs')
+    require(all(type(item) is str and re.fullmatch(r'asset_[0-9a-f]{32}', item) for item in value),
+            name+' must hold asset IDs')
+    require(len(set(value)) == len(value), name+' must not repeat an asset')
+
+
 VALIDATORS = {
     'capture': {'raw_text': lambda v, n: _draft_text(v, n, MAX_INPUT), 'workspace': _workspace},
     'priorities': {k: lambda v, n: integer(v, n, 1, 10) for k in ('urgency', 'importance')},
-    'shape': {'outcome': _draft_text, 'scope': lambda v, n: _enum(v, SCOPES, n),
-              'scope_reason': _draft_text, 'alternatives': _alternatives,
-              'assumptions': _text_list, 'next_slice': _draft_text, 'learning': _text_list},
-    'method': {'selection': lambda v, n: _enum(v, METHODS, n), 'reason': _draft_text,
-               'investment': _investment, 'experiment': _experiment, 'memory': _memory},
-    'visualize': {'disposition': lambda v, n: _enum(v, ('accepted_set', 'skipped', 'not-applicable'), n),
-                  'reason': _draft_text, 'design_set_id': _opaque_id, 'brief_evidence_id': _opaque_id},
+    'method': {'selection': lambda v, n: _enum(v, METHODS, n), 'reason': _draft_text, 'memory': _memory},
+    'discovery': {k: _draft_text for k in ('problem', 'audience', 'workaround', 'evidence', 'kill_criteria')}
+                 | {'challenges': _challenges, 'prior_art': _prior_art, 'prior_art_none': _boolean,
+                    'prior_art_searched': _draft_text},
+    'exploration': {'outcome': _draft_text, 'alternatives': _alternatives, 'assumptions': _text_list,
+                    'scope': lambda v, n: _enum(v, SCOPES, n), 'scope_reason': _draft_text,
+                    'next_slice': _draft_text, 'learning': _text_list,
+                    'investment': _investment, 'experiment': _experiment, 'sketch': _sketch},
+    'visualize': {'disposition': lambda v, n: _enum(v, VISUAL_DISPOSITIONS, n),
+                  'reason': _draft_text, 'design_set_id': _opaque_id, 'brief_evidence_id': _opaque_id,
+                  'source': lambda v, n: _enum(v, VISUAL_SOURCES, n), 'assets': _asset_ids},
     'assess': {'assessment': _assessment, 'position': _position},
     'review': {'handoff_id': _opaque_id, 'source_revision': lambda v, n: integer(v, n, 1)},
 }
@@ -196,14 +287,19 @@ def _meaningful(value):
     return type(value) is str and bool(value.strip())
 
 
-def step_requirements(step, fields):
+def step_requirements(step, fields, method_selection=None, legacy=False):
     """Return all missing acceptance requirements; invalid draft types raise.
+
+    method_selection is the ACCEPTED Method choice (None when unknown); only
+    Exploration reads it, to require investment or experiment.
 
     This is data eligibility only. Source revisions, workspace existence, asset
     hashes, proposal provenance and current prerequisites require service checks.
     """
     validate_step_fields(step, fields, partial=True)
-    missing = [key for key in sorted(STEP_FIELDS[step]) if key not in fields]
+    absent_ok = LEGACY_ABSENT_OK.get(step, frozenset()) if legacy else frozenset()
+    skip_legacy = bool(absent_ok) and not (absent_ok & set(fields))
+    missing = [key for key in sorted(STEP_FIELDS[step]) if key not in fields and not (skip_legacy and key in absent_ok)]
 
     def needed(key, condition):
         if not condition and key not in missing:
@@ -230,7 +326,28 @@ def step_requirements(step, fields):
     elif step == 'priorities':
         for k in ('urgency', 'importance'):
             needed(k, fields.get(k) is not None)
-    elif step == 'shape':
+    elif step == 'discovery':
+        for k in ('problem', 'audience', 'workaround', 'evidence', 'kill_criteria'):
+            nonempty(k)
+        challenges = fields.get('challenges')
+        needed('challenges', bool(challenges))
+        for index, item in enumerate(challenges or []):
+            for k in ('challenge', 'response'):
+                needed('challenges.'+str(index)+'.'+k, _meaningful(item.get(k)))
+        if not skip_legacy:
+            # A present null is not a route: the flag must be a boolean and the rows a list (as the page's mirror reads them).
+            needed('prior_art_none', type(fields.get('prior_art_none')) is bool)
+            needed('prior_art', type(fields.get('prior_art')) is list)
+            rows = fields.get('prior_art') or []
+            if fields.get('prior_art_none') is True:
+                needed('prior_art', not rows)
+                needed('prior_art_searched', _meaningful(fields.get('prior_art_searched')))
+            else:
+                needed('prior_art', bool(rows))
+                for index, item in enumerate(rows):
+                    for k in ('name', 'differs', 'licence'):
+                        needed('prior_art.'+str(index)+'.'+k, _meaningful(item.get(k)))
+    elif step == 'exploration':
         for k in ('outcome', 'scope_reason', 'next_slice'):
             nonempty(k)
         needed('scope', fields.get('scope') in SCOPES)
@@ -243,25 +360,32 @@ def step_requirements(step, fields):
             needed(k, type(fields.get(k)) is list)
             for index, item in enumerate(fields.get(k) or []):
                 needed(k+'.'+str(index), _meaningful(item))
+        sketch = fields.get('sketch')
+        needed('sketch', bool(sketch))
+        for index, item in enumerate(sketch or []):
+            for k in ('title', 'done_when'):
+                needed('sketch.'+str(index)+'.'+k, _meaningful(item.get(k)))
+        if method_selection is not None:
+            if method_selection == 'appetite-led':
+                investment = nested('investment', ('cap', 'unit', 'boundary'), ('unit', 'boundary'))
+                needed('investment.cap', investment.get('cap') is not None)
+            else:
+                needed('investment', fields.get('investment') is None)
+            if method_selection == 'experiment-led':
+                keys = ('question', 'evidence', 'success_criterion', 'stop_rule')
+                nested('experiment', keys, keys)
+            else:
+                needed('experiment', fields.get('experiment') is None)
     elif step == 'method':
-        selected = fields.get('selection')
-        needed('selection', selected in METHODS)
-        nonempty('reason')
-        if selected == 'appetite-led':
-            investment = nested('investment', ('cap', 'unit', 'boundary'), ('unit', 'boundary'))
-            needed('investment.cap', investment.get('cap') is not None)
-        else:
-            needed('investment', fields.get('investment') is None)
-        if selected == 'experiment-led':
-            keys = ('question', 'evidence', 'success_criterion', 'stop_rule')
-            nested('experiment', keys, keys)
-        else:
-            needed('experiment', fields.get('experiment') is None)
+        # The reason is optional: it helps planning and teaches the user's preference.
+        needed('selection', fields.get('selection') in METHODS)
         memory = nested('memory', ('status', 'sources', 'rationale'))
         needed('memory.status', memory.get('status') in MEMORY_STATUSES)
         needed('memory.sources', type(memory.get('sources')) is list)
         for index, source in enumerate(memory.get('sources') or []):
             needed('memory.sources.'+str(index), _meaningful(source))
+        needed('memory.preferred_method', (memory.get('preferred_method') in METHODS)
+               if memory.get('status') == 'found' else memory.get('preferred_method') is None)
         if memory.get('status') == 'found':
             needed('memory.sources', bool(memory.get('sources')))
             needed('memory.rationale', _meaningful(memory.get('rationale')))
@@ -269,11 +393,12 @@ def step_requirements(step, fields):
             needed('memory.sources', memory.get('sources') == [])
     elif step == 'visualize':
         disposition = fields.get('disposition')
-        needed('disposition', disposition in ('accepted_set', 'skipped', 'not-applicable'))
+        needed('disposition', disposition in VISUAL_DISPOSITIONS)
         if disposition == 'accepted_set':
+            needed('source', fields.get('source') in VISUAL_SOURCES)
             needed('design_set_id', fields.get('design_set_id') is not None)
         else:
-            nonempty('reason')
+            # Skip is one click: the reason is optional.
             needed('design_set_id', fields.get('design_set_id') is None)
     elif step == 'assess':
         try:
@@ -293,15 +418,26 @@ def step_requirements(step, fields):
     return tuple(missing)
 
 
-def validate_step_fields(step, fields, partial=False):
+def accepted_method_selection(workflow):
+    """The accepted Method choice, or None when Method holds no saved fields."""
+    saved = workflow['steps']['method']['fields']
+    return saved['selection'] if saved else None
+
+
+def validate_step_fields(step, fields, partial=False, method_selection=None, legacy=False):
     """Validate frozen API fields, returning a detached copy, never a score."""
     require(type(step) is str and step in STEP_ORDER, 'Invalid workflow step')
-    _object(fields, STEP_FIELDS[step], step, partial=partial)
+    keys = STEP_FIELDS[step]
+    if legacy and not partial:
+        absent_ok = LEGACY_ABSENT_OK.get(step, frozenset())
+        if not (absent_ok & set(fields)):
+            keys = keys - absent_ok
+    _object(fields, keys, step, partial=partial, optional=OPTIONAL_FIELDS.get(step, ()))
     for key, value in fields.items():
         if value is not None:
             VALIDATORS[step][key](value, step+'.'+key)
     if not partial:
-        missing = step_requirements(step, fields)
+        missing = step_requirements(step, fields, method_selection, legacy=legacy)
         require(not missing, 'Acceptance requires: '+', '.join(missing), 'not_ready')
     return copy.deepcopy(fields)
 
@@ -331,16 +467,36 @@ def validate_acceptance(value):
     return copy.deepcopy(value)
 
 
+def _refuse_old_version(version, message):
+    require(not (type(version) is int and version == 2), UNSUPPORTED_VERSION_MESSAGE, UNSUPPORTED_VERSION_CODE)
+    require(type(version) is int and version == WORKFLOW_VERSION, message)
+
+
+HAND_STEPS = ('discovery', 'exploration')
+
+
+def _hand(value):
+    # Draft meta: steps the human took by hand (R3). Only a true flag is ever stored.
+    require(type(value) is dict and set(value) <= set(HAND_STEPS) and all(v is True for v in value.values()),
+            'hand must map discovery or exploration to true')
+
+
 def validate_workflow(value):
-    _object(value, {'schema_version', 'current_step', 'draft_version', 'steps', 'drafts'}, 'workflow')
-    require(type(value['schema_version']) is int and value['schema_version'] == WORKFLOW_VERSION, 'Unsupported workflow version')
+    required = {'schema_version', 'current_step', 'draft_version', 'steps', 'drafts'}
+    _object(value, required | {'hand'}, 'workflow', partial=True)
+    require(required <= set(value), 'workflow must contain exactly: '+', '.join(sorted(required))+' (and optional hand)')
+    if 'hand' in value:
+        _hand(value['hand'])
+    _refuse_old_version(value['schema_version'], 'Unsupported workflow version')
     _enum(value['current_step'], STEP_ORDER, 'current_step')
     integer(value['draft_version'], 'draft_version')
     _object(value['steps'], STEP_ORDER, 'steps')
     for step, record in value['steps'].items():
         _object(record, {'fields', 'acceptance', 'invalidated_by'}, 'step '+step)
         if record['fields'] is not None:
-            validate_step_fields(step, record['fields'])
+            # Stale accepted fields stay readable after Method changes, so the
+            # Method-conditional requirement is enforced at acceptance only.
+            validate_step_fields(step, record['fields'], legacy=True)
         if record['acceptance'] is not None:
             validate_acceptance(record['acceptance'])
             require(record['fields'] is not None, 'Acceptance requires saved fields')
@@ -387,7 +543,7 @@ def validate_snapshot(value):
     for key in ('actor', 'action', 'timestamp'):
         text(value[key], key, 200)
     if versioned:
-        require(type(value['schema_version']) is int and value['schema_version'] == WORKFLOW_VERSION, 'Unsupported snapshot version')
+        _refuse_old_version(value['schema_version'], 'Unsupported snapshot version')
         workflow = validate_workflow(value['workflow'])
         for record in workflow['steps'].values():
             if record['acceptance'] is not None:
@@ -407,12 +563,7 @@ def adapt_snapshot(value, workflow=None):
 
 # Edges represent consumed inputs, not wizard navigation. Review additionally
 # requires every earlier step, including a durable optional Visualize disposition.
-DEPENDENCIES = {
-    'capture': (), 'priorities': (), 'shape': ('capture',),
-    'method': ('capture', 'shape'), 'visualize': ('capture', 'shape'),
-    'assess': ('capture', 'priorities', 'shape'),
-    'review': ('capture', 'priorities', 'shape', 'method', 'visualize', 'assess'),
-}
+DEPENDENCIES = derive_dependencies(DISCOVERY_BEFORE_METHODS)
 OPERATIONS = STEP_ORDER + ('memory', 'visual_brief', 'assessment', 'position')
 
 
@@ -452,7 +603,8 @@ def _idea(value):
 
 
 def import_workflow(idea):
-    """Enter the wizard without converting known legacy values into acceptance."""
+    """Enter the wizard on a v3 workflow; known capture, ratings and assessment values become
+    drafts only, never acceptance. Old shape/method data is not migrated."""
     result = _idea(idea)
     if 'workflow' in result:
         return result
@@ -463,13 +615,10 @@ def import_workflow(idea):
         drafts['capture'] = {'raw_text': origin['text']}
     if result['ratings'] is not None:
         drafts['priorities'] = {k: result['ratings'][k] for k in ('urgency', 'importance')}
-    if result['shape'] is not None:
-        legacy = shape(result['shape'])
-        drafts['shape'] = {k: legacy[k] for k in STEP_FIELDS['shape']}
-        drafts['method'] = {'selection': legacy['method'], 'reason': legacy['method_reason']}
     if result['assessments']:
         latest = result['assessments'][-1]
         drafts['assess'] = {'assessment': {k: latest[k] for k in ASSESS_KEYS}}
+    # Old domain shape/method data is never mapped into a method, discovery or exploration draft.
     result['workflow'] = validate_workflow(workflow)
     return result
 
@@ -555,7 +704,7 @@ def _step_states(workflow):
             states[step] = 'review-needed'
         elif receipt is not None:
             disposition = record['fields'].get('disposition') if step == 'visualize' else None
-            states[step] = disposition if disposition in ('skipped', 'not-applicable') else 'saved'
+            states[step] = disposition if disposition == 'skipped' else 'saved'
         else:
             states[step] = 'current' if workflow['current_step'] == step else 'todo'
     return states, current
@@ -589,8 +738,9 @@ def derive_state(idea, handoff=None):
                                'evidence_id': packet['handoff_id']}
     selected = workflow['current_step']
     draft = {'step': selected, 'fields': copy.deepcopy(workflow['drafts'][selected])} if selected in workflow['drafts'] else None
-    return {'revision': prepared['revision'], 'draft_version': workflow['draft_version'],
-            'current_step': selected, 'steps': steps, 'accepted': accepted,
+    hand = {step: workflow.get('hand', {}).get(step) is True for step in HAND_STEPS}
+    return {'revision': prepared['revision'], 'draft_version': workflow['draft_version'], 'hand': hand,
+            'step_order': list(STEP_ORDER), 'current_step': selected, 'steps': steps, 'accepted': accepted,
             'drafts': copy.deepcopy(workflow['drafts']), 'draft': draft}
 
 
@@ -602,7 +752,7 @@ def _result(idea, changed, invalidated=(), accepted_changed=False):
 
 def _next_step(workflow):
     statuses, _ = _step_states(workflow)
-    return next((step for step in STEP_ORDER if statuses[step] not in ('saved', 'skipped', 'not-applicable')), 'review')
+    return next((step for step in STEP_ORDER if statuses[step] not in ('saved', 'skipped')), 'review')
 
 
 def save_draft(idea, step, fields, *, expected_revision, expected_draft_version):
@@ -618,6 +768,20 @@ def save_draft(idea, step, fields, *, expected_revision, expected_draft_version)
     workflow['drafts'][step] = fields
     workflow['draft_version'] += 1
     integer(workflow['draft_version'], 'draft_version')
+    return _result(result, True)
+
+
+def set_hand(idea, step):
+    """Mark a terminal-guided step as taken by hand. Draft meta: no draft_version bump, never acceptance.
+    Idempotent; after the step is accepted it is a no-op."""
+    require(type(step) is str and step in HAND_STEPS, 'Only discovery or exploration can be taken by hand', 'invalid_input')
+    result = import_workflow(idea)
+    workflow = result['workflow']
+    if workflow['steps'][step]['acceptance'] is not None or workflow.get('hand', {}).get(step) is True:
+        unchanged = _result(result, False)
+        unchanged['idea'] = copy.deepcopy(idea)
+        return unchanged
+    workflow.setdefault('hand', {})[step] = True
     return _result(result, True)
 
 
@@ -676,26 +840,18 @@ def invalidate_external(idea, changed_steps):
 def _mirror_legacy(idea, step, fields, actor, timestamp):
     if step == 'priorities':
         idea['ratings'] = dict(fields, actor=actor, timestamp=timestamp)
-    elif step == 'shape':
-        old = idea['shape'] or {}
-        method = idea['workflow']['steps']['method']['fields']
-        idea['shape'] = dict(fields, method=method['selection'] if method else old.get('method'),
-                             method_reason=method['reason'] if method else old.get('method_reason'))
-    elif step == 'method' and idea['shape'] is not None:
-        idea['shape']['method'] = fields['selection']
-        idea['shape']['method_reason'] = fields['reason']
     elif step == 'assess':
         idea['assessments'].append(dict(assessment(fields['assessment']), actor=actor, timestamp=timestamp))
-    # Revised capture/workspace never rewrites immutable origin. Visual evidence
-    # and method conditionals live exclusively in workflow, not legacy shape.
+    # Revised capture/workspace never rewrites immutable origin. Discovery,
+    # Exploration, Method and visual evidence live only in the workflow.
 
 
 def acceptance_source(idea, step, fields, extra_dependencies=()):
     """Return current source digest/dependencies for an explicit acceptance."""
     prepared = import_workflow(idea)
     _enum(step, STEP_ORDER, 'step')
-    fields = validate_step_fields(step, fields)
     workflow = prepared['workflow']
+    fields = validate_step_fields(step, fields, method_selection=accepted_method_selection(workflow))
     names = _dependency_names(workflow, step, extra_dependencies)
     _, current = _step_states(workflow)
     dependencies = {}
@@ -722,7 +878,7 @@ def accept_step(idea, step, fields, *, expected_revision, expected_draft_version
     _cas(result, expected_revision, expected_draft_version)
     _enum(step, STEP_ORDER, 'step')
     require(step != 'review', 'Review is derived from a verified handoff packet', 'derived_step')
-    fields = validate_step_fields(step, fields)
+    fields = validate_step_fields(step, fields, method_selection=accepted_method_selection(result['workflow']))
     _hash(source_digest, 'source_digest')
     text(actor, 'actor', 200)
     text(timestamp, 'timestamp', 100)
@@ -734,7 +890,7 @@ def accept_step(idea, step, fields, *, expected_revision, expected_draft_version
     same_fields = record['fields'] == fields
     same_dependencies = record['acceptance'] is not None and record['acceptance']['dependencies'] == source['dependencies']
     if (same_fields and same_dependencies and not record['invalidated_by'] and
-            not (step == 'shape' and result['status'] == 'archived')):
+            not (step == 'exploration' and result['status'] == 'archived')):
         # Own editing buffers do not invalidate unchanged accepted data. Revert
         # discards that draft as a draft-only mutation, not an accepted revision.
         draft_removed = step in workflow['drafts']
@@ -748,7 +904,7 @@ def accept_step(idea, step, fields, *, expected_revision, expected_draft_version
         return _result(result, draft_removed or navigated)
     # Navigation prerequisites are separate from consumed-input dependencies.
     # A capture edit must not erase priorities, but a new choice cannot bypass
-    # an earlier incomplete/review panel. Explicit archived Shape acceptance
+    # an earlier incomplete/review panel. Explicit archived Exploration acceptance
     # starts the next active revision even when its inputs are unchanged.
     _, current = _step_states(workflow)
     for earlier in STEP_ORDER[:STEP_ORDER.index(step)]:

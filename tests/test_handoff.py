@@ -42,10 +42,10 @@ class HandoffTests(unittest.TestCase):
         with self.assertRaises(IdeaError) as caught: callback()
         self.assertEqual(caught.exception.code,code)
 
-    def edit_shape(self):
+    def edit_exploration(self):
         with self.store.transaction(write=True) as state:
             idea = state['ideas'][self.key]
-            state['ideas'][self.key] = accept(idea,'shape',dict(idea['workflow']['steps']['shape']['fields'],outcome='Next slice'))['idea']
+            state['ideas'][self.key] = accept(idea,'exploration',dict(idea['workflow']['steps']['exploration']['fields'],outcome='Next slice'))['idea']
             self.store.commit(state)
 
     def test_actual_delivery_exact_store_preflight_envelope_paths_and_trace(self):
@@ -55,7 +55,7 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual({k:result[k] for k in compact},compact)
         self.assertTrue(result['handoff_current'])
         self.assertEqual(result['handoff']['path'],str(self.root/compact['path']))
-        self.assertIn('## Idea trace\nidea_id: '+self.key+'\nidea_revision: 6\n',result['handoff']['prompt'])
+        self.assertIn('## Idea trace\nidea_id: '+self.key+'\nidea_revision: 7\n',result['handoff']['prompt'])
         self.assertTrue(result['handoff']['prompt'].startswith('/glitch-plan\n'))
         self.assertEqual(self.service.request_result('handoff-1'),result)
 
@@ -225,7 +225,7 @@ catch (error) { process.stdout.write(JSON.stringify({rejected:error.code??String
         self.refused('request_not_found',lambda:self.store.request_result(self.sid,'refused-before-commit'))
 
     def test_edit_retains_original_reconciliation_and_ideas_review_needed(self):
-        result = self.publish(); self.edit_shape(); before = self.files()
+        result = self.publish(); self.edit_exploration(); before = self.files()
         recovered = self.service.request_result('handoff-1')
         self.assertEqual(recovered['handoff'],result['handoff'])
         self.assertFalse(recovered['handoff_current'])
@@ -304,9 +304,10 @@ catch (error) { process.stdout.write(JSON.stringify({rejected:error.code??String
         self.assertEqual(listing['total'],1)
         with self.store.transaction() as state:
             idea = state['ideas'][self.key]
-            self.assertEqual(listing['ideas'],[dict(idea_id=self.key,revision=6,position=1,
+            self.assertEqual(listing['ideas'],[dict(idea_id=self.key,revision=7,position=1,
                 title=idea['workflow']['steps']['capture']['fields']['raw_text'],status='in-progress',
-                method='bounded-plan',updated=idea['revisions'][-1]['timestamp'],detail_path=str(self.root/(self.key+'.md')),current_step='review',completed_steps=6)])
+                method='bounded-plan',updated=idea['revisions'][-1]['timestamp'],detail_path=str(self.root/(self.key+'.md')),current_step='review',completed_steps=7,
+                lifecycle='active',home=None,delivered_ref=None,read_only=False)])
         self.assertEqual(self.files(),before)
         self.publish()
         self.assertEqual(handoffs.ideas(self.binding,None,None)['ideas'][0]['status'],'ready-to-plan')
@@ -350,7 +351,7 @@ catch (error) { process.stdout.write(JSON.stringify({rejected:error.code??String
         self.assertIsNone(self.service.state()['handoff'])
         with self.store.transaction() as state: draft = state['ideas'][self.key]['workflow']['draft_version']
         saved = handoffs.selection(self.binding,None,{'idea_id':self.key})
-        self.assertEqual(saved,dict(empty,idea_id=self.key,revision=6,draft_version=draft))
+        self.assertEqual(saved,dict(empty,idea_id=self.key,revision=7,draft_version=draft))
         self.assertEqual(handoffs.selection(self.binding,None,{'idea_id':self.key}),saved)
         self.assertEqual(self.files(),before)
         self.refused('not_found',lambda:handoffs.selection(self.binding,None,{'idea_id':'idea_'+'f'*32}))

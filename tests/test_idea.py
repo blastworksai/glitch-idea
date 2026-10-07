@@ -50,7 +50,8 @@ class IdeaTests(unittest.TestCase):
         return self.cli('capture', '--text-file', self.file(text, '.txt'), '--actor', 'operator')['idea']
 
     def shape_data(self, next_slice='Try one real user'):
-        return dict(outcome='Reduce manual work', scope='capability', scope_reason='One new reusable ability', alternatives=[dict(route='Reuse', reason='Check existing route first')], method='experiment-led', method_reason='Demand is uncertain', assumptions=['A user has this need'], next_slice=next_slice, learning=[])
+        # v3 Exploration fields: the method now lives in its own step, not in this file.
+        return dict(outcome='Reduce manual work', alternatives=[dict(route='Reuse', reason='Check existing route first')], assumptions=['A user has this need'], scope='capability', scope_reason='One new reusable ability', next_slice=next_slice, learning=[], investment=None, experiment=None, sketch=[dict(title='Run one trial', why_next='Cheapest test', done_when='Trial observed', method=None)])
 
     def assessment(self, method='wsjf', **overrides):
         inputs = {'value': 8, 'time_criticality': 4, 'enablement': 2, 'effort': 2}
@@ -66,7 +67,7 @@ class IdeaTests(unittest.TestCase):
         return self.cli(command, idea['idea_id'], '--file', self.file(data), '--expected-revision', idea['revision'], '--actor', 'assistant')['idea']
 
     def ready(self):
-        idea = self.edit('shape', self.capture(), self.shape_data())
+        idea = self.edit('exploration', self.capture(), self.shape_data())
         idea = self.cli('rate', idea['idea_id'], '--urgency', 7, '--importance', 9, '--expected-revision', idea['revision'], '--actor', 'operator')['idea']
         return self.edit('assess', idea, self.assessment())
 
@@ -91,9 +92,9 @@ class IdeaTests(unittest.TestCase):
 
     def test_stale_revisions_and_scores_preserve_history_without_reordering(self):
         idea = self.capture()
-        current = self.edit('shape', idea, self.shape_data())
+        current = self.edit('exploration', idea, self.shape_data())
         before = self.authority_bytes()
-        self.cli('shape', idea['idea_id'], '--file', self.file(self.shape_data()), '--expected-revision', 1, '--actor', 'assistant', ok=False)
+        self.cli('exploration', idea['idea_id'], '--file', self.file(self.shape_data()), '--expected-revision', 1, '--actor', 'assistant', ok=False)
         self.assertEqual(self.authority_bytes(), before)
         for value in ('0','11','true','NaN','1.5'):
             self.cli('rate', idea['idea_id'], '--urgency', value, '--importance', 5, '--expected-revision', 2, '--actor', 'operator', ok=False)
@@ -220,7 +221,7 @@ class IdeaTests(unittest.TestCase):
         self.cli('record-execution',idea['idea_id'],'--plan-id',plan['plan_id'],'--path',self.file(receipt),'--actor','assistant')
         next_shape = self.shape_data('Test a second cohort')
         next_shape['learning'] = ['The first flow needed simpler wording']
-        resumed = self.edit('shape',result['idea'],next_shape)
+        resumed = self.edit('exploration',result['idea'],next_shape)
         self.assertEqual(resumed['revision'],5)
         self.assertEqual(resumed['status'],'active')
         self.assertEqual(len(resumed['executions']),2)
@@ -342,11 +343,20 @@ class IdeaTests(unittest.TestCase):
         self.cli('capture','--text-file',self.file('Do not reset'),'--actor','operator',ok=False)
         self.assertFalse((self.store/'IDEAS.md').exists())
 
+    def test_retired_shape_verb_points_at_exploration(self):
+        idea=self.capture()
+        before=self.authority_bytes()
+        for extra in ([],['--file',self.file(self.shape_data()),'--expected-revision','1','--actor','assistant']):
+            error=self.cli('shape',idea['idea_id'],*extra,ok=False)['error']
+            self.assertEqual(error['code'],'unsupported_command')
+            self.assertIn('exploration',error['message'])
+        self.assertEqual(self.authority_bytes(),before)
+
     def test_concurrent_stale_shape_writers_only_one_commits(self):
         idea=self.capture()
         paths=[self.file(self.shape_data('Choice '+str(n))) for n in range(2)]
         def attempt(path):
-            result=subprocess.run([sys.executable,str(self.script),'--store',str(self.store),'shape',idea['idea_id'],'--file',str(path),'--expected-revision','1','--actor','assistant'],capture_output=True,text=True)
+            result=subprocess.run([sys.executable,str(self.script),'--store',str(self.store),'exploration',idea['idea_id'],'--file',str(path),'--expected-revision','1','--actor','assistant'],capture_output=True,text=True)
             return json.loads(result.stdout)
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             results=list(pool.map(attempt,paths))
@@ -357,7 +367,7 @@ class IdeaTests(unittest.TestCase):
         idea=self.capture()
         before=self.authority_bytes()
         for raw in ('{"scope":"project"}', '{"outcome":1,"outcome":2}', '{not json}'):
-            self.cli('shape',idea['idea_id'],'--file',self.file(raw),'--expected-revision',1,'--actor','assistant',ok=False)
+            self.cli('exploration',idea['idea_id'],'--file',self.file(raw),'--expected-revision',1,'--actor','assistant',ok=False)
         self.cli('capture','--text-file',self.file('x'*(1024*1024+1)),'--actor','operator',ok=False)
         self.cli('show','../../state',ok=False)
         self.assertEqual(self.authority_bytes(),before)

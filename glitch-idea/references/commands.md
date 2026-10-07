@@ -13,14 +13,14 @@ Each invocation returns one JSON object on stdout. Check `ok` and process exit s
 
 ## Source browser launch and resume
 
-The browser flow covers Capture, Shape, Method, Visualize, Assess, Priorities and Review, with saved drafts and selected-panel recovery. Linux is exercised; native Windows and macOS are not yet qualified.
+The browser flow has eight steps: Capture, Priorities, Methods, Discovery, Exploration, Visualize, Assess, Review, with saved drafts and selected-panel recovery. Linux is exercised; native Windows and macOS are not yet qualified.
 
 ```bash
 python3 "$idea_tool" --store /absolute/demo-ideas browser-open --browser system
 python3 "$idea_tool" --store /absolute/demo-ideas session-open --resume binding_ID_FROM_OUTPUT
 ```
 
-`browser-open` opens a dedicated tab at the nonsecret service root. Enter its fresh `pairing_code` in that tab within 60 seconds. Only the initiating helper prints this one-time code. Keep `binding_id` from the result or browser URL: `--resume` rotates credentials while retaining that binding's durable save receipts and selected idea. A browser-open error that includes `resume_required` also carries the binding reference; resume it explicitly instead of creating another session. A lost or uncertain NEW result is never retried automatically.
+`browser-open` opens a dedicated tab at `<origin>/#pair=<code>` (the code is exactly 32 lowercase hex characters). The page reads the fragment, removes it from the address bar before anything else and redeems the code itself, so the operator types nothing. The returned `browser.url` stays the root-only origin. The result also carries `pairing_code` and `fallback_line`: "Only if the tab did not open paired: type <code> within 60 s." Show that line only when the operator reports the tab did not open paired; typing a code the tab already redeemed invalidates the session (`pairing_replay_session_invalidated`). If the code expired or pairing failed, run `session-open --resume binding_ID` for a fresh code and give the operator the new origin and code. The page's own sentence is: "This link's pairing code has expired. Ask your terminal for a new code (it runs session-open --resume)." Plain `session-open` launches no browser, so the operator opens the origin and types the code. Only the initiating helper prints this one-time code. Keep `binding_id` from the result or browser URL: `--resume` rotates credentials while retaining that binding's durable save receipts and selected idea. A browser-open error that includes `resume_required` also carries the binding reference; resume it explicitly instead of creating another session. A lost or uncertain NEW result is never retried automatically. With `--browser orca`, a resume creates the new tab first and then closes the page recorded for that binding (`orca tab close --page <id> --worktree id:<worktree>`); the result's `browser.previous_page_closed` says whether it did, with `previous_page_close_error` on a failure, which never fails the reconnect. System-browser mode cannot close a tab. An old tab still open elsewhere is told it was replaced by a newer one (error code `session_superseded`).
 
 For Orca use explicit initiating selectors; system-browser mode does not substitute for SSH routing:
 
@@ -40,13 +40,13 @@ python3 "$idea_tool" --store /absolute/demo-ideas serve --runtime-root /absolute
 
 Foreground `serve` keeps running and emits no pairing code. On normal interruption or authenticated shutdown it stops admission and drains active saves before releasing ownership. The service also exits after 15 minutes without authenticated activity and with no active requests. Saved Markdown and binding metadata survive; browser credentials require fresh pairing after restart. Native source agent verbs are described below; the owned source service supports the private event/reply path. 
 
-The runtime currently permits eight retained bindings per store. Resume an existing binding when continuing work; capacity refusal never evicts another binding or its receipts. An ambiguous partial private write reports `runtime_recovery_conflict` and preserves the bytes for explicit recovery. Domain recovery and supported Markdown edits are described in [the Markdown format](../../docs/markdown-format.md).
+A store keeps at most eight sessions (bindings). Resume an existing binding when continuing work. When a new open needs room, a session whose idea reached Review (its Review step is saved) and that has no open browser tab or terminal agent is freed automatically, the least recently used first; its ideas and receipts are untouched. A session that is unfinished or still open is never freed automatically: the open is refused with `binding_capacity` and the JSON error carries a `sessions` list. An ambiguous partial private write reports `runtime_recovery_conflict` and preserves the bytes for explicit recovery. An ambiguous partial private write reports `runtime_recovery_conflict` and preserves the bytes for explicit recovery. Domain recovery and supported Markdown edits are described in [the Markdown format](../../docs/markdown-format.md).
 
 ## SSH, Orca recovery and the planning prompt
 
 When the browser runs on a different computer from the helper, the operator opens `ssh -L <port>:127.0.0.1:<port> <host>` on their own computer with the same port as the printed `origin`, then opens `http://127.0.0.1:<port>/` locally; the service accepts only that exact origin. System-browser mode opens a browser on the machine running the helper and is not an SSH route.
 
-Missing or malformed Orca selectors fail with `origin_missing` (and selectors in system mode with `usage`) before any session exists; fix the arguments and rerun without `--resume`. Later Orca failures happen after the session exists, so the error carries `binding_id`, `session_id` and `resume_required: true`, but not the origin: run `session-open --resume binding_ID` to get the origin and a fresh pairing code. The typed codes are `origin_missing`, `identity_mismatch`, `runtime_unavailable`, `route_unavailable`, `orca_error`, `cli_missing`, `cli_unavailable`, `cli_timeout`, `cli_failed`, `unsupported_payload` and `unsafe_url`. For a post-session failure, recovery is to fix the Orca connection or selector and rerun `browser-open` with `--resume binding_ID` from that error, or to run `session-open --resume binding_ID` and open the origin it prints in a system browser (through the SSH tunnel when remote). The helper never falls back silently. Other launcher codes include `system_browser_unavailable`, `service_readiness_timeout`, `service_spawn_failed`, `session_capacity_exhausted`, `binding_capacity` (a ninth binding for the store; nothing is evicted, so resume an existing one) and `binding_not_found`.
+Missing or malformed Orca selectors fail with `origin_missing` (and selectors in system mode with `usage`) before any session exists; fix the arguments and rerun without `--resume`. Later Orca failures happen after the session exists, so the error carries `binding_id`, `session_id` and `resume_required: true`, but not the origin: run `session-open --resume binding_ID` to get the origin and a fresh pairing code. The typed codes are `origin_missing`, `identity_mismatch`, `runtime_unavailable`, `route_unavailable`, `orca_error`, `cli_missing`, `cli_unavailable`, `cli_timeout`, `cli_failed`, `unsupported_payload` and `unsafe_url`. For a post-session failure, recovery is to fix the Orca connection or selector and rerun `browser-open` with `--resume binding_ID` from that error, or to run `session-open --resume binding_ID` and open the origin it prints in a system browser (through the SSH tunnel when remote). The helper never falls back silently. Other launcher codes include `system_browser_unavailable`, `service_readiness_timeout`, `service_spawn_failed`, `session_capacity_exhausted`, `binding_capacity` (a ninth session while all eight are unfinished or still open; the error carries `sessions`, rows of `binding_id`, `selected_idea_id`, `title`, `finished` and `in_use`, and never a credential or pairing code; resume one with `--resume`, or discard one with `session-discard`) and `binding_not_found`.
 
 The browser Review step's **Generate planning prompt** then **Copy planning prompt** produces a `/glitch-plan` prompt carrying the idea trace; see the runbook. The `handoff` verb below is the command-line equivalent that returns the trace for a planner.
 
@@ -80,13 +80,15 @@ for the next cursor. A wait has two additional seconds for bounded network
 transport. This command performs one wait per invocation and does not schedule
 a heartbeat loop or model call.
 
+Right after launch, start one background shell loop that runs `events` again by itself each time a wait returns (advancing the cursor) and writes each result to a file, so the lease never lapses between turns; it exits, waking the agent, only when a request is delivered or a stop code comes back. Never re-run waits by hand turn by turn to keep the lease alive (that wakes the model every 25 seconds); empty waits never reset the idle clock, so a forgotten session still pauses after 600 seconds.
+
 Once `events` has delivered a request, the 35-second lease holds for up to 10 minutes (600 seconds) while the agent composes that answer.
 `respond` (or a cancel) ends that window, and re-reading the same event never extends it.
 After 600 seconds with no reply and no wait, the agent is disconnected and the request is cancelled.
 
 The agent idle pause is 600 seconds.
 Empty waits do not reset it.
-The human's saves, pairing and the page's typing pings do, so keep waiting while the human is working.
+The human's saves, pairing and the page's "still here" pings, and the connected agent's accepted fills, do reset it, so keep waiting while the human is working.
 A human who walks away still pauses the agent after 600 seconds.
 
 The native UTF-8 response file is bounded to 1 MiB, with duplicate JSON keys and
@@ -97,11 +99,24 @@ and `proposal`. Copy correlation from the actual event; `--request` and
 a response does not accept workflow fields or change human ratings/order.
 The file path is native CLI input and is never sent as a browser or HTTP path.
 
+Method, Discovery, Exploration and Assess are answered with `fill` only. `respond` is for `visual_brief` only.
+A fill alone is enough: the page shows it at once and no request waits for a `respond`; the next step's request replaces the open one.
+Review sends no request; after the planning prompt the service may end, and `agent_unavailable` there means the run is over, not an error. To tell that end from a failure: once Assess is accepted the next `events` may return `agent_unavailable`; a read-only `show` of the idea with `workflow.current_step` `review` and `workflow.steps.assess.acceptance` set means the run is over; otherwise follow the stop list in SKILL.md.
+
 `fill` sends fields the operator agreed in the terminal for the page to apply to the open step.
-Its UTF-8 JSON file has the same correlation keys as a `respond` file plus `fields` instead of `proposal`: only the agreed fields of that step (Shape: `outcome`, `scope`, `scope_reason`, `alternatives`, `assumptions`, `next_slice`, `learning`; Method: `reason`; Assess: `assessment`, `proposed_position`).
+Never send `null` as a fill field value (it is refused `invalid_fill`): leave out `investment` and `experiment` when the method does not need them. No top-level fill field may be null; nested nulls are allowed only where documented: `preferred_method` inside the memory line and a sketch item's `method`.
+Its UTF-8 JSON file has the same correlation keys as a `respond` file plus `fields` instead of `proposal`: only the agreed fields of that step (operation `discovery`: `problem`, `audience`, `workaround`, `evidence`, `kill_criteria`, `challenges`, `prior_art` (at most 8 rows of `{name, link, does, differs, licence}`, all text), `prior_art_none` (boolean), `prior_art_searched` (text, where it was looked); accept needs one or more rows with name, differs and licence filled and `prior_art_none` false, or `prior_art_none` true with no rows and `prior_art_searched` filled; "Not stated" is a valid licence; operation `exploration`: `outcome`, `alternatives`, `assumptions`, `scope`, `scope_reason`, `next_slice`, `learning`, `investment`, `experiment`, `sketch`; operation `method`: a memory fill only, `{"memory": {status, sources, rationale, preferred_method}}` with `preferred_method` one of the four method ids, required when status is `found` and null otherwise; operation `assessment`, behind the Assess step: `assessment`, `proposed_position`, a whole number from 1).
 It returns `{ok, code, request_id, operation, status: "pending", write_state: "not_applied", fill_sequence}`: the fill is held for the page, which saves it as the operator's draft; nothing is accepted.
-Refusals carry the service's own code: `invalid_fill`, `request_cancelled`, `request_closed`, `request_not_delivered`, `request_not_found`, `response_mismatch`, `fill_capacity` (64 fills per request), `agent_unavailable`.
+Refusals carry the service's own code: `invalid_fill`, `request_cancelled` (that one request is over; keep polling `events`), `request_closed`, `request_not_delivered`, `request_not_found`, `response_mismatch`, `fill_capacity` (64 fills per request), `agent_unavailable`.
 Each fill renews the 10-minute answer window and counts as activity for the idle pause.
+
+The owned service writes every accepted keep-alive to `<runtime-root>/activity.log` (mode 0600, bounded to 256 KB), one line `<UTC time> activity binding=<id> count=<n> agent_clock_moved=<v>` where `true` means the agent's idle clock was reset, `false` means no connected agent of that generation, and `n/a` means no agent is attached.
+
+Two verbs manage the retained sessions and need a running service; both take `--runtime-root` and `--runtime-python` like `session-open`. Without a running service they fail with `owner_unavailable`.
+`sessions` is read-only and prints `{ok: true, sessions: [...]}`: one row per retained session with `binding_id`, `selected_idea_id`, `title` (the idea's text, at most 80 characters), `finished` (its Review step is saved) and `in_use` (a browser tab or terminal agent is still connected).
+`session-discard --binding binding_ID [--confirm]` removes one session; its ideas and receipts are untouched. An idle session is discarded at once and prints `{ok: true, binding_id, was_in_use}`.
+For a session that is still open, a run without `--confirm` changes nothing, exits nonzero with `session_in_use` and a fixed `warning` field: "This session is still open: its browser tab and terminal agent will stop working. Run again with --confirm to discard it."
+Run it again with `--confirm` only when the operator says yes. An unknown binding is `binding_not_found`. The same code from `session-open --resume binding_ID` means that session was freed (automatically at Review, to make room) or discarded: say so in one line and open a new session; its ideas are still in the store.
 
 `session-close` revokes only agent provenance; it preserves the paired browser
 and saved drafts. Errors contain fixed codes and no peer diagnostics. A
@@ -110,39 +125,68 @@ publication: reconcile the same request and payload after inspecting current
 state. The helper never retries a response automatically. Explicit resume
 rotates the generation; old credentials and outstanding replies cannot cross it.
 
-## Capture, resume and shape
+## Visualize and Prototype Here
+
+The Visualize step ends as `accepted_set` (with `source` `claude_design` or `prototype`) or `skipped` (reason optional, one click).
+The page offers "Visualize in Claude Design and import it back", "Prototype Here" and "Skip visualization".
+
+`prototype-serve` serves a built prototype folder on its own loopback port, sandboxed by CSP, with no cookies, and runs until the session ends, so start it in the background (a background job or `&`):
+
+```bash
+python3 "$idea_tool" --store /absolute/demo-ideas prototype-serve --session session_ID_FROM_OUTPUT --dir /absolute/runtime-root/prototypes/IDEA_ID
+```
+
+Read its first JSON line for `origin`, `port` and `ssh_line`.
+Give the operator `ssh_line` (with `<host>` filled in) when the browser is on another computer.
+
+The agent asset door is the `asset` verb (it calls `POST /agent/v1/asset` with agent auth; credentials stay inside the helper).
+It accepts only `image/png` and `application/zip`, under the existing asset limits, one file per call:
+
+```bash
+python3 "$idea_tool" --store /absolute/demo-ideas asset --session session_ID --idea idea_ID --revision N --request REQUEST_ID --file /absolute/shot.png
+python3 "$idea_tool" --store /absolute/demo-ideas asset --session session_ID --idea idea_ID --revision N --request REQUEST_ID --file /absolute/prototype.zip
+```
+
+The type follows the `.png` or `.zip` extension; `--type image/png|application/zip` overrides it.
+The reply carries `asset_id`. The order is fixed: upload both files, then `fill` `visualize` with `{"source": "prototype", "assets": [<zip id>, <png id>]}` while the `visual_brief` request is open, then ask the operator to look at the page, then reply `prototype_skill: "available"` last, only once the operator confirms the page shows "Prototype ready". A reply closes the request, so a fill after it is refused `request_closed`; when the skill is missing, reply `prototype_skill: "unavailable"` at once and send no fills. If that reply is refused `request_cancelled` or `request_closed` because the operator already pressed Accept or moved on, the step is done and the agent says nothing more about it.
+
+The `prototype` skill that builds the prototype is Matt Pocock's (MIT, https://github.com/mattpocock/skills); it is identified by its origin (upstream mattpocock/skills, `skills/engineering/prototype`) recorded in the installed skill's own file, under any installed name; it is optional, never bundled, fetched or installed by this package, and the last `visual_brief` reply reports `prototype_skill` as `available` or `unavailable`.
+
+## Capture, resume and the next slice
 
 Save the user's words to a UTF-8 file without paraphrasing, trimming or adding a newline. Avoid shell interpolation of their text: write with the file tool or pass bytes as data.
 
 ```bash
 python3 "$idea_tool" capture --text-file /absolute/raw-idea.txt --actor operator
 python3 "$idea_tool" show idea_ID_FROM_CAPTURE
-python3 "$idea_tool" shape idea_ID --file /absolute/shape.json --expected-revision 1 --actor assistant
 python3 "$idea_tool" rate idea_ID --urgency 4 --importance 6 --expected-revision 2 --actor operator
 ```
 
-The ratings above are examples only: run `rate` only with explicitly supplied operator answers. `capture` starts at revision 1; `shape`, `rate` and `assess` each increment it. Reread output after each change. An archived revision requires explicit reshaping before new ratings or assessments.
+The ratings above are examples only: run `rate` only with explicitly supplied operator answers. `capture` starts at revision 1; `exploration`, `rate` and `assess` each increment it. Reread output after each change. An archived revision requires the `exploration` verb, which reopens Exploration for the next slice, before new ratings or assessments. The old verb that `exploration` replaced answers `unsupported_command` and points at it.
 
-`shape.json` has these exact keys. Text fields, scope and method may be null while incomplete; arrays are required. Scope/method enums are in [methods.md](methods.md).
+The next-slice file given to `exploration` is validated whole by the same checks that accept the Exploration step, so every key is required and nothing may be left empty. It has exactly these keys: `outcome`, `scope` (one of the scope values in [methods.md](methods.md)), `scope_reason`, `next_slice` (non-empty text), `alternatives` (at least one `route` and `reason`), `assumptions` and `learning` (lists, which may be empty: send an empty list (`[]`), never null, and never omit them, because the page keeps an undelivered field locked), `sketch` (one to five slices, each with `title`, `why_next`, `done_when` and a `method` from [methods.md](methods.md)), and `investment` and `experiment`. In this file, and only here, leave `investment` and `experiment` as `null` unless the chosen method needs them: `investment` is `{"cap", "unit", "boundary"}` and `experiment` is `{"question", "evidence", "success_criterion", "stop_rule"}`.
 
 ```json
 {
   "outcome": "The operator sees the number of open tasks in the daily summary.",
-  "scope": "small-change",
-  "scope_reason": "Adds one summary to the existing daily summary.",
   "alternatives": [
     {"route": "Use current summary data", "reason": "Smallest route if the attention signal is trustworthy."},
     {"route": "Fix attention classification first", "reason": "Necessary if that signal is missing or unreliable."}
   ],
-  "method": "experiment-led",
-  "method_reason": "Operator selected a bounded feasibility check before a delivery plan.",
   "assumptions": ["Dependency: current summary producer is accessible.", "Unknown: attention classification accuracy.", "Risk: a false count hides work."],
+  "scope": "small-change",
+  "scope_reason": "Adds one summary to the existing daily summary.",
   "next_slice": "Inspect one representative summary and compare its count with source records; stop if the signal is absent.",
-  "learning": []
+  "learning": [],
+  "investment": null,
+  "experiment": null,
+  "sketch": [
+    {"title": "Check the signal", "why_next": "Everything else depends on the count being trustworthy.", "done_when": "One summary's count matches its source records, or the gap is written down.", "method": "bounded-plan"}
+  ]
 }
 ```
 
-Record method selection only if the operator actually supplied it. Later `shape` calls preserve the original words and history; put evidence and changed assumptions in `learning`, with relevant plan/attempt IDs or file references.
+Record method selection only if the operator actually supplied it. Later `exploration` calls preserve the original words and history; put evidence and changed assumptions in `learning`, with relevant plan/attempt IDs or file references.
 
 ## Assessment and order
 
@@ -178,9 +222,11 @@ Assessment files have exactly `method`, `version`, `inputs`, `basis`, `assumptio
 ```bash
 python3 "$idea_tool" handoff idea_ID
 python3 "$idea_tool" register-plan idea_ID --path /absolute/saved-plan.md --expected-revision 4 --actor assistant
+python3 "$idea_tool" register-plan idea_ID --path /absolute/saved-plan.md --expected-revision 4 --actor assistant --workspace-name NAME --workspace-path /absolute/project
+python3 "$idea_tool" deliver idea_ID --ref "one line reference" --actor assistant
 ```
 
-`handoff` is read-only and needs complete shaping, human ratings and an assessment. It returns the exact trace block and current revision for the planner. Preserve its values, outside the planner's closed `## Build choices` section:
+`handoff` is read-only and needs complete Exploration, human ratings and an assessment. It returns the exact trace block and current revision for the planner. Preserve its values, outside the planner's closed `## Build choices` section:
 
 ```markdown
 ## Idea trace
@@ -193,6 +239,18 @@ The real UTF-8 Markdown plan must contain nonempty Goal/Outcome, Tasks and Valid
 Successful registration records the hash, permanent idea ID, linked revision, generated plan ID and validation receipt, then archives **that revision**. `plan.source_path` names the original working plan; `plan.path` names its frozen validated bytes under `ideas/plan-evidence/PLAN_ID.md`. Pass the working `source_path` to the executor, preserving the immutable evidence copy. Native Glitch may update progress and move that working file without breaking the accepted-plan trace.
 
 The derived idea snapshot is `ideas/archive/ID/rN.json`. Multiple distinct plans can reference the same revision. Register a changed approved plan as a distinct plan version; do not edit frozen plan evidence. Tampering with frozen bytes is reported by `doctor` and rejected on execution registration.
+
+### Moving an idea into a workspace, and delivery
+
+`--workspace-name` and `--workspace-path` are given together or not at all; neither means the registration above.
+With both, only the living detail file `<store>/<idea_id>.md` moves, to `<workspace>/ideas/<idea_id>.md`, and nothing of it stays in the store.
+Revisions (`history/<id>/rN.md`), metadata and the frozen plan evidence stay.
+The store writes an immutable pointer `history/<id>/moved.md` and an `IDEAS.md` extension `glitch_idea_moves`.
+Replaying the same call reports `repeated:true`. Refusals: `workspace_unavailable`, `same_workspace` (the target is the configured `default_workspace`), `target_overlaps_store`, `invalid_input`, and `home_conflict` (identical bytes already at the target are a resume, anything else is refused).
+
+A moved or delivered idea is read-only from glitch-idea. `show` and `list` still work and carry `lifecycle` (`active`, `moved` or `delivered`), `home` and `delivered_ref`; `list` also has a `lifecycles` map. Every mutation (`exploration` including a next slice, `rate`, `assess`, `propose`, `place`, `handoff`, `record-execution`, browser saves) is refused `idea_moved` with `details.home`. The browser bridge answers 409 for `idea_moved`, `not_moved` and `delivery_conflict`. From the move on, next slices happen in the project.
+
+`deliver idea_ID --ref TEXT --actor A` needs a moved idea (otherwise `not_moved`). The reference is one line, no control characters, 1 to 500 characters. It writes the immutable `history/<id>/delivered.md` and a `glitch_idea_delivered` index link. The same reference again is `repeated:true`; a different one is `delivery_conflict`. There is no un-deliver.
 
 After execution, write an actual evidence receipt using the registered IDs:
 
@@ -216,5 +274,7 @@ Statuses are `succeeded|failed|blocked`. Evidence must be nonempty and grounded 
 ## Recovery
 
 `doctor` checks saved schema/order, registered receipt paths/hashes, frozen plan evidence and derived snapshots; unhealthy state exits nonzero. `repair-views` recreates missing derived archive views and refuses to overwrite differing existing files. Markdown history, metadata and frozen plan files are authoritative: missing evidence fails closed and requires exact restoration from backup. Neither command repairs working source plans nor resets a corrupt store.
+
+For a moved idea, `doctor` is unhealthy and names the path when its home file or workspace folder is missing: glitch-idea keeps no copy and cannot restore it, so restore it from your own backup. A home file edited since the move is healthy with a notice. `repair-views` never writes outside the store.
 
 If a failure reports `committed:true`, the authoritative transaction already succeeded. Read the record and run `doctor`; repair missing views when appropriate instead of blindly replaying the mutation. Preserve corrupt state for diagnosis. Edit only the supported Markdown input fields and Notes described in the Markdown format contract. Do not fabricate replacement history, frozen plan bytes or migration evidence to make checks green.

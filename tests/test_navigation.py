@@ -20,8 +20,8 @@ class NavigationTests(unittest.TestCase):
 
     def test_pure_navigation_changes_only_current_step_and_preserves_review(self):
         idea=complete(); prior=copy.deepcopy(idea)
-        result=navigate_step(idea,'shape',expected_revision=idea['revision'],expected_draft_version=idea['workflow']['draft_version'])
-        expected=copy.deepcopy(prior); expected['workflow']['current_step']='shape'
+        result=navigate_step(idea,'exploration',expected_revision=idea['revision'],expected_draft_version=idea['workflow']['draft_version'])
+        expected=copy.deepcopy(prior); expected['workflow']['current_step']='exploration'
         self.assertEqual(result['idea'],expected); self.assertTrue(result['changed'])
         self.assertFalse(result['accepted_changed']); self.assertEqual(result['invalidated'],[])
         self.assertEqual(idea,prior)
@@ -29,12 +29,12 @@ class NavigationTests(unittest.TestCase):
         before=derive_state(prior,handoff); after=derive_state(result['idea'],handoff)
         self.assertEqual(before['accepted'],after['accepted'])
         self.assertEqual(before['steps']['review'],after['steps']['review'])
-        again=navigate_step(result['idea'],'shape',expected_revision=idea['revision'],expected_draft_version=idea['workflow']['draft_version'])
+        again=navigate_step(result['idea'],'exploration',expected_revision=idea['revision'],expected_draft_version=idea['workflow']['draft_version'])
         self.assertFalse(again['changed']); self.assertEqual(again['idea'],expected)
 
     def test_pure_strict_step_and_counter_cas(self):
         idea=complete(); draft=idea['workflow']['draft_version']
-        for step in ('unknown',None,True,[]):
+        for step in ('unknown','shape',None,True,[]):
             self.assert_code('invalid_input',lambda:navigate_step(idea,step,expected_revision=idea['revision'],expected_draft_version=draft))
         for rev,value,code in ((True,draft,'invalid_input'),(idea['revision'],True,'invalid_input'),(1,draft,'stale_revision'),(idea['revision'],draft+1,'stale_draft_version')):
             self.assert_code(code,lambda:navigate_step(idea,'capture',expected_revision=rev,expected_draft_version=value))

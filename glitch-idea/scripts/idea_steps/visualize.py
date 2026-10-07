@@ -13,10 +13,10 @@ from idea_workflow import acceptance_source, derive_state, source_digest, valida
 
 
 def current_source(idea):
-    """Current accepted Capture/Shape witness, independent of overall revision."""
+    """Current accepted Capture, Discovery and Exploration witness, independent of overall revision."""
     projection = derive_state(idea)
     witness = {}
-    for step in ('capture','shape'):
+    for step in ('capture','discovery','exploration'):
         require(projection['steps'][step]['status']=='saved','Current accepted '+step+' is required','not_ready')
         record = idea['workflow']['steps'][step]; revision = record['acceptance']['accepted_revision']
         witness[step] = dict(revision=revision,digest=source_digest(step,revision,{step:record['fields']}))
@@ -54,8 +54,7 @@ def validate(state,idea,payload,source,context):
     require(payload.get('proposal_id') is None,'Visualize proposal provenance is unavailable','supporting_evidence')
     require(fields.get('brief_evidence_id') is None,'Verified brief provenance is unavailable','supporting_evidence')
     if fields['disposition']!='accepted_set':
-        require(type(fields.get('reason')) is str and fields['reason'].strip(),
-                'A meaningful Visualize reason is required','supporting_evidence')
+        # Skip is one click: a reason is optional.
         require(fields.get('design_set_id') is None,'A skipped Visualize decision must clear its set','supporting_evidence')
         return
     set_id = fields.get('design_set_id')
@@ -65,13 +64,17 @@ def validate(state,idea,payload,source,context):
     require(set_id in sets,'Missing complete design set','asset_not_found')
     selected = sets[set_id]; witness = current_source(idea)
     require(selected['source']==witness and selected['source_digest']==codec.source_digest(witness),
-            'Design set consumed stale Capture/Shape','stale_source')
+            'Design set consumed stale Capture, Discovery or Exploration','stale_source')
     # Codec enforces member uniqueness, exact types/extension and all size caps.
     for member in selected['members']:
         asset = assets.get(member['asset_id'])
         require(asset is not None and member==dict(asset_id=asset['asset_id'],name=asset['name'],
             type=asset['validated_type'],size=asset['size'],sha256=asset['sha256']),
             'Design set membership differs from verified complete assets','supporting_evidence')
+    if fields.get('source')=='prototype':
+        # The prototype road delivers exactly the bundle and its screenshot.
+        require(sorted(member['type'] for member in selected['members'])==['application/zip','image/png'],
+                'A prototype design set is one zip and one png','supporting_evidence')
 
 
 HANDLER = TrustedStepHandler(validate)

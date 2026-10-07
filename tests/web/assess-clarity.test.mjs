@@ -32,7 +32,7 @@ function harness(){
       heading.htmlFor=id;input.id=id;input.value=value??'';input.addEventListener('input',e=>changed(e.target.value));wrap.append(heading,input);target.append(wrap);return input;};
     render({body,foot,flow,element,button,field,connected:true,edited:(key,value)=>flow.edit(key,value),handle:a=>async()=>a(),proposalInventory:()=>{}});};
   flow.onChange=draw;draw();
-  return {flow,get:id=>body.all().find(n=>n.id===id),get body(){return body;},pick:async m=>{await body.all().find(n=>n.id==='assess-method-'+m).click();}};
+  return {flow,get:id=>body.all().find(n=>n.id===id),get body(){return body;},get foot(){return foot;},pick:async m=>{await body.all().find(n=>n.id==='assess-method-'+m).click();}};
 }
 const texts=h=>h.body.all().map(n=>n.textContent);
 const helpFor=(h,control)=>{const ids=String(control['aria-describedby']??'').split(/\s+/).filter(Boolean);return ids.map(id=>h.get(id)).filter(Boolean);};
@@ -86,4 +86,18 @@ test('no help text claims a zero score for missing input',async()=>{
   for(const m of ['wsjf','rice','kano']){await h.pick(m);
     for(const n of h.body.all().filter(n=>n.className==='help'||n.id==='assess-method-help'||n.id==='assess-score-status')){
       assert.doesNotMatch(n.textContent,/(score|result)[^.]*\b(is|becomes|=|counts as)\s*(0\b|zero)/i,n.textContent);assert.doesNotMatch(n.textContent,/blank[^.]*\bzero\b|blank[^.]*\b0\b/i,n.textContent);}}
+});
+
+test('a disabled Accept names the missing numbers in assess-accept-reason', async()=>{
+  const h=harness();await h.pick('wsjf');
+  h.get('assess-input-value').input('5');
+  const inFoot=id=>h.foot.all().find(n=>n.id===id);
+  const accept=inFoot('assess-accept'),why=inFoot('assess-accept-reason');
+  assert.equal(accept.disabled,true);assert.ok(why,'reason is rendered');
+  assert.equal(accept['aria-describedby'],'assess-accept-reason');assert.equal(accept.title,why.textContent);
+  assert.match(why.className,/accept-reason/);
+  assert.match(why.textContent,/Time criticality, Enablement and Effort need numbers; Effort must be above 0/);
+  assert.doesNotMatch(why.textContent,/Value/);
+  await h.pick('rice');
+  assert.match(inFoot('assess-accept-reason').textContent,/Reach, Impact, Confidence and Effort need numbers; Effort must be above 0 and Confidence between 0 and 1/);
 });

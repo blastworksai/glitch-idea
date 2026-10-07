@@ -1,30 +1,46 @@
 <!doctype html>
-<!-- Original glitch-idea browser shell; no supplied branding or assets. -->
+<!-- glitch-idea browser shell; Blastworks Applications look. -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <title>Glitch idea</title>
+  <link rel="stylesheet" href="./assets/bwpm/bundle.css">
   <link rel="stylesheet" href="./styles.css">
   <script type="module" src="./app.js"></script>
 </head>
 <body>
   <a class="skip-link" href="#step-panel">Skip to current step</a>
-  <header class="app-bar">
-    <strong>Glitch idea</strong>
-    <nav id="app-nav" class="app-nav" aria-label="Main">
-      <button id="nav-ideas" type="button" class="nav-item">Ideas</button>
-      <button id="nav-setup" type="button" class="nav-item">Setup</button>
-    </nav>
-    <span id="identity">New idea</span>
-    <span id="progress">0 of 7 saved</span>
-    <span id="save-status" role="status" aria-live="polite">Connecting…</span>
-  </header>
-  <p id="agent-status" class="agent-status" role="status"></p>
-  <section id="connection" class="connection" aria-label="Connect this browser" hidden></section>
-  <nav id="compact-nav" class="compact-nav" aria-label="Idea steps"></nav>
-  <main id="columns" class="columns" aria-label="Idea workflow"></main>
+  <div class="g-app">
+    <header class="bw-appbar">
+      <a class="bw-appbar__brand" href="./"><img src="./assets/logo.svg" alt="Blastworks" width="28" height="28">Glitch idea</a>
+      <nav id="app-nav" class="bw-tabs" aria-label="Main">
+        <button id="nav-idea" type="button" class="bw-tab">Idea</button>
+        <button id="nav-ideas" type="button" class="bw-tab">Ideas</button>
+        <button id="nav-setup" type="button" class="bw-tab">Setup</button>
+      </nav>
+      <div class="bw-appbar__spacer"></div>
+      <ol class="g-apiv" aria-label="APIV: Align, Plan, Implement, Verify"><li aria-current="step"><b>Align</b><span class="sr-only">, you're here; next: /glitch-plan</span></li><li><span aria-hidden="true">› </span>Plan</li><li><span aria-hidden="true">› </span>Implement</li><li><span aria-hidden="true">› </span>Verify</li></ol>
+      <span id="agent-status" class="g-agent" role="status"></span>
+      <button id="theme-toggle" type="button" class="bw-btn bw-btn--ghost" aria-pressed="false">Light theme</button>
+      <span id="save-status" class="bw-meta" role="status" aria-live="polite">Connecting…</span>
+    </header>
+    <section id="connection" class="connection" aria-label="Connect this browser" hidden></section>
+    <div class="g-body">
+      <aside id="step-rail" class="g-rail" aria-label="Idea steps">
+        <div class="g-rail__head">
+          <span id="identity" class="bw-meta">New idea</span>
+          <span id="rail-title" class="g-rail__title"></span>
+          <span id="progress" class="bw-progress">0 of 8 saved</span>
+        </div>
+        <nav id="compact-nav" aria-label="Idea steps"></nav>
+        <hr class="g-divider">
+        <div class="g-rail__foot"><span class="bw-caption">When all eight are saved</span><span class="g-sub">Review builds the planning prompt for <code>/glitch-plan</code>.</span></div>
+      </aside>
+      <main id="columns" class="g-main" aria-label="Idea workflow"></main>
+    </div>
+  </div>
   <p id="announcement" class="sr-only" role="status" aria-live="polite"></p>
   <noscript>This local guided workflow requires JavaScript.</noscript>
 </body>

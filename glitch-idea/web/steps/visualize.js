@@ -1,5 +1,5 @@
 // Explicit uploads and immutable membership; Flow owns save/recovery.
-import {validVisualize} from '../folds.js';
+import {METHOD_LABELS as METHOD_NAMES, validVisualize, acceptBlockers} from '../folds.js';
 
 const MAX_FILE = 25 * 1024 * 1024, MAX_SET = 100 * 1024 * 1024;
 const ID = {idea: /^idea_[0-9a-f]{32}$/, upload: /^upload_[0-9a-f]{32}$/, asset: /^asset_[0-9a-f]{32}$/, set: /^set_[0-9a-f]{32}$/};
@@ -10,6 +10,8 @@ const TYPES = {'image/png':['png'], 'image/jpeg':['jpg','jpeg'], 'image/webp':['
 const ALIASES = {'application/x-zip-compressed':'application/zip','text/x-markdown':'text/markdown'};
 const INFER = Object.fromEntries(Object.entries(TYPES).flatMap(([type,extensions]) => extensions.map(extension => [extension,type])));
 INFER.md = INFER.markdown = 'text/markdown';
+// Mirrors the server's design-set source witness (idea_asset_evidence._source).
+const SOURCE_KEYS = ['capture','discovery','exploration'];
 const copy = value => structuredClone(value);
 const exact = (value,keys) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value,key));
@@ -65,8 +67,8 @@ export function assetInventory(flow) {
       if (!fileRecord(r) || entry.blob !== null) return null;
       intents.push(r);
     } else if (kind === 'design-set') {
-      if (!typed(r.set_id,'set') || entry.blob !== null || !hash(r.source_digest) || !exact(r.source,['capture','shape']) ||
-          !['capture','shape'].every(key => exact(r.source[key],['revision','digest']) && Number.isSafeInteger(r.source[key].revision) &&
+      if (!typed(r.set_id,'set') || entry.blob !== null || !hash(r.source_digest) || !exact(r.source,SOURCE_KEYS) ||
+          !SOURCE_KEYS.every(key => exact(r.source[key],['revision','digest']) && Number.isSafeInteger(r.source[key].revision) &&
             r.source[key].revision >= 1 && r.source[key].revision <= r.source_revision && hash(r.source[key].digest)) ||
           !Array.isArray(r.members) || r.members.length < 1 || r.members.length > 20 ||
           new Set(r.members.map(member => member?.asset_id)).size !== r.members.length ||
@@ -79,30 +81,37 @@ export function assetInventory(flow) {
   return {assets,sets,intents,orphans:value.orphans,total:value.total};
 }
 export function eligibleSet(flow,set,inventory = assetInventory(flow)) {
-  return Boolean(inventory && set?.source && Array.isArray(set.members) && ['capture','shape'].every(key => flow.status(key) === 'saved' &&
+  return Boolean(inventory && set?.source && Array.isArray(set.members) && SOURCE_KEYS.every(key => flow.status(key) === 'saved' &&
     set.source[key].revision === flow.state.steps[key].accepted_revision) && set.members.every(member => {
       const asset = inventory.assets.find(value => value.asset_id === member.asset_id);
       return asset && member.name === asset.name && member.type === asset.validated_type && member.size === asset.size && member.sha256 === asset.sha256;
     }));
 }
 export function visualBrief(flow) {
-  if (!['capture','shape'].every(key => flow.status(key) === 'saved' && flow.state.accepted?.[key])) return null;
-  const shape=flow.state.accepted.shape,method=flow.state.accepted.method;
-  const lines=[['Outcome',shape.outcome],['Scope',shape.scope],['Scope reason',shape.scope_reason],['Next slice',shape.next_slice]]
-    .map(([label,value])=>label+': '+value);
-  for(const item of shape.alternatives??[])lines.push('Alternative: '+item.route+' — '+item.reason);
-  for(const value of shape.assumptions??[])lines.push('Assumption: '+value);
-  for(const value of shape.learning??[])lines.push('Learning: '+value);
+  if (!SOURCE_KEYS.every(key => flow.status(key) === 'saved' && flow.state.accepted?.[key])) return null;
+  const discovery=flow.state.accepted.discovery,exploration=flow.state.accepted.exploration,method=flow.state.accepted.method;
+  const row=([label,value])=>label+': '+value;
+  const found=[['Problem',discovery.problem],['Who',discovery.audience]].map(row);
+  const lines=[['Desired result',exploration.outcome],['Scope',exploration.scope],['Scope reason',exploration.scope_reason],['Next slice',exploration.next_slice]].map(row);
+  for(const item of exploration.alternatives??[])lines.push('Alternative: '+item.route+' — '+item.reason);
+  for(const value of exploration.assumptions??[])lines.push('Assumption: '+value);
+  for(const value of exploration.learning??[])lines.push('Learning: '+value);
+  const sketch=(exploration.sketch??[]).map((item,index)=>(index+1)+'. '+item.title+' — done when: '+item.done_when);
   const methodLines=[];
   if(flow.status('method')==='saved'&&method){
-    methodLines.push('Selection: '+method.selection,'Reason: '+method.reason);
-    if(method.investment)methodLines.push('Investment cap: '+method.investment.cap+' '+method.investment.unit,'Boundary: '+method.investment.boundary);
-    if(method.experiment)for(const [key,label]of [['question','Question'],['evidence','Evidence'],['success_criterion','Success criterion'],['stop_rule','Stop rule']])methodLines.push(label+': '+method.experiment[key]);
+    methodLines.push('Selection: '+(METHOD_NAMES[method.selection]??method.selection));
+    if(typeof method.reason==='string'&&method.reason.trim())methodLines.push('Reason: '+method.reason);
+    if(exploration.investment)methodLines.push('Investment cap: '+exploration.investment.cap+' '+exploration.investment.unit,'Boundary: '+exploration.investment.boundary);
+    if(exploration.experiment)for(const [key,label]of [['question','Question'],['evidence','Evidence'],['success_criterion','Success criterion'],['stop_rule','Stop rule']])methodLines.push(label+': '+exploration.experiment[key]);
   }
   return 'Visual design brief — derived from current accepted answers\n\nCapture\n'+flow.state.accepted.capture.raw_text+
-    '\n\nShape\n'+lines.join('\n')+(methodLines.length?'\n\nMethod\n'+methodLines.join('\n'):'')+
+    '\n\nDiscovery\n'+found.join('\n')+'\n\nExploration\n'+lines.join('\n')+(sketch.length?'\n\nSketch\n'+sketch.join('\n'):'')+
+    (methodLines.length?'\n\nMethod\n'+methodLines.join('\n'):'')+
     '\n\nCreate locally or with your chosen tool. Upload files here, select membership, then accept explicitly.';
 }
+
+// Buttons sit in a row of their own so a card never stretches them full width.
+const actions = (element, ...buttons) => { const row = element('div', '', 'setup-actions'); row.append(...buttons); return row; };
 
 const sessions = new WeakMap();
 function session(flow) {
@@ -248,8 +257,9 @@ export function renderUploads(ctx) {
   else if (inventory.total >= 256) group.append(element('p','Retained asset capacity is exhausted. Existing history remains available.','notice'));
   if (local.error) { const error=element('p',local.error,'notice'); error.setAttribute('role','alert'); group.append(error); }
   for (const task of local.queue) {
-    const row=element('div'); row.append(element('p',task.file.name+' · '+task.file.size+' bytes · '+task.phase));
+    const row=element('div','','g-card'); row.append(element('p',task.file.name+' · '+task.file.size+' bytes · '+task.phase));
     if (task.error) { const error=element('p',task.error,'notice'); error.setAttribute('role','status'); row.append(error); }
+    const rowActions=element('div','','setup-actions');
     if (task.phase !== 'complete') {
       const checking=task.phase.startsWith('check-');
       const action=button(task.phase==='refused'?'Remove and reselect file':checking?'Check upload result':task.phase==='bytes'?'Upload file bytes':'Upload file',handle(async()=>{
@@ -257,24 +267,24 @@ export function renderUploads(ctx) {
           if (await uploadAction(ctx,task,'metadata')) await uploadAction(ctx,task,'bytes');
         } else await uploadAction(ctx,task,task.phase);
       }));
-      action.id='upload-action-'+task.id; action.disabled=Boolean(task.phase==='refused' || blocked(ctx) || !inventory || (!checking && flow.state.idea_status!=='active')); row.append(action);
+      action.id='upload-action-'+task.id; action.disabled=Boolean(task.phase==='refused' || blocked(ctx) || !inventory || (!checking && flow.state.idea_status!=='active')); rowActions.append(action);
       if (task.phase === 'metadata' && !task.error) {
         for (const intent of inventory?.intents ?? []) if (intent.session_id === flow.state.session_id && intent.name === task.file.name &&
           intent.size === task.file.size && intent.declared_type === task.type && !inventory.assets.some(asset => asset.upload_id === intent.upload_id)) {
           const resume=button('Resume saved upload '+intent.upload_id,handle(()=>{
             task.upload_id=intent.upload_id; task.asset_id=intent.asset_id; task.phase='bytes'; flow.onChange();
-          })); resume.id='upload-resume-'+task.id+'-'+intent.upload_id; resume.disabled=Boolean(blocked(ctx)||flow.state.idea_status!=='active'); row.append(resume);
+          })); resume.id='upload-resume-'+task.id+'-'+intent.upload_id; resume.disabled=Boolean(blocked(ctx)||flow.state.idea_status!=='active'); rowActions.append(resume);
         }
       }
       if (!checking) {
         const remove=button('Remove local selection',handle(()=>{local.queue=local.queue.filter(value=>value!==task);flow.onChange();}));
-        remove.id='upload-remove-'+task.id; remove.disabled=Boolean(blocked(ctx)); row.append(remove);
+        remove.id='upload-remove-'+task.id; remove.disabled=Boolean(blocked(ctx)); rowActions.append(remove);
       }
     } else {
       const remove=button('Remove completed local selection',handle(()=>{local.queue=local.queue.filter(value=>value!==task);flow.onChange();}));
-      remove.id='upload-remove-'+task.id;remove.disabled=Boolean(blocked(ctx));row.append(remove);
+      remove.id='upload-remove-'+task.id;remove.disabled=Boolean(blocked(ctx));rowActions.append(remove);
     }
-    group.append(row);
+    row.append(rowActions);group.append(row);
   }
   if (inventory) {
     group.append(element('p',inventory.intents.filter(intent=>!inventory.assets.some(asset=>asset.upload_id===intent.upload_id)).length+' retained incomplete upload intents.'));
@@ -315,28 +325,63 @@ export function safeDownloadName(display,assetId) {
   return clean.trim()?clean:assetId;
 }
 
+const SKILLS_URL = 'https://github.com/mattpocock/skills';
+const MISSED = 'The prototype did not reach this page. Ask your terminal to send it again, or choose another road.';
+const CARD_CLAUDE = 'Visualize in Claude Design and import it back', CARD_PROTOTYPE = 'Prototype Here', CARD_SKIP = 'Skip visualization';
+// The prototype set the terminal filled: exactly one zip and one png, both complete in the verified inventory.
+function prototypeSet(current, inventory) {
+  if (current.source !== 'prototype' || !Array.isArray(current.assets) || current.assets.length !== 2 || !inventory) return null;
+  const found = current.assets.map(id => inventory.assets.find(asset => asset.asset_id === id));
+  if (!found.every(Boolean)) return null;
+  const zip = found.find(asset => asset.validated_type === 'application/zip'), png = found.find(asset => asset.validated_type === 'image/png');
+  return zip && png ? {zip, png} : null;
+}
+function screenshot(ctx, local, png) {
+  const {flow} = ctx;
+  if (!local.shots) local.shots = {};
+  if (!local.shots[png.asset_id]) {
+    const entry = local.shots[png.asset_id] = {url: null, failed: false};
+    Promise.resolve().then(async () => {
+      try {
+        const blob = await flow.api.attachment(png.asset_id, png.size);
+        if (!(blob instanceof Blob) || blob.size !== png.size) throw invalid();
+        entry.url = (ctx.objectUrls ?? globalThis.URL).createObjectURL(new Blob([blob], {type: 'image/png'}));
+      } catch { entry.failed = true; }
+      flow.onChange();
+    });
+  }
+  return local.shots[png.asset_id];
+}
+
 export function render(ctx) {
-  const {body,foot,flow,element,button,field,edited,handle} = ctx, local=session(flow);
+  const {body,foot,flow,element,button,handle} = ctx, local=session(flow);
   const current=()=>flow.buffers.visualize;
-  const change=fields=>{if(writeBlocked(ctx))return;edited('visualize',fields);flow.onChange();};
-  const brief=visualBrief(flow), briefBox=element('section'); briefBox.setAttribute('aria-label','Derived visual brief');
-  if (brief) {
-    const label=element('label','Brief from current accepted answers'); label.htmlFor='visualize-brief';
-    const text=element('textarea'); text.id='visualize-brief';text.value=brief;text.readOnly=true;briefBox.append(label,text);
-    const copyButton=button('Copy brief',handle(async()=>{
-      try {const clipboard=ctx.clipboard??globalThis.navigator?.clipboard;if(!clipboard?.writeText)throw new Error('unavailable');await clipboard.writeText(brief);local.copyMessage='Brief copied.';}
-      catch {local.copyMessage='Clipboard unavailable. Select and copy the brief manually.';}flow.onChange();
-    })); copyButton.id='visualize-copy';copyButton.disabled=false;briefBox.append(copyButton);
-  } else briefBox.append(element('p','Current saved Capture and Shape are required for a derived brief and set acceptance.'));
-  briefBox.append(element('p','The brief uses your accepted answers. Create designs with your chosen tool, then upload the files here.'));
-  if(local.copyMessage){const message=element('p',local.copyMessage);message.id='visualize-copy-status';message.setAttribute('role','status');briefBox.append(message);}body.append(briefBox);
-  const {inventory}=renderUploads(ctx);
+  const change=fields=>{if(writeBlocked(ctx))return;edited(fields);flow.onChange();};
+  const edited=fields=>ctx.edited('visualize',fields);
+  const make=(disposition,design_set_id,source)=>({disposition,reason:null,design_set_id,brief_evidence_id:null,...(source?{source}:{})});
   if(flow.state?.idea_status!=='active')body.append(element('p',flow.state?.idea_status==='archived'?
     'This idea is archived. Design-set and disposition changes are unavailable; existing files remain downloadable.':
     'Idea status is unavailable. Reload before changing a Visualize decision.','notice'));
+  const card=(title,id,hint='')=>{const box=element('section','','g-card choice-card');box.id=id;box.setAttribute('aria-label',title);box.append(element('h2',title));if(hint)box.append(element('p',hint,'g-sub'));return box;};
+  const cards=element('div','','choice-cards'),claude=card(CARD_CLAUDE,'visualize-card-claude'),proto=card(CARD_PROTOTYPE,'visualize-card-prototype','Your terminal builds a clickable prototype and opens it in a second tab.'),skip=card(CARD_SKIP,'visualize-card-skip','Move on without a visual design. No reason is needed.');
+  cards.append(claude,proto,skip);body.append(cards);
+
+  // Card 1: Claude Design. The brief, copy and upload road, unchanged in behaviour.
+  const brief=visualBrief(flow), briefBox=element('section'); briefBox.setAttribute('aria-label','Derived visual brief');
+  if (brief) {
+    const label=element('label','Brief from current accepted answers'); label.htmlFor='visualize-brief';
+    const text=element('textarea','','g-locked'); text.id='visualize-brief';text.value=brief;text.readOnly=true;briefBox.append(label,text);
+    const copyButton=button('Copy brief',handle(async()=>{
+      try {const clipboard=ctx.clipboard??globalThis.navigator?.clipboard;if(!clipboard?.writeText)throw new Error('unavailable');await clipboard.writeText(brief);local.copyMessage='Brief copied.';}
+      catch {local.copyMessage='Clipboard unavailable. Select and copy the brief manually.';}flow.onChange();
+    }),'bw-btn bw-btn--secondary'); copyButton.id='visualize-copy';copyButton.disabled=false;briefBox.append(actions(element,copyButton));
+  } else briefBox.append(element('p','Current saved Capture, Discovery and Exploration are required for a derived brief and set acceptance.','notice'));
+  briefBox.append(element('p','The brief uses your accepted answers. Create designs with your chosen tool, then upload the files here.','help'));
+  if(local.copyMessage){const message=element('p',local.copyMessage,'notice');message.id='visualize-copy-status';message.setAttribute('role','status');briefBox.append(message);}claude.append(briefBox);
+  const {inventory}=renderUploads({...ctx,body:claude});
   const choices=element('section');choices.setAttribute('aria-label','Explicit design-set membership');
-  const newSet=button('Create a new set from selected files',handle(()=>{local.members=[];change({disposition:'accepted_set',reason:null,design_set_id:null,brief_evidence_id:null});}));
-  newSet.id='visualize-new-set';newSet.disabled=Boolean(writeBlocked(ctx)||!brief||!inventory);choices.append(newSet);
+  const newSet=button('Create a new set from selected files',handle(()=>{local.members=[];change(make('accepted_set',null,'claude_design'));}));
+  newSet.id='visualize-new-set';newSet.disabled=Boolean(writeBlocked(ctx)||!brief||!inventory);choices.append(actions(element,newSet));
   for (const asset of inventory?.assets??[]) {
     const label=element('label',asset.name),check=element('input');check.type='checkbox';check.id='visualize-member-'+asset.asset_id;label.htmlFor=check.id;
     check.checked=local.members.includes(asset.asset_id);check.disabled=Boolean(writeBlocked(ctx)||current().disposition!=='accepted_set'||current().design_set_id!==null||!brief);
@@ -345,29 +390,90 @@ export function render(ctx) {
       if(event.target.checked&&!local.members.includes(asset.asset_id))local.members.push(asset.asset_id);
       else if(!event.target.checked)local.members=local.members.filter(id=>id!==asset.asset_id);
       change({...current()});
-    });choices.append(check,label);
+    });const pick=element('div','','g-check');pick.append(check,label);choices.append(pick);
   }
   for(const set of inventory?.sets??[]) {
     const eligible=eligibleSet(flow,set,inventory);
-    choices.append(element('p',set.set_id+' · '+set.members.map(member=>member.name).join(', ')+' · '+(eligible?'current saved source':'historical / stale source')));
-    const use=button('Select existing set '+set.set_id,handle(()=>{local.members=[];change({disposition:'accepted_set',reason:null,design_set_id:set.set_id,brief_evidence_id:null});}));
-    use.id='visualize-set-'+set.set_id;use.disabled=Boolean(writeBlocked(ctx)||!eligible);use.setAttribute('aria-pressed',String(current().design_set_id===set.set_id));choices.append(use);
+    const setRow=element('div','','g-card');setRow.append(element('p',set.set_id+' · '+set.members.map(member=>member.name).join(', ')+' · '+(eligible?'current saved source':'historical / stale source')));
+    const use=button('Select existing set '+set.set_id,handle(()=>{local.members=[];change(make('accepted_set',set.set_id,'claude_design'));}));
+    use.id='visualize-set-'+set.set_id;use.disabled=Boolean(writeBlocked(ctx)||!eligible);use.setAttribute('aria-pressed',String(current().design_set_id===set.set_id));setRow.append(actions(element,use));choices.append(setRow);
   }
-  if(current().design_set_id)choices.append(element('p','Selected set: '+current().design_set_id));
-  if(local.members.length)choices.append(element('p',local.members.length+' explicitly selected files.'));
-  body.append(choices);
-  for(const [value,label] of [['skipped','Skip visualization'],['not-applicable','Not applicable']]) {
-    const choose=button(label,handle(()=>{local.members=[];change({disposition:value,reason:current().reason??'',design_set_id:null,brief_evidence_id:null});}));
-    choose.id='visualize-'+value;choose.disabled=Boolean(writeBlocked(ctx));choose.setAttribute('aria-pressed',String(current().disposition===value));body.append(choose);
+  if(current().design_set_id)choices.append(element('p','Selected set: '+current().design_set_id,'help'));
+  if(local.members.length)choices.append(element('p',local.members.length+' explicitly selected files.','help'));
+  claude.append(choices);
+
+  // Card 2: Prototype Here. The terminal builds it; the page only asks and shows the result.
+  const state=flow.state, agent=state?.agent_status==='connected';
+  const ready=brief?prototypeSet(current(),inventory):null;
+  const answer=flow.proposals('visualize').filter(item=>!item.stale&&item.accepted_revision===state?.revision).at(-1);
+  const skill=answer?.proposal?.prototype_skill, waiting=flow.proposalPending?.key==='visualize', talking=state?.conversation?.operation==='visual_brief';
+  const phase=ready||!agent?null:(waiting||talking)?'building':skill==='available'?'missed':null;
+  const ask=button(CARD_PROTOTYPE,handle(()=>flow.requestProposal('visualize')));
+  ask.id='visualize-prototype';ask.disabled=Boolean(writeBlocked(ctx)||!brief||!flow.canPropose('visualize'));
+  proto.append(actions(element,ask));
+  if(!agent&&!ready){const need=element('p','Prototype Here needs your terminal. Reinvoke /glitch-idea in your terminal to use this road; the other two choices still work.','notice');need.id='visualize-prototype-needs-terminal';proto.append(need);}
+  if(skill==='unavailable'&&!ready){
+    const pointer=element('p','Prototype Here uses Matt Pocock\'s prototype skill. Get it from ','notice');pointer.id='visualize-prototype-skill';
+    const link=element('a',SKILLS_URL);link.href=SKILLS_URL;link.target='_blank';link.rel='noopener noreferrer';
+    pointer.append(link,element('span',', install it, then refresh this page.'));proto.append(pointer);
+  } else if(phase){
+    const status=element('p',phase==='building'?'Your terminal is building the prototype — it opens in a second tab':MISSED,'notice');status.id='visualize-prototype-status';status.setAttribute('role','status');proto.append(status);
   }
-  if(['skipped','not-applicable'].includes(current().disposition)) {
-    const reason=field(body,'Reason for this decision','visualize-reason',current().reason,value=>change({...current(),reason:value}),true);reason.required=true;reason.disabled=Boolean(writeBlocked(ctx));
+  if(ready){
+    proto.append(element('p','Prototype ready: '+ready.zip.name+' and '+ready.png.name+'.','notice'));
+    const shot=screenshot(ctx,local,ready.png);
+    if(shot.url){const image=element('img');image.id='visualize-prototype-shot';image.src=shot.url;image.alt='Screenshot of your prototype';proto.append(image);}
+    else proto.append(element('p',shot.failed?'The prototype screenshot could not be loaded.':'Loading the prototype screenshot…','help'));
   }
+
+  // Card 3: Skip. One click records the decision; no reason is needed.
+  const skipButton=button(CARD_SKIP,handle(()=>{
+    if(writeBlocked(ctx))return false;local.members=[];edited({disposition:'skipped',reason:current().reason??null,design_set_id:null,brief_evidence_id:null});
+    flow.onChange();return flow.saveVisualize(null);
+  }));
+  skipButton.id='visualize-skipped';skipButton.disabled=Boolean(writeBlocked(ctx));skipButton.setAttribute('aria-pressed',String(current().disposition==='skipped'));skip.append(actions(element,skipButton));
+
   const selected=local.members.map(id=>inventory?.assets.find(asset=>asset.asset_id===id));
-  const complete=validVisualize(current())&&(current().disposition!=='accepted_set'||Boolean(brief&&inventory&&
-    (current().design_set_id===null?selected.length>=1&&selected.length<=20&&selected.every(Boolean)&&selected.reduce((total,asset)=>total+asset.size,0)<=MAX_SET:
-      inventory.sets.some(set=>set.set_id===current().design_set_id&&eligibleSet(flow,set,inventory)))));
-  const accept=button('Accept Visualize decision',handle(()=>{if(writeBlocked(ctx))return false;return flow.saveVisualize(current().disposition==='accepted_set'&&current().design_set_id===null?[...local.members]:null);}),'primary');
-  accept.id='visualize-accept';accept.disabled=Boolean(writeBlocked(ctx)||!complete);foot.append(accept);
-  body.append(element('p','Pause saves your decision draft, not local files or new-set checkbox choices. Uploads and accepted sets remain in verified history.'));
+  const effective=ready?{...current(),disposition:'accepted_set',design_set_id:null}:current();
+  const complete=validVisualize(effective)&&(effective.disposition!=='accepted_set'||['claude_design','prototype'].includes(effective.source))&&(Boolean(ready)||effective.disposition!=='accepted_set'||Boolean(brief&&inventory&&
+    (effective.design_set_id===null?selected.length>=1&&selected.length<=20&&selected.every(Boolean)&&selected.reduce((total,asset)=>total+asset.size,0)<=MAX_SET:
+      inventory.sets.some(set=>set.set_id===effective.design_set_id&&eligibleSet(flow,set,inventory)))));
+  const accept=button('Accept Visualize decision',handle(()=>{
+    if(writeBlocked(ctx))return false;
+    const now=current();
+    if(ready){
+      if(now.disposition!=='accepted_set'||now.design_set_id!==null)edited({...now,disposition:'accepted_set',design_set_id:null});
+      return flow.saveVisualize([...now.assets]);
+    }
+    return flow.saveVisualize(current().disposition==='accepted_set'&&current().design_set_id===null?[...local.members]:null);
+  }),'primary');
+  accept.id='visualize-accept';accept.disabled=Boolean(writeBlocked(ctx)||!complete);
+  if(accept.disabled){
+    const list=acceptBlockers('visualize',current(),flow),add=sentence=>{if(!list.includes(sentence))list.push(sentence);};
+    const {flow:f}=ctx;
+    if(!ctx.connected)add('Reconnect to the idea service before accepting.');
+    if(f.busy)add('Wait for the current save or upload to finish.');
+    if(f.pending)add('Wait for the previous save to be confirmed or recovered.');
+    if(f.paused)add('Resume before accepting.');
+    if(f.state?.idea_status==='archived')add('This idea is archived, so it cannot accept new answers.');
+    else if(f.state?.idea_status!=='active')add('The idea status is unavailable. Reload before accepting.');
+    if(current().disposition==='accepted_set'){
+      if(!brief)add('Save Capture, Discovery and Exploration first so the design brief exists.');
+      if(!inventory)add('The file inventory is unavailable. Reload before accepting a design set.');
+      if(current().design_set_id===null){
+        if(current().source==='prototype'&&!ready)add('The prototype is not ready yet. Wait for your terminal to finish building it, or choose another road.');
+        else if(!selected.length)add('Choose a design set to accept, or upload files and select them, or skip this step.');
+        else if(selected.length>20)add('Select at most 20 files.');
+        else if(!selected.every(Boolean))add('A selected file is no longer available. Reselect your files.');
+        else if(selected.reduce((total,asset)=>total+asset.size,0)>MAX_SET)add('The selected files exceed the 100 MiB set limit.');
+      } else if(inventory&&!inventory.sets.some(set=>set.set_id===current().design_set_id&&eligibleSet(flow,set,inventory)))
+        add('The selected design set is out of date. Choose a current set or create a new one.');
+    } else if(phase==='building')add('Your terminal is still building the prototype. Wait for it, or choose another road.');
+    else if(phase==='missed')add(MISSED);
+    if(!list.length)add('Finish the design choice.');
+    const why=list.join(' ');
+    {const reason=element('p',why,'foot-message accept-reason');reason.id='visualize-accept-reason';foot.append(reason);accept.setAttribute('aria-describedby','visualize-accept-reason');accept.title=why;}
+  }
+  foot.append(accept);
+  body.append(element('p','Pause saves your decision draft, not local files or new-set checkbox choices. Uploads and accepted sets remain in verified history.','g-sub'));
 }

@@ -18,10 +18,12 @@ import idea_service as application
 from idea_domain import IdeaError, digest, now
 from idea_store import Store
 from idea_service import Service, TrustedContext
-from idea_steps.shape import HANDLER as SHAPE
+from idea_steps.discovery import HANDLER as DISCOVERY
+from idea_steps.exploration import HANDLER as EXPLORATION
 from idea_steps.method import HANDLER as METHOD
 from idea_steps.visualize import HANDLER as VISUALIZE, current_source
 from idea_steps.assess import HANDLER as ASSESS
+from idea_workflow import STEP_ORDER
 from test_workflow import fields
 from test_handoff_store import publication_payload
 
@@ -32,7 +34,7 @@ def accepted_managed(store, workspace, *, session_id=None, through='assess'):
     """Create real accepted workflow/placement through Service on a fresh Store."""
     sid = store.create_session() if session_id is None else session_id
     service = Service(store, {}, TrustedContext('Operator', sid), handlers={
-        'shape':SHAPE, 'method':METHOD, 'visualize':VISUALIZE, 'assess':ASSESS})
+        'discovery':DISCOVERY, 'exploration':EXPLORATION, 'method':METHOD, 'visualize':VISUALIZE, 'assess':ASSESS})
     answers = fields()
     answers['capture']['workspace']['path'] = str(Path(workspace).resolve())
     captured = service.capture(dict(request_id='managed-capture',
@@ -40,7 +42,7 @@ def accepted_managed(store, workspace, *, session_id=None, through='assess'):
     key = captured['idea_id']
     if through == 'capture':
         return service, key
-    for step in ('priorities','shape','method','visualize','assess'):
+    for step in STEP_ORDER[1:-1]:
         state = service.state()
         service.accept(dict(request_id='managed-'+step,idea_id=key,
             expected_revision=state['revision'], expected_draft_version=state['draft_version'],
@@ -103,6 +105,17 @@ class HandoffServiceTests(unittest.TestCase):
         with self.store.transaction() as state:
             self.assertEqual(self.store.handoffs(state,self.key),[])
 
+    def test_five_hundred_character_delivery_ref_round_trips_and_501_refuses(self):
+        workspace = self.directory/'Project'; workspace.mkdir()
+        self.register_move(workspace)
+        self.refused('invalid_input',lambda:self.call('deliver',ref='r'*501))
+        self.assertEqual(self.call('deliver',ref='r'*500)['delivered_ref'],'r'*500)
+        self.assertEqual(self.call('show')['delivered_ref'],'r'*500)
+
+    def register_move(self,workspace):
+        return self.call('register-plan',expected_revision=self.idea()['revision'],path=str(self.plan()),
+                         workspace_name='Atlas',workspace_path=str(workspace))
+
     def test_incomplete_workflow_refuses_handoff_and_registration_without_validator(self):
         root = self.directory/'Incomplete'
         service,key = accepted_managed(Store(root),self.workspace,through='capture')
@@ -113,10 +126,10 @@ class HandoffServiceTests(unittest.TestCase):
             self.refused('not_ready',lambda:self.register(plan))
 
     def test_changed_draft_refuses_both_current_gates_without_validator(self):
-        state = self.service.state(); fields = dict(state['accepted']['shape'],outcome='Unsaved change')
-        self.service.draft(dict(request_id='changed-shape',idea_id=self.key,
+        state = self.service.state(); fields = dict(state['accepted']['exploration'],outcome='Unsaved change')
+        self.service.draft(dict(request_id='changed-exploration',idea_id=self.key,
             expected_revision=state['revision'],expected_draft_version=state['draft_version'],
-            step='shape',fields=fields))
+            step='exploration',fields=fields))
         plan = self.plan()
         with patch.object(application,'validate_plan',side_effect=AssertionError('Premature validator')):
             self.refused('not_ready',lambda:self.call('handoff'))
@@ -198,7 +211,7 @@ class HandoffServiceTests(unittest.TestCase):
         self.store.mutate_assets(sid,'asset-complete',{'operation':'fixture-complete'},
             lambda state:{'idea_id':self.key},prepare_records=lambda state:[complete])
         observed=self.service.state()
-        visual=dict(observed['accepted']['visualize'],disposition='accepted_set',reason=None,
+        visual=dict(observed['accepted']['visualize'],disposition='accepted_set',source='claude_design',reason=None,
                     design_set_id='set_'+token)
         payload=self.service._edit_payload(dict(request_id='asset-set',idea_id=self.key,
             expected_revision=observed['revision'],expected_draft_version=observed['draft_version'],

@@ -14,16 +14,22 @@ from idea_markdown import encode_document, parse_document
 from idea_workflow import source_digest
 
 
-def fixture(operation='shape'):
+def fixture(operation='exploration'):
     data = {'capture': {'raw_text': ' Café 💡 # original\r\nlast line\n'}}
     proposal = dict(outcome='Easier cleaning', scope='small-change', scope_reason='One lid',
         alternatives=[dict(route='Keep lid', reason='Less effort')], assumptions=[],
-        next_slice='Inspect lid', learning=[])
-    if operation == 'memory':
-        proposal = dict(status='found', sources=['memory:fixture-preference'], rationale='Recorded preference')
+        next_slice='Inspect lid', learning=[], investment=None, experiment=None,
+        sketch=[dict(title='Inspect the lid', why_next='Cheapest test', done_when='Lid is inspected', method=None)])
+    if operation == 'discovery':
+        proposal = dict(problem='Lids are hard to clean', audience='Home cooks', workaround='Scrub by hand',
+                        evidence='Three complaints', kill_criteria='Nobody cleans lids',
+                        challenges=[dict(challenge='Is this a real pain?', response='Reported three times')])
+    elif operation == 'memory':
+        proposal = dict(status='found', sources=['memory:fixture-preference'], rationale='Recorded preference',
+                        preferred_method='bounded-plan')
     elif operation == 'method':
-        proposal = dict(selection='bounded-plan', reason='Known boundary', investment=None, experiment=None,
-                        memory=dict(status='unavailable', sources=[], rationale=None))
+        # The agent never recommends a method: a method proposal is its memory result only.
+        proposal = dict(memory=dict(status='unavailable', sources=[], rationale=None))
     return dict(schema_version=1, kind='agent-proposal', proposal_id='proposal_'+'1'*32,
         binding_id='binding_'+'2'*32, generation='agent_'+'3'*32, actor='Operator',
         timestamp='2026-10-01T00:00:00Z', request_id='proposal-request-1', session_id='session_'+'4'*32,
@@ -68,13 +74,22 @@ class ProposalEvidenceTests(unittest.TestCase):
         self.assertNotEqual(checked_link, link)
 
     def test_supported_proposal_types(self):
-        for operation in ('shape', 'method', 'memory'):
+        for operation in ('discovery', 'exploration', 'method', 'memory'):
             with self.subTest(operation=operation):
                 record = fixture(operation)
                 self.assertEqual(codec.decode_proposal(codec.encode_proposal(record)), record)
 
+    def test_schema1_shape_proposal_is_refused_as_an_older_version(self):
+        record = fixture(); record['operation'] = 'shape'
+        record['source_digest'] = '0'*64
+        self.assertNotIn('shape', codec.SUPPORTED)
+        with self.assertRaises(IdeaError) as caught: codec.validate_record(record)
+        self.assertEqual(caught.exception.code, 'unsupported_proposal_version')
+        with self.assertRaises(IdeaError) as caught: codec.encode_proposal(record)
+        self.assertEqual(caught.exception.code, 'unsupported_proposal_version')
+
     def test_named_unavailable_operations_are_explicit(self):
-        for operation in ('visual_brief', 'position'):
+        for operation in ('position',):
             record = fixture()
             record['operation'] = operation
             with self.subTest(operation=operation), self.assertRaises(IdeaError) as caught:
@@ -128,17 +143,21 @@ class ProposalEvidenceTests(unittest.TestCase):
     def test_proposal_type_and_memory_grounding(self):
         record = fixture(); record['proposal']['scope'] = 'invented'
         with self.assertRaises(IdeaError): codec.validate_record(record)
-        record = fixture('method'); record['proposal']['investment'] = {'cap': 1, 'unit': 'day', 'boundary': 'x'}
-        with self.assertRaises(IdeaError): codec.validate_record(record)
-        for memory in ({'status': 'found', 'sources': [], 'rationale': 'Unsupported'},
-                       {'status': 'found', 'sources': ['ref'], 'rationale': None},
+        for extra in ({'investment': {'cap': 1, 'unit': 'day', 'boundary': 'x'}}, {'selection': 'bounded-plan'}, {'reason': 'Why'}):
+            record = fixture('method'); record['proposal'].update(extra)
+            with self.subTest(extra=extra), self.assertRaises(IdeaError): codec.validate_record(record)
+        for memory in ({'status': 'found', 'sources': [], 'rationale': 'Unsupported', 'preferred_method': 'bounded-plan'},
+                       {'status': 'found', 'sources': ['ref'], 'rationale': None, 'preferred_method': 'bounded-plan'},
+                       {'status': 'found', 'sources': ['ref'], 'rationale': 'No preferred method', 'preferred_method': None},
+                       {'status': 'found', 'sources': ['ref'], 'rationale': 'Bad method', 'preferred_method': 'invented'},
+                       {'status': 'varied', 'sources': ['ref'], 'rationale': 'Varied', 'preferred_method': 'bounded-plan'},
                        {'status': 'unavailable', 'sources': ['ref'], 'rationale': None},
                        {'status': 'error', 'sources': [], 'rationale': None, 'private_memory': 'raw'},
                        {'status': None, 'sources': [], 'rationale': None}):
             record = fixture('memory'); record['proposal'] = memory
             with self.subTest(memory=memory), self.assertRaises(IdeaError): codec.validate_record(record)
-        for status in ('searched_no_preference', 'unavailable', 'error'):
-            record = fixture('memory'); record['proposal'] = dict(status=status, sources=[], rationale=None)
+        for status in ('varied', 'searched_no_preference', 'unavailable', 'error'):
+            record = fixture('memory'); record['proposal'] = dict(status=status, sources=[], rationale=None, preferred_method=None)
             self.assertEqual(codec.validate_record(record), record)
 
     def test_wrong_path_idea_and_bytes_hash_refused(self):
