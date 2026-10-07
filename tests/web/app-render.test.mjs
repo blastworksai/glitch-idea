@@ -11,7 +11,7 @@ const app=(await readFile(new URL('app.js',web),'utf8')).replace("'./api.js'",JS
 const {startApp,registerStep}=await import(url(app));
 const idea='idea_'+'1'.repeat(32);
 
-async function fixture(run,{search='?idea_id='+idea,stateRead=null,current='discovery'}={}) {
+async function fixture(run,{search='?idea_id='+idea,stateRead=null,current='discovery',sessionRead=null}={}) {
   const names=['document','location','history','addEventListener'];
   const saved=new Map(names.map(name=>[name,Object.getOwnPropertyDescriptor(globalThis,name)]));
   let doc;
@@ -39,7 +39,7 @@ async function fixture(run,{search='?idea_id='+idea,stateRead=null,current='disc
   let finishDraft;
   const writes=[];
   const reads=[];
-  const api={session:async()=>({agent_status:'disconnected'}),state:async ideaId=>{reads.push(ideaId);if(stateRead)return stateRead(ideaId,state,reads.length);return structuredClone(state);},write:async(operation,payload)=>{
+  const api={pair:async()=>({agent_status:'disconnected'}),session:async()=>{if(sessionRead)sessionRead();return {agent_status:'disconnected'};},state:async ideaId=>{reads.push(ideaId);if(stateRead)return stateRead(ideaId,state,reads.length);return structuredClone(state);},write:async(operation,payload)=>{
     writes.push({operation,payload});
     if(operation==='draft')return new Promise(resolve=>{finishDraft=()=>{state.draft_version++;state.drafts.discovery=structuredClone(payload.fields);resolve({ok:true,write_state:'applied'});};});
     if(operation==='navigate')return {ok:true,write_state:'applied'};
@@ -513,4 +513,35 @@ test('the Ideas tab stays enabled while only a suggestion request is in flight, 
     flow.proposalFlight=false;flow.onChange();assert.equal(tab.disabled,true);
     flow.busy=false;flow.onChange();assert.equal(tab.disabled,false);
   });
+});
+
+test('A first load refused as an older-workflow idea shows the owner\'s sentence and nothing else',async()=>{
+  await fixture(async({flow,doc})=>{
+    assert.equal(flow.state,null);
+    assert.equal(doc.getElementById('save-status').textContent,'This idea was made with an older glitch-idea. Capture it again.');
+  },{stateRead:()=>{throw Object.assign(new Error('unsupported_idea_version'),{code:'unsupported_idea_version',status:409});}});
+});
+
+test('Any other first-load error keeps the existing sentence',async()=>{
+  for(const code of ['connection_lost','store_unavailable','invalid_response']){
+    await fixture(async({flow,doc})=>{
+      assert.equal(flow.state,null);
+      assert.equal(doc.getElementById('save-status').textContent,'Could not load saved state. No empty store was assumed.');
+    },{stateRead:()=>{throw Object.assign(new Error(code),{code});}});
+  }
+});
+
+test('Typed-pairing load of an older-workflow idea shows the same sentence; other codes keep their text',async()=>{
+  const cases=[['unsupported_idea_version','This idea was made with an older glitch-idea. Capture it again.'],
+    ['connection_lost','Connected, but saved state could not be loaded. Your answers remain.']];
+  for(const[code,sentence]of cases){
+    await fixture(async({flow,doc})=>{
+      const form=doc.getElementById('connection').children.find(child=>child.tagName==='FORM');
+      assert.ok(form,'the pairing form is shown');
+      await form.listeners.submit({preventDefault(){}});
+      assert.equal(flow.state,null);
+      assert.equal(doc.getElementById('save-status').textContent,sentence);
+    },{sessionRead:()=>{throw Object.assign(new Error('x'),{status:401,code:'browser_unauthorized'});},
+      stateRead:()=>{throw Object.assign(new Error(code),{code});}});
+  }
 });

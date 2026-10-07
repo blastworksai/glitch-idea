@@ -1242,15 +1242,15 @@ async function main() {
         if (refusals.some(r => r.message !== MESSAGE)) throw new Error('CLI message differs: ' + JSON.stringify(refusals));
         await read(`(window.onbeforeunload=null, true)`);
         await cdp.send('Page.reload');
-        await waitFor(`/^Could not load saved state/.test(document.getElementById('save-status')?.textContent??'')`, 'page refuses the older store', 20000);
+        await waitFor(`/^This idea was made with an older glitch-idea/.test(document.getElementById('save-status')?.textContent??'')`, 'page refuses the older store', 20000);
         await sleep(500);
         const page = await read(`({status: document.getElementById('save-status').textContent, body: document.body.innerText})`);
         if (/unsupported_idea_version|Traceback|\bat \S+ \(|undefined|\[object|\{"/.test(page.body)) throw new Error('page shows a code or a trace: ' + page.body.slice(0, 300));
-        if (page.status !== 'Could not load saved state. No empty store was assumed.') throw new Error('page sentence differs: ' + page.status);
+        if (page.status !== MESSAGE) throw new Error('page sentence differs: ' + page.status);
         await shot('12c-old-idea-refused');
         const after = files.filter(f => sha(f) !== old.get(f));
         if (after.length) throw new Error('refusal changed the bytes of ' + after.length + ' file(s)');
-        return `v0.2-format idea (${files.length} files, workflow schema_version 2): CLI list and show refused with code unsupported_idea_version and "${MESSAGE}"; the page, reloaded on that store, shows "${page.status}" (plain words, no code, no trace; it does not use the older-idea sentence); the idea's ${files.length} files hash identically before and after the refusals (nothing migrated or overwritten)`;
+        return `v0.2-format idea (${files.length} files, workflow schema_version 2): CLI list and show refused with code unsupported_idea_version and "${MESSAGE}"; the page, reloaded on that store, shows "${page.status}" (the same older-idea sentence, plain words, no code, no trace); the idea's ${files.length} files hash identically before and after the refusals (nothing migrated or overwritten)`;
       } finally {
         for (const [f, bytes] of original) writeFileSync(f, bytes);
         await read(`(window.onbeforeunload=null, true)`).catch(() => {});
