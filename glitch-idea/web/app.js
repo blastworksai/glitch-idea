@@ -691,6 +691,10 @@ export function startApp(api = new IdeaApi()) {
     }
   }
 
+  // An idea made with the older workflow gets the owner's sentence on every load path (idea_workflow.py UNSUPPORTED_VERSION_MESSAGE); no code or trace is shown.
+  const loadFailureMessage = (error, fallback) => error?.code === 'unsupported_idea_version' ?
+    'This idea was made with an older glitch-idea. Capture it again.' : fallback;
+
   // A superseded session always gets the replaced sentence, live this load or reloaded after a resume (owner, 07/10).
   const unauthorized = code => { if (code === 'session_superseded') showSuperseded(); else showPairing(code); };
 
@@ -763,7 +767,7 @@ export function startApp(api = new IdeaApi()) {
         else {
           box.hidden = true;
           flow.error = error;
-          flow.message = 'Connected, but saved state could not be loaded. Your answers remain.';
+          flow.message = loadFailureMessage(error, 'Connected, but saved state could not be loaded. Your answers remain.');
           render();
         }
       }
@@ -816,7 +820,10 @@ export function startApp(api = new IdeaApi()) {
     return result.session ?? api.session();
   }).then(value => { if (value === null) return; session = value; return loadConnected(); }).catch(error => {
     if (error.status === 401) unauthorized(error.code);
-    else { flow.error = error; flow.message = 'Could not load saved state. No empty store was assumed.'; render(); }
+    else { flow.error = error;
+      flow.message = loadFailureMessage(error, 'Could not load saved state. No empty store was assumed.');
+      render();
+    }
   });
   globalThis.addEventListener('pagehide', () => { clearTimeout(autosaveTimer); flow.dispose(); });
   globalThis.addEventListener('beforeunload', event => {

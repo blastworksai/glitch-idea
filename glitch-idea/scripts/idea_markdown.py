@@ -474,10 +474,18 @@ def _method_label(method):
     return METHOD_LABELS.get(method, method)
 
 
-def _prior_art_lines(discovery):
-    """The "Does it already exist?" section; an older accepted Discovery has no such fields."""
-    if 'prior_art' not in discovery and 'prior_art_none' not in discovery:
-        return ['- Does it already exist: Not checked']
+def _legacy_prior_art(discovery):
+    return 'prior_art' not in discovery and 'prior_art_none' not in discovery
+
+
+def _prior_art_lines(discovery, legacy_line=True):
+    """The "Does it already exist?" section; an older accepted Discovery has no such fields.
+
+    Writers use the canonical form (legacy_line=True, "Not checked").  The generated-body check also accepts
+    legacy_line=False, the form written before the fields existed, so such an idea still loads.
+    """
+    if _legacy_prior_art(discovery):
+        return ['- Does it already exist: Not checked'] if legacy_line else []
     if discovery.get('prior_art_none') is True:
         return ['- Does it already exist: ' + markdown_text('Nothing comparable found — looked: '
                                                              + (discovery.get('prior_art_searched') or 'not given'))]
@@ -489,7 +497,7 @@ def _prior_art_lines(discovery):
     return lines or ['- Does it already exist: Not checked']
 
 
-def _workflow_sections(workflow):
+def _workflow_sections(workflow, legacy_line=True):
     """Readable Discovery, Exploration and Methods sections from the ACCEPTED fields only."""
     def accepted(step):
         record = None if workflow is None else workflow['steps'].get(step)
@@ -507,7 +515,7 @@ def _workflow_sections(workflow):
             lines.extend(_field_lines(label, discovery[key]))
         for n, item in enumerate(discovery['challenges'], 1):
             lines.extend(_field_lines('Challenge ' + str(n), item['challenge']) + _field_lines('Response ' + str(n), item['response']))
-        lines.extend(_prior_art_lines(discovery))
+        lines.extend(_prior_art_lines(discovery, legacy_line))
     exploration = accepted('exploration')
     lines.extend(['', '### Exploration', ''])
     if exploration is None:
@@ -545,12 +553,26 @@ def _workflow_sections(workflow):
     return lines + ['']
 
 
-def _detail_summary(metadata):
+def _has_legacy_discovery(metadata):
+    workflow = metadata['idea'].get('workflow')
+    record = None if workflow is None else workflow['steps'].get('discovery')
+    return record is not None and record['fields'] is not None and _legacy_prior_art(record['fields'])
+
+
+def _accepted_summaries(metadata):
+    """Every rendering of the generated summary that counts as unchanged: canonical first."""
+    forms = [_detail_summary(metadata)]
+    if _has_legacy_discovery(metadata):
+        forms.append(_detail_summary(metadata, legacy_line=False))
+    return forms
+
+
+def _detail_summary(metadata, legacy_line=True):
     idea = metadata['idea']
     lines = ['# ' + idea['idea_id'], '', DETAIL_AUTHORITY.rstrip(), '',
              '## Original wording', '', markdown_text(idea['origin']['text']), '',
              '## Current details', '', 'Status: ' + idea['status'] + '; accepted revision: ' + str(idea['revision']), '']
-    lines.extend(_workflow_sections(idea.get('workflow')))
+    lines.extend(_workflow_sections(idea.get('workflow'), legacy_line))
     for key in ('shape','ratings','assessments','workflow'):
         # The retired shape record is shown only if something still holds it, so a stray edit changes the body.
         if key in idea and (key != 'shape' or idea[key] is not None):
@@ -577,7 +599,9 @@ def _notes(document, baseline=None):
     before, tail = document.body.split(NOTES_START, 1)
     notes, after = tail.split(NOTES_END, 1)
     require(not after, 'Unexpected text after Notes', 'generated_body_conflict')
-    require(before + NOTES_START == _detail_summary(baseline if baseline is not None else document.metadata),
+    # An idea accepted before the prior-art fields existed may hold the body written then (no prior-art line) or the
+    # one a later save wrote ("Not checked"); both are the same generated summary. A read rewrites nothing.
+    require(before + NOTES_START in _accepted_summaries(baseline if baseline is not None else document.metadata),
             'Generated detail summary changed; explicit repair required', 'generated_body_conflict')
     return notes
 
@@ -881,6 +905,8 @@ def _encode_unchanged_detail(key, current, idea, prior_idea, prior_document, his
     if json.dumps(before, sort_keys=True, allow_nan=False) != json.dumps(after, sort_keys=True, allow_nan=False):
         return None, None
     body = _detail_summary(metadata) + notes + NOTES_END
+    if prior_document.body in [form + notes + NOTES_END for form in _accepted_summaries(metadata)]:
+        body = prior_document.body  # a legacy body is kept byte-for-byte on a no-op
     if body != prior_document.body:
         return None, None
     return encode_document(metadata, body, previous=prior_document), copy.deepcopy(extensions_)
