@@ -482,7 +482,7 @@ def _prior_art_lines(discovery, legacy_line=True):
     """The "Does it already exist?" section; an older accepted Discovery has no such fields.
 
     Writers use the canonical form (legacy_line=True, "Not checked").  The generated-body check also accepts
-    legacy_line=False, the form written before the fields existed, so such an idea still loads (SKILLS-60).
+    legacy_line=False, the form written before the fields existed, so such an idea still loads.
     """
     if _legacy_prior_art(discovery):
         return ['- Does it already exist: Not checked'] if legacy_line else []

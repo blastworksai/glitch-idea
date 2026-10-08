@@ -1,4 +1,4 @@
-"""SKILLS-60: an idea accepted before the prior-art fields existed must still load, byte-unchanged on read."""
+"""An idea accepted before the prior-art fields existed must still load, byte-unchanged on read."""
 import copy
 import json
 from pathlib import Path
