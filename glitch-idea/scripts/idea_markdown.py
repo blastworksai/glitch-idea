@@ -296,7 +296,7 @@ def _current(value):
                 text(entry[key], 'assessment ' + key, 200)
 
 
-def _snapshot(value):
+def _snapshot(value, *, historical=False):
     require(type(value) is dict, 'Snapshot must be a mapping')
     optional = {'schema_version','workflow'} if 'workflow' in value else set()
     _exact(value, SNAPSHOT_KEYS | optional, 'snapshot')
@@ -305,9 +305,13 @@ def _snapshot(value):
         text(value[key], 'snapshot ' + key, 200)
     _current(value)
     if optional:
-        from idea_workflow import _refuse_old_version
-        _refuse_old_version(value['schema_version'], 'Unsupported snapshot schema')
-        _workflow(value['workflow'])
+        if historical and type(value['schema_version']) is int and value['schema_version'] == 2:
+            import idea_workflow_v2  # earlier release's evidence, checked by its frozen validators, read-only
+            idea_workflow_v2.validate_workflow(value['workflow'])
+        else:
+            from idea_workflow import _refuse_old_version
+            _refuse_old_version(value['schema_version'], 'Unsupported snapshot schema')
+            _workflow(value['workflow'])
 
 
 def _workflow(value):
@@ -615,8 +619,10 @@ def encode_detail(idea, notes='', extensions=None, history_links=None, *, previo
     links = history_links
     if links is None:
         require('revisions' in idea, 'History links or revisions required')
+        last = idea['revisions'][-1]['revision'] if idea['revisions'] else None
         links = [dict(path='history/' + idea['idea_id'] + '/r' + str(s['revision']) + '.md',
-                      sha256=digest(encode_history(idea['idea_id'], s, origin=idea['origin']))) for s in idea['revisions']]
+                      sha256=digest(encode_history(idea['idea_id'], s, origin=idea['origin'], historical=s['revision'] != last)))
+                 for s in idea['revisions']]
     if previous is not None:
         previous.require_rewritable()
         notes = _notes(previous, previous_baseline)
@@ -678,9 +684,9 @@ def detail_notes(document, *, baseline=None):
     return _notes(document, baseline)
 
 
-def encode_history(idea_id, snapshot, *, origin):
+def encode_history(idea_id, snapshot, *, origin, historical=False):
     check_id(idea_id)
-    _snapshot(snapshot)
+    _snapshot(snapshot, historical=historical)
     meta = dict(schema_version=2, kind='history', idea_id=idea_id, snapshot=copy.deepcopy(snapshot))
     _origin(origin)
     meta['origin'] = copy.deepcopy(origin)
@@ -688,13 +694,14 @@ def encode_history(idea_id, snapshot, *, origin):
                            '# Immutable revision ' + str(snapshot['revision']) + '\n\nDo not edit this evidence.\n')
 
 
-def decode_history(raw):
+def decode_history(raw, *, historical=False):
+    """Decode one history file. historical=True lets a snapshot written by an earlier release (workflow 2) read; writers never pass it."""
     doc = parse_document(raw)
     _exact(doc.metadata, {'schema_version','kind','idea_id','snapshot','origin'}, 'history frontmatter')
     _origin(doc.metadata['origin'])
     require(type(doc.metadata['schema_version']) is int and doc.metadata['schema_version'] == 2 and doc.metadata['kind'] == 'history', 'Unsupported history schema')
     check_id(doc.metadata['idea_id'])
-    _snapshot(doc.metadata['snapshot'])
+    _snapshot(doc.metadata['snapshot'], historical=historical)
     return doc
 
 
@@ -969,9 +976,11 @@ def encode_state(state, *, notes=None, extensions=None, previous=None, previous_
             require(digest(content.encode('utf-8')) == plan['sha256'], 'Plan content hash mismatch')
             files['plan-evidence/' + plan['plan_id'] + '.md'] = content.encode('utf-8')
         history_links = []
+        last_revision = idea['revisions'][-1]['revision'] if idea['revisions'] else None
         for snap in idea['revisions']:
             history_path = 'history/' + key + '/r' + str(snap['revision']) + '.md'
-            files[history_path] = encode_history(key, snap, origin=idea['origin'])
+            # Older revisions of a migrated idea keep their original workflow version; only the newest is current-only.
+            files[history_path] = encode_history(key, snap, origin=idea['origin'], historical=snap['revision'] != last_revision)
             history_links.append(dict(path=history_path, sha256=digest(files[history_path])))
         metadata_links = {}
         for field, kind in METADATA_TYPES.items():
@@ -997,7 +1006,8 @@ def encode_state(state, *, notes=None, extensions=None, previous=None, previous_
                     plan.pop('content', None)
                 # Earlier generated links belong to the baseline summary. Appending
                 # new links must not make the previous body appear externally edited.
-                baseline = parse_document(encode_detail(prior, extensions=previous[path].metadata['extensions'])).metadata
+                baseline = parse_document(encode_detail(prior, extensions=previous[path].metadata['extensions'],
+                                                        history_links=previous[path].metadata['history'])).metadata
             prior_document = previous.get(path)
             encoded_detail = encode_detail(current, notes.get(key, ''), extensions.get(key),
                                            previous=prior_document, previous_baseline=baseline,
@@ -1081,7 +1091,8 @@ def decode_state(files, *, check_body=True):
         require(idea['idea_id'] == key, 'Detail identity mismatch', 'corrupt_store')
         idea['revisions'] = []
         for n, link in enumerate(doc.metadata['history'], 1):
-            history = decode_history(linked(link)).metadata
+            # Older revisions of a migrated idea stay in their original workflow version; only the newest is current-only.
+            history = decode_history(linked(link), historical=n < len(doc.metadata['history'])).metadata
             require('origin' in history and history['origin'] == idea['origin'], 'Immutable origin differs from history evidence', 'corrupt_store')
             require(history['idea_id'] == key and history['snapshot']['revision'] == n, 'History identity mismatch', 'corrupt_store')
             idea['revisions'].append(history['snapshot'])

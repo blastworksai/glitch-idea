@@ -152,7 +152,7 @@ has loaded, Reload re-runs the first load, so it reads the URL's requested idea.
 Step keys/order are `capture`, `priorities`, `method`, `discovery`, `exploration`,
 `visualize`, `assess`, `review` (the server's order is authoritative; Methods and
 Discovery may swap, Exploration always follows both; an idea made with an older
-workflow is refused `unsupported_idea_version`). Exact visible status vocabulary is `todo`, `current`, `saved`,
+workflow the chain could not update is refused `unsupported_idea_version`, and the page shows the reply's own `message` sentence for it, never the code). The first `state` after an upgrade that updated ideas carries `notice`, a plain one-line string shown once in the save-status line (text only, never markup); later `state` replies omit it. Exact visible status vocabulary is `todo`, `current`, `saved`,
 `review-needed`, `unsaved`, `skipped`. `todo` has no completion;
 `current` identifies the active untouched step; `saved` requires durable current
 acceptance evidence; `review-needed` means prior evidence is invalidated by

@@ -17,7 +17,7 @@ from urllib.parse import quote
 import idea_asset_evidence as codec
 from idea_bridge import BoundedBody, Response
 from idea_domain import IdeaError, check_id, digest, integer, now, require
-from idea_platform import sync_directory
+from idea_platform import sync_directory, is_shared_root, share_directory, share_file
 from idea_steps import TrustedRoute
 from idea_store import MAX_STORE_FILES, _request_ids, _request_json
 from idea_steps.visualize import current_source
@@ -78,6 +78,7 @@ def upload_metadata(binding,request,payload):
 
 def _directory(store,relative):
     store._safe_root()
+    shared = is_shared_root(store.path)
     path = store._safe(relative,directory=True)
     if not path.exists():
         missing = []
@@ -86,11 +87,14 @@ def _directory(store,relative):
             missing.append(candidate)
         for candidate in reversed(missing):
             candidate.mkdir(mode=0o700,exist_ok=True)
+            share_directory(candidate,shared)
         store._safe(relative,directory=True)
         sync_directory(path.parent)
     # The shared asset root may have been created earlier by metadata writes; keep it owner-only too.
     for owned in (store.path/'assets',path):
-        if os.name == 'posix' and owned.is_dir() and stat.S_IMODE(owned.stat().st_mode) & 0o077:
+        if shared:
+            if owned.is_dir(): share_directory(owned,shared)
+        elif os.name == 'posix' and owned.is_dir() and stat.S_IMODE(owned.stat().st_mode) & 0o077:
             os.chmod(owned,0o700)
     require(path.stat().st_dev==store.path.stat().st_dev,'Asset directory is on another filesystem','corrupt_store')
     return path
@@ -140,6 +144,7 @@ def _stream(store,intent,body,*,staging=True):
                 descriptor = os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_BINARY',0),0o600)
         with (os.fdopen(descriptor,'wb') if staging else nullcontext(None)) as stage:
             if stage is not None:
+                share_file(stage.fileno(),is_shared_root(store.path))
                 info = os.fstat(stage.fileno())
                 require(stat.S_ISREG(info.st_mode) and info.st_dev==store.path.stat().st_dev,
                         'Unsafe upload stage','corrupt_store')
@@ -181,7 +186,7 @@ def _publish_blob(store,stage,record):
                     and info.st_size==record['size'],'Unsafe retained stage','corrupt_store')
             seal = getattr(os,'fchmod',None)
             require(callable(seal),'Descriptor stage sealing unavailable','platform_unavailable')
-            seal(stream.fileno(),0o400); os.fsync(stream.fileno())
+            seal(stream.fileno(),0o440 if is_shared_root(store.path) else 0o400); os.fsync(stream.fileno())
             # Intents/stages may have committed while the body streamed. Recount
             # and link under the shared Store lock, without reading the body.
             with store.transaction():

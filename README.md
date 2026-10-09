@@ -218,6 +218,10 @@ The Ideas overview labels these rows "In progress" and "Delivered"; both are hid
 The storage and configuration integration in this package (`install.py`'s effective configuration and the helper's `configuration`) is intended to be relocated into the managed Glitch engine in a future engine rebuild.
 That relocation has not happened: today this package is installed into a personal skills directory, and the installer refuses to write into an engine-managed Brain.
 
+## Releasing
+
+Any change to the stored format ships with its migration step in `idea_chain.py` and a fixture written by the previous release under `tests/fixtures/`.
+
 ## Tests
 
 ```bash

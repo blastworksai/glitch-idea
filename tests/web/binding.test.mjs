@@ -226,9 +226,10 @@ async function diagnosticApp(run, initialFaults = {}) {
     all(){return [this,...this.children.flatMap(child=>child.all())];}
     set innerHTML(value){throw new Error('HTML injection refused');}
   }
-  const roots=new Map(['announcement','identity','progress','save-status','agent-status','compact-nav','columns','connection'].map(id=>{const node=new Node();node.id=id;return [id,node];}));
+  const roots=new Map(['announcement','identity','progress','save-status','agent-status','compact-nav','columns','connection','step-rail'].map(id=>{const node=new Node();node.id=id;return [id,node];}));
+  const apiv=new Node('ol');apiv.className='g-apiv';
   const find=(node,id)=>node.id===id?node:node.children.map(child=>find(child,id)).find(Boolean);
-  doc={body:new Node('body'),activeElement:null,hidden:true,addEventListener:(name,cb)=>{if(name==='visibilitychange')doc.vis=cb;},visibilitychange:()=>doc.vis?.(),createElement:tag=>new Node(tag),getElementById:id=>[...roots.values()].map(node=>find(node,id)).find(Boolean)??null};
+  doc={body:new Node('body'),activeElement:null,hidden:true,addEventListener:(name,cb)=>{if(name==='visibilitychange')doc.vis=cb;},visibilitychange:()=>doc.vis?.(),createElement:tag=>new Node(tag),querySelector:sel=>sel==='.g-apiv'?apiv:null,getElementById:id=>[...roots.values()].map(node=>find(node,id)).find(Boolean)??null};
   doc.activeElement=doc.body;globalThis.document=doc;
   Object.defineProperty(globalThis,'location',{configurable:true,get:()=>currentUrl});
   globalThis.history={replaceState:(_state,_title,url)=>{currentUrl=new URL(url,currentUrl);}};
@@ -262,7 +263,7 @@ async function diagnosticApp(run, initialFaults = {}) {
   let flow;
   try {
     flow=startApp(api);await new Promise(resolve=>setImmediate(resolve));
-    await run({flow,state,faults,writes,pings,fields,ASSET,timers,get:id=>doc.getElementById(id),
+    await run({flow,state,faults,apiv,writes,pings,fields,ASSET,timers,get:id=>doc.getElementById(id),
       alerts:()=>[...roots.values()].flatMap(node=>node.all()).filter(node=>node.role==='alert').map(node=>node.all().map(child=>child.textContent).join('\n')).join('\n')});
   } finally {
     events.pagehide?.();flow?.dispose();
@@ -487,12 +488,20 @@ test('session_superseded from the poll shows the one sentence, no pairing form, 
     assert.equal(h.get('connection').hidden,false);
     assert.match(connectionText(h),/This tab was replaced by a newer one\. Switch to the newest Glitch idea tab\./);
     assertSupersededPanel(h);
+    assertNothingEditable(h);
     assert.doesNotMatch(connectionText(h),/fresh/i);
     assert.equal(h.flow.polling,false);
     assert.equal([...h.timers.values()].filter(v=>v.delay===2000).length,0,'no poll timer left');
   });
 });
 const WARNING='ONLY CLICK THIS IF YOU LOST THE TAB';
+// SKILLS-58: behind the replaced panel the step area and the APIV strip are removed, so nothing looks editable.
+const assertNothingEditable=h=>{
+  assert.equal(h.get('columns').hidden,true,'step area (columns) hidden');
+  assert.equal(h.get('step-rail').hidden,true,'step rail hidden');
+  assert.equal(h.apiv.hidden,true,'APIV strip hidden');
+  assert.equal(h.get('connection').hidden,false,'replaced panel stays visible');
+};
 const assertSupersededPanel=h=>{
   assert.match(connectionText(h),/This tab was replaced by a newer one\. Switch to the newest Glitch idea tab\./);
   assert.match(connectionText(h),new RegExp(WARNING));
@@ -512,6 +521,7 @@ test('a freshly loaded tab whose credentials were retired by a resume gets the r
     await tick();await tick();
     assert.equal(h.get('connection').hidden,false);
     assertSupersededPanel(h);
+    assertNothingEditable(h);
     assert.equal(h.flow.polling,false);
   },{session:{code:'session_superseded',status:401}});
 });
@@ -572,4 +582,68 @@ test('a failed ping is counted and warned once per failure with its code',async(
       assert.match(connectionText(h),/replaced by a newer one/);assert.equal(h.get('pairing-code'),null);assert.equal(h.flow.polling,false);
     });
   }finally{Date.now=realNow;console.warn=realWarn;}
+});
+
+// SKILLS-36 finding 3: a tab stranded by a service restart shows the dead-tab panel, with no link (the page's own address is the dead port).
+const STRANDED='This tab lost its Glitch idea service. Ask your terminal to reconnect (it runs session-open --resume) and use the new tab it opens.';
+// Fake clock for the stranded-tab watcher: polls 2 s apart count; failures inside 500 ms of each other count once.
+const lostPoll=async(h,clock)=>{clock.now+=2000;fire(h,2000);await tick();await tick();};
+test('three consecutive connection_lost polls show the dead-tab panel: steps hidden, no pairing form, no link, polling stopped',async()=>{
+  const realNow=Date.now;const clock={now:7_000_000};Date.now=()=>clock.now;
+  try{await diagnosticApp(async h=>{
+    document.hidden=false;
+    h.faults.state={code:'connection_lost',status:0};
+    for(let i=0;i<2;i++)await lostPoll(h,clock);
+    assert.equal(h.get('connection').hidden,true,'two failures are a blip, nothing shown');
+    await lostPoll(h,clock);
+    assert.match(connectionText(h),new RegExp(STRANDED.replace(/[().]/g,'\\$&')));
+    assertNothingEditable(h);
+    assert.equal(h.get('pairing-code'),null);
+    assert.equal(h.get('connection').all().find(n=>n.tagName==='A'),undefined,'no link');
+    assert.doesNotMatch(connectionText(h),new RegExp(WARNING));
+    assert.doesNotMatch(connectionText(h),/Connect this browser|replaced by a newer one/);
+    assert.equal(h.get('save-status').textContent,'Disconnected');
+    assert.equal(h.flow.polling,false);
+  });}finally{Date.now=realNow;}
+});
+// A stranded tab goes quiet: over a further fake 30 s nothing is scheduled again and the panel is left alone (no loop that could starve the renderer).
+test('a stranded tab schedules nothing and redraws nothing for 30 s after the panel shows',async()=>{
+  const realNow=Date.now;const clock={now:7_000_000};Date.now=()=>clock.now;
+  try{await diagnosticApp(async h=>{
+    document.hidden=false;
+    h.faults.state={code:'connection_lost',status:0};
+    for(let i=0;i<3;i++)await lostPoll(h,clock);
+    assert.match(connectionText(h),new RegExp(STRANDED.replace(/[().]/g,'\\$&')));
+    const panel=connectionText(h);let fired=0;
+    for(let i=0;i<15;i++){clock.now+=2000;for(const delay of new Set([...h.timers.values()].map(t=>t.delay)))fired+=fire(h,delay);await tick();await tick();}
+    assert.equal(fired,0,'no timer of any delay is due after stranding');
+    assert.equal(h.timers.size,0,'nothing left scheduled');
+    assert.equal(connectionText(h),panel,'the panel is not redrawn');
+  });}finally{Date.now=realNow;}
+});
+test('two connection_lost polls then a success show nothing, and the count restarts',async()=>{
+  const realNow=Date.now;const clock={now:7_000_000};Date.now=()=>clock.now;
+  try{await diagnosticApp(async h=>{
+    document.hidden=false;
+    h.faults.state={code:'connection_lost',status:0};
+    for(let i=0;i<2;i++)await lostPoll(h,clock);
+    delete h.faults.state;
+    await lostPoll(h,clock);
+    h.faults.state={code:'connection_lost',status:0};
+    for(let i=0;i<2;i++)await lostPoll(h,clock);
+    assert.equal(h.get('connection').hidden,true);
+    assert.equal(h.flow.polling,true);
+  });}finally{Date.now=realNow;}
+});
+test('failures that land together on one blip count once: three at the same instant show nothing',async()=>{
+  const realNow=Date.now;const clock={now:7_000_000};Date.now=()=>clock.now;
+  try{await diagnosticApp(async h=>{
+    document.hidden=false;
+    h.faults.state={code:'connection_lost',status:0};
+    for(let i=0;i<3;i++){fire(h,2000);await tick();await tick();}  // same fake instant: one blip
+    assert.equal(h.get('connection').hidden,true,'one blip, however many requests it caught');
+    assert.equal(h.flow.polling,true);
+    await lostPoll(h,clock);await lostPoll(h,clock);
+    assert.match(connectionText(h),new RegExp(STRANDED.replace(/[().]/g,'\\$&')),'spaced failures still count');
+  });}finally{Date.now=realNow;}
 });

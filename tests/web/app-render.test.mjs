@@ -515,11 +515,31 @@ test('the Ideas tab stays enabled while only a suggestion request is in flight, 
   });
 });
 
-test('A first load refused as an older-workflow idea shows the owner\'s sentence and nothing else',async()=>{
+const HELD_SENTENCE='"Label the shelves" could not be updated for this version. It was left exactly as it was.';
+const heldError=()=>Object.assign(new Error('unsupported_idea_version'),{code:'unsupported_idea_version',status:409,data:{ok:false,code:'unsupported_idea_version',message:HELD_SENTENCE}});
+
+test('held idea shows the server sentence, no code',async()=>{
   await fixture(async({flow,doc})=>{
     assert.equal(flow.state,null);
-    assert.equal(doc.getElementById('save-status').textContent,'This idea was made with an older glitch-idea. Capture it again.');
-  },{stateRead:()=>{throw Object.assign(new Error('unsupported_idea_version'),{code:'unsupported_idea_version',status:409});}});
+    assert.equal(doc.getElementById('save-status').textContent,HELD_SENTENCE);
+    assert.doesNotMatch(doc.getElementById('save-status').textContent,/unsupported_idea_version/);
+  },{stateRead:()=>{throw heldError();}});
+});
+
+test('notice shown once via textContent',async()=>{
+  const line='2 ideas were updated for this version (originals saved).';
+  await fixture(async({flow,doc})=>{
+    assert.equal(doc.getElementById('save-status').textContent,line);
+  },{stateRead:(ideaId,state,count)=>structuredClone(count===1?{...state,notice:line}:state)});
+  // Markup in a notice stays literal text: the page assigns textContent and never parses it.
+  await fixture(async({doc})=>{
+    assert.equal(doc.getElementById('save-status').textContent,'<img src=x onerror=alert(1)>');
+    assert.equal(doc.getElementById('save-status').innerHTML,undefined);
+  },{stateRead:(ideaId,state)=>({...structuredClone(state),notice:'<img src=x onerror=alert(1)>'})});
+  // A state without a notice (every later load) shows the ordinary line.
+  await fixture(async({doc})=>{
+    assert.equal(doc.getElementById('save-status').textContent,'Saved state loaded');
+  });
 });
 
 test('Any other first-load error keeps the existing sentence',async()=>{
@@ -531,10 +551,10 @@ test('Any other first-load error keeps the existing sentence',async()=>{
   }
 });
 
-test('Typed-pairing load of an older-workflow idea shows the same sentence; other codes keep their text',async()=>{
-  const cases=[['unsupported_idea_version','This idea was made with an older glitch-idea. Capture it again.'],
-    ['connection_lost','Connected, but saved state could not be loaded. Your answers remain.']];
-  for(const[code,sentence]of cases){
+test('Typed-pairing load of a held idea shows the same server sentence; other codes keep their text',async()=>{
+  const cases=[[heldError,HELD_SENTENCE],
+    [()=>Object.assign(new Error('connection_lost'),{code:'connection_lost'}),'Connected, but saved state could not be loaded. Your answers remain.']];
+  for(const[make,sentence]of cases){
     await fixture(async({flow,doc})=>{
       const form=doc.getElementById('connection').children.find(child=>child.tagName==='FORM');
       assert.ok(form,'the pairing form is shown');
@@ -542,6 +562,29 @@ test('Typed-pairing load of an older-workflow idea shows the same sentence; othe
       assert.equal(flow.state,null);
       assert.equal(doc.getElementById('save-status').textContent,sentence);
     },{sessionRead:()=>{throw Object.assign(new Error('x'),{status:401,code:'browser_unauthorized'});},
-      stateRead:()=>{throw Object.assign(new Error(code),{code});}});
+      stateRead:()=>{throw make();}});
   }
+});
+
+const IMPORTED_LINE='Imported idea: check its assessment and position, then accept it again.';
+const notices=doc=>walkAll(doc.getElementById('step-panel')).filter(n=>n.className==='notice').map(n=>n.textContent);
+
+test('an imported idea whose Assess needs review says why, in exactly one line, as plain text',async()=>{
+  await fixture(async({flow,doc})=>{
+    flow.state.steps.assess={status:'review-needed',evidence_id:'e',accepted_revision:1};
+    flow.state.review_cause='imported';flow.onChange();
+    const shown=notices(doc);
+    assert.ok(shown.includes(IMPORTED_LINE),shown.join(' | '));
+    assert.ok(!shown.some(text=>text.startsWith('Saved source inputs changed')),'the generic line is replaced, not repeated');
+  },{current:'assess'});
+});
+
+test('an Assess review with no import cause keeps the ordinary line',async()=>{
+  await fixture(async({flow,doc})=>{
+    flow.state.steps.assess={status:'review-needed',evidence_id:'e',accepted_revision:1};
+    flow.state.review_cause=null;flow.onChange();
+    const shown=notices(doc);
+    assert.ok(shown.includes('Saved source inputs changed. Check this decision and accept it again.'),shown.join(' | '));
+    assert.ok(!shown.includes(IMPORTED_LINE));
+  },{current:'assess'});
 });

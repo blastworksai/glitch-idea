@@ -4,6 +4,7 @@ import argparse
 import math
 import os
 import re
+import stat
 from pathlib import Path
 import sys
 
@@ -55,6 +56,15 @@ def parser():
             p.add_argument('--ref',required=True)
         if name=='record-execution':
             p.add_argument('--plan-id',required=True)
+    p=commands.add_parser('import-idea')
+    p.add_argument('--from',dest='source',required=True)
+    p.add_argument('--idea',dest='idea_id',required=True)
+    p.add_argument('--actor',required=True)
+    p.add_argument('--dry-run',action='store_true')
+    p=commands.add_parser('remove-idea')
+    p.add_argument('--idea',dest='idea_id',required=True)
+    p.add_argument('--actor',required=True)
+    p.add_argument('--confirm',action='store_true')
     for name in ('serve','session-open','browser-open'):
         p=commands.add_parser(name)
         p.launcher_errors=True
@@ -179,11 +189,39 @@ def _private_home():
     return Path.home()
 
 
+def _default_runtime_root():
+    """Home first; when its chain is not private, the OS runtime dir by itself. Returns (path, fallback or None)."""
+    home_default=_private_home()/'.local/state/glitch-idea'
+    if os.name!='posix': return home_default,None
+    try:
+        from idea_runtime import RuntimeError as OwnerError,_open_chain
+        probe=home_default
+        while not probe.exists() and probe!=probe.parent: probe=probe.parent
+        try: os.close(_open_chain(probe,create=False,private_leaf=probe==home_default))
+        except OwnerError as exc:
+            if exc.code!='runtime_not_private': return home_default,None
+        else: return home_default,None
+        xdg=os.environ.get('XDG_RUNTIME_DIR')
+        if not xdg or not os.path.isabs(xdg): return home_default,None
+        info=os.lstat(xdg)
+        if not (stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid() and stat.S_IMODE(info.st_mode)==0o700):
+            return home_default,None
+        target=Path(xdg)/'glitch-idea'
+        return target,{'from':str(home_default),'to':str(target),'reason':'home_not_private'}
+    except Exception:
+        return home_default,None
+
+
 def launcher_configuration(args):
     value,base,skill_dir,installed,argv,timeout=_configuration_source()
     store_value=args.store if args.store is not None else value.get('store_path',str(base/'ideas'))
     store=_launch_path(store_value,None if args.store is not None else base)
-    root_value=args.runtime_root if args.runtime_root is not None else value.get('runtime_root',str(_private_home()/'.local/state/glitch-idea'))
+    args.runtime_root_fallback=None
+    if args.runtime_root is not None: root_value=args.runtime_root
+    elif 'runtime_root' in value: root_value=value['runtime_root']
+    else:
+        default,args.runtime_root_fallback=_default_runtime_root()
+        root_value=str(default)
     runtime=_launch_path(root_value,absolute=True)
     require(runtime!=skill_dir and skill_dir not in runtime.parents and runtime not in skill_dir.parents,
             'Runtime must be outside the skill package','invalid_config')
@@ -261,13 +299,14 @@ def run_launcher(args):
         if args.command=='serve':
             try: serve(store,runtime,config)
             except KeyboardInterrupt: pass  # serve's finally drains owned work.
-            return dict(ok=True,code='stopped')
+            return dict(ok=True,code='stopped',**({'runtime_root_fallback':args.runtime_root_fallback} if args.runtime_root_fallback else {}))
         options=dict(binding_id=args.resume,selected_idea_id=args.idea_id,runtime_python=executable,
                      readiness_timeout=args.readiness_timeout)
         # Keep released open_session's five-second mutation timeout; probes remain
         # <=1s within readiness budget. Never retry an ambiguous NEW here.
         if args.command=='session-open': result=open_session(store,runtime,config,**options)
         else: result=open_browser_session(store,runtime,config,mode=args.browser,orcabinding=orcabinding,**options)
+        if args.runtime_root_fallback: result=dict(result,runtime_root_fallback=args.runtime_root_fallback)
         return dict(ok=True,**result)
     except (LaunchError,NativeError,RuntimeError,BridgeError,IdeaError) as exc:
         result=dict(ok=False,error=dict(code=exc.code,message=exc.code),
@@ -397,6 +436,9 @@ def main(argv=None):
     except (OSError,UnicodeError,ValueError,RecursionError) as exc:
         result=dict(ok=False,error=dict(code='launcher_failed' if launching else 'io_error',
                     message='launcher_failed' if launching else str(exc)))
+    fallback=result.get('runtime_root_fallback') if launching else None
+    if type(fallback) is dict:
+        sys.stderr.write('Runtime folder: the home folder is shared on this account, so Glitch idea uses %s for this login.\n'%fallback['to'])
     sys.stdout.buffer.write(encoded(result))
     return 0 if result['ok'] else 1
 

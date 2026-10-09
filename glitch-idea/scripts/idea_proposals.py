@@ -211,9 +211,17 @@ class Broker:
     def _answering(self, entry, current):
         # Only a delivered, unanswered request holds the lease, and only until its
         # bounded window closes; a completed or cancelled request holds nothing.
-        return any(record['state'] in ('pending', 'responding') and
-                   record['answer_until'] is not None and current < record['answer_until']
-                   for record in entry['requests'].values())
+        # A superseded request leaves its unspent window behind as 'composing_until': the agent
+        # was delivered that request and may still be composing, so the supersede cannot cut it short.
+        return current < entry.get('composing_until', 0) or any(
+            record['state'] in ('pending', 'responding') and
+            record['answer_until'] is not None and current < record['answer_until']
+            for record in entry['requests'].values())
+
+    def _called(self, entry):
+        """The agent made a call: the composing window ends and the heartbeat lease resumes from now."""
+        entry.pop('composing_until', None)
+        entry['heartbeat'] = self.clock()
 
     def _release(self, entry, record, reason):
         """Cancel one open request and return its response reservation and fill log bytes."""
@@ -400,6 +408,8 @@ class Broker:
             # Admission first: a refused request never costs the open conversation.
             _check(len(entry['requests']) < MAX_RECORDS and entry['bytes']-released+charge+LIMIT//4 <= LIMIT, 'request_capacity')
             for superseded in open_requests:
+                if superseded['answer_until'] is not None:
+                    entry['composing_until'] = max(entry.get('composing_until', 0), superseded['answer_until'])
                 self._release(entry, superseded, 'superseded')
             self.sequence += 1
             entry['requests'][envelope['request_id']] = dict(state='pending', correlation=correlation,
@@ -430,6 +440,7 @@ class Broker:
         charge = len(_bounded(fields))
         with self.condition:
             entry = self._entry(binding_id, generation, True)
+            self._called(entry)
             record = entry['requests'].get(payload['request_id'])
             _check(record is not None, 'request_not_found')
             _check(all(type(payload[k]) is type(record['correlation'][k]) and payload[k]==record['correlation'][k]
@@ -497,7 +508,7 @@ class Broker:
             entry = self._entry(binding_id, generation, True)
             _check(entry['session_id'] == session_id, 'wrong_session')
             _check(after <= self.sequence, 'invalid_cursor')
-            entry['heartbeat'] = self.clock()
+            self._called(entry)
             deadline = self.clock()+timeout
             while True:
                 _check(self._entry(binding_id, generation) is entry, 'wrong_generation')
@@ -521,6 +532,7 @@ class Broker:
         _integer(response['accepted_revision'], 1); _integer(response['draft_version'])
         with self.condition:
             entry = self._entry(binding_id, generation, True)
+            self._called(entry)
             record = entry['requests'].get(response['request_id'])
             _check(record is not None, 'request_not_found')
             _check(all(type(response[k]) is type(record['correlation'][k]) and response[k]==record['correlation'][k]

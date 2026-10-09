@@ -594,7 +594,7 @@ def open_browser_session(store_path,runtime_root,config=None,*,mode,orcabinding=
         # The new tab exists; now retire the page this binding recorded last time. A close failure
         # never fails the reconnect, and only the id recorded for THIS binding is ever closed.
         previous = _recorded_page(runtime_root,result['binding_id'])
-        _record_page(runtime_root,result['binding_id'],launched.browser_page_id)
+        _record_page(runtime_root,result['binding_id'],launched.browser_page_id,live=lambda: _live_bindings(store_path,runtime_root))
         if options.get('binding_id') is not None and previous is not None and previous != launched.browser_page_id:
             try:
                 close_browser_page(previous,orcabinding,runner=runner)
@@ -619,23 +619,61 @@ def _recorded_page(runtime_root,binding_id):
     return value if type(value) is str and 0 < len(value) <= 4096 and not any(ord(c) < 32 or ord(c) == 127 for c in value) else None
 
 
-def _record_page(runtime_root,binding_id,page_id):
+def _live_bindings(store_path,runtime_root):
+    # Binding ids still present in the session store (discard and auto-free delete the record); None = unknown, prune nothing.
+    try:
+        return {record['binding_id'] for record in Runtime(store_path,runtime_root).list_bindings()}
+    except Exception:
+        return None
+
+
+_PAGES_LOCK = '.orca-pages.lock'
+
+
+@contextmanager
+def _pages_lock(runtime_root):
+    # Exclusive owner-private lock around the page record's read-modify-write; yields False when no lock is available.
+    fd = None
+    try:
+        import fcntl
+        fd = os.open(str(Path(runtime_root)/_PAGES_LOCK),os.O_RDWR|os.O_CREAT|getattr(os,'O_NOFOLLOW',0)|getattr(os,'O_CLOEXEC',0),0o600)
+        fcntl.flock(fd,fcntl.LOCK_EX)
+    except (OSError,ImportError):
+        if fd is not None: os.close(fd)
+        fd = None
+    except BaseException:
+        if fd is not None: os.close(fd)  # an interrupted wait for the lock never leaks the descriptor
+        raise
+    try:
+        yield fd is not None
+    finally:
+        if fd is not None: os.close(fd)  # closing the descriptor releases the flock
+
+
+def _record_page(runtime_root,binding_id,page_id,live=None):
+    # live: None (prune nothing), a set of binding ids, or a callable returning either. A callable runs INSIDE the
+    # lock, after the file is read, so a binding another launch recorded before our write is always in the live set.
     path = Path(runtime_root)/_PAGES_FILE
     try:
-        try:
-            data = json.loads(path.read_text())
-            if not isinstance(data,dict): data = {}
-        except (OSError,ValueError):
-            data = {}
-        data[binding_id] = page_id
-        fd,name = tempfile.mkstemp(dir=str(path.parent),prefix='.orca-pages-')
-        try:
-            with os.fdopen(fd,'w') as stream: json.dump(data,stream)
-            os.chmod(name,0o600); os.replace(name,path)
-        except BaseException:
-            try: os.unlink(name)
-            except OSError: pass
-            raise
+        with _pages_lock(runtime_root) as locked:
+            try:
+                data = json.loads(path.read_text())
+                if not isinstance(data,dict): data = {}
+            except (OSError,ValueError):
+                data = {}
+            data[binding_id] = page_id
+            if callable(live): live = live() if locked else None  # no lock: write the entry, drop nothing
+            if live is not None:
+                # Entries of bindings no longer in the session store are dropped on this write.
+                data = {key:value for key,value in data.items() if key == binding_id or key in live}
+            fd,name = tempfile.mkstemp(dir=str(path.parent),prefix='.orca-pages-')
+            try:
+                with os.fdopen(fd,'w') as stream: json.dump(data,stream)
+                os.chmod(name,0o600); os.replace(name,path)
+            except BaseException:
+                try: os.unlink(name)
+                except OSError: pass
+                raise
     except OSError:
         pass  # Unrecorded page: a later reconnect simply has nothing to close.
 

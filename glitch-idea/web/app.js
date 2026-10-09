@@ -238,6 +238,28 @@ export function startApp(api = new IdeaApi()) {
   let superseded = false;
   let pingTimer = null;
   let pingFailures = 0;
+  let stranded = false;
+  // Three connection_lost requests in a row within 10 s mean the service is gone; any success resets the count, the first failure never acts.
+  const lostAt = [];
+  for (const name of ['state', 'write']) {
+    const original = api[name];
+    if (typeof original !== 'function') continue;
+    api[name] = async (...args) => {
+      try { const result = await original.apply(api, args); lostAt.length = 0; return result; }
+      catch (error) {
+        if (error?.code !== 'connection_lost') lostAt.length = 0;
+        else if (!stranded && !flow.disposed) {
+          const now = Date.now();
+          // Requests in flight together fail together on one blip: a failure counts only when at least 500 ms separate it from the last one.
+          if (lostAt.length && now - lostAt[lostAt.length - 1] < 500) throw error;
+          lostAt.push(now);
+          while (lostAt.length && now - lostAt[0] > 10000) lostAt.shift();
+          if (lostAt.length >= 3) showStranded();
+        }
+        throw error;
+      }
+    };
+  }
 
   const pingWanted = () => connected && !superseded && !flow.disposed && flow.dirty.size > 0 && document.hidden !== true;
   function pingFailed(error) {
@@ -526,6 +548,7 @@ export function startApp(api = new IdeaApi()) {
   }
 
   function render() {
+    if (stranded) return;
     if (superseded || (flow.refreshUnauthorized && [flow.error?.code, flow.proposalError?.code].includes('session_superseded'))) { showSuperseded(); return; }
     if (connected && flow.refreshUnauthorized) { showPairing('browser_unauthorized'); return; }
     if (api.bindingId) rememberSelection(api.bindingId, flow.state === null ? initialIdeaId : flow.state.idea_id);
@@ -646,7 +669,7 @@ export function startApp(api = new IdeaApi()) {
           const agentNotice = element('p', agentLong, 'notice'); agentNotice.id = 'agent-notice'; agentNotice.setAttribute('role', 'status'); body.append(agentNotice);
         }
         if (flow.status(step.key) === 'saved') body.append(element('p', step.key === 'review' ? 'Review is derived from the verified current immutable planning packet.' : 'Accepted at revision ' + flow.state.steps[step.key].accepted_revision + '. Changes require acceptance again and mark dependent decisions for review.', 'notice'));
-        if (flow.status(step.key) === 'review-needed') body.append(element('p', step.key === 'review' ? 'Saved source inputs changed. Review the prerequisites and explicitly generate a current planning prompt.' : 'Saved source inputs changed. Check this decision and accept it again.', 'notice'));
+        if (flow.status(step.key) === 'review-needed') body.append(element('p', step.key === 'assess' && flow.state?.review_cause === 'imported' ? 'Imported idea: check its assessment and position, then accept it again.' : step.key === 'review' ? 'Saved source inputs changed. Review the prerequisites and explicitly generate a current planning prompt.' : 'Saved source inputs changed. Check this decision and accept it again.', 'notice'));
         errorPanel(body);
         const component = components.get(step.key);
         if (component) component({body, foot, flow, api, element, button, field, connected, isConnected: () => connected, edited, handle,
@@ -691,25 +714,40 @@ export function startApp(api = new IdeaApi()) {
     }
   }
 
-  // An idea made with the older workflow gets the owner's sentence on every load path (idea_workflow.py UNSUPPORTED_VERSION_MESSAGE); no code or trace is shown.
-  const loadFailureMessage = (error, fallback) => error?.code === 'unsupported_idea_version' ?
-    'This idea was made with an older glitch-idea. Capture it again.' : fallback;
+  // An idea the migration could not update gets the server's own sentence (idea_workflow.unsupported_version_message); no code or trace is shown.
+  const loadFailureMessage = (error, fallback) => error?.code === 'unsupported_idea_version' && typeof error.data?.message === 'string' && error.data.message ?
+    error.data.message : fallback;
 
   // A superseded session always gets the replaced sentence, live this load or reloaded after a resume (owner, 07/10).
   const unauthorized = code => { if (code === 'session_superseded') showSuperseded(); else showPairing(code); };
 
   // A newer tab replaced this one: one sentence, no pairing form, no polling.
   function showSuperseded() {
+    showDeadTab('This tab was replaced by a newer one. Switch to the newest Glitch idea tab.', {link: true});
+  }
+
+  // The service this tab talked to is gone (restarted on a new port): the same panel, but the page's own address is the dead port, so no link.
+  function showStranded() {
+    stranded = true;
+    showDeadTab('This tab lost its Glitch idea service. Ask your terminal to reconnect (it runs session-open --resume) and use the new tab it opens.', {link: false});
+    byId('save-status').textContent = 'Disconnected';
+  }
+
+  // One dead-tab panel for both cases: a sentence, no pairing form, no polling, nothing editable behind it.
+  function showDeadTab(text, {link: withLink}) {
     superseded = true;
     connected = false;
     flow.stopAgentRefresh();
     syncPing();
     api.csrf = null;
+    // Nothing editable behind the dead tab: the step area, its rail and the APIV strip are removed, not dimmed.
+    for (const part of [byId('columns'), byId('step-rail'), document.querySelector('.g-apiv')]) if (part) part.hidden = true;
     const box = byId('connection');
     box.hidden = false;
     box.className = 'connection g-card';
-    const sentence = element('p', 'This tab was replaced by a newer one. Switch to the newest Glitch idea tab.', 'error-box');
+    const sentence = element('p', text, 'error-box');
     sentence.setAttribute('role', 'alert');
+    if (!withLink) { box.replaceChildren(sentence); return; }
     const warning = element('p', 'ONLY CLICK THIS IF YOU LOST THE TAB', 'superseded-warning');
     const link = document.createElement('a');
     link.textContent = 'Open Glitch idea in a new tab';
@@ -809,7 +847,8 @@ export function startApp(api = new IdeaApi()) {
     flow.startAgentRefresh({active: () => connected && document.hidden !== true});
     byId('connection').hidden = true;
     if (!flow.pending) flow.error = null; // A pending write keeps its error and Check door.
-    flow.message = 'Saved state loaded';
+    // The plain migration line arrives once, in the first state after an update; it takes the save-status line for this load (textContent only).
+    flow.message = typeof state?.notice === 'string' && state.notice ? state.notice : 'Saved state loaded';
     render();
   }
 
