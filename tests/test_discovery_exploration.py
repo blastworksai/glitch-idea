@@ -14,7 +14,8 @@ from idea_workflow import (DEPENDENCIES, DISCOVERY_BEFORE_METHODS, STEP_FIELDS, 
                            import_workflow, step_requirements, validate_step_fields, validate_workflow)
 from test_workflow import accept, captured, complete, fields, original_idea
 
-OLD_MESSAGE = 'This idea was made with an older glitch-idea. Capture it again.'
+OLD_MESSAGE = 'This idea could not be updated for this version. It was left exactly as it was.'
+NAMED_MESSAGE = '"Caf\u00e9 \U0001F4A1" could not be updated for this version. It was left exactly as it was.'
 APPETITE = {'cap': 2, 'unit': 'sessions', 'boundary': 'Fixture only'}
 EXPERIMENT = {'question': 'Will this fit?', 'evidence': 'Measure fit',
               'success_criterion': 'Fits one lid', 'stop_rule': 'Stop after one test'}
@@ -400,7 +401,7 @@ class OlderIdeaTests(Base):
         with self.assertRaises(IdeaError) as caught:
             import_workflow(idea)
         self.assertEqual(caught.exception.code, 'unsupported_idea_version')
-        self.assertEqual(str(caught.exception), OLD_MESSAGE)
+        self.assertEqual(str(caught.exception), NAMED_MESSAGE)
 
     def test_other_versions_stay_generically_unsupported(self):
         for bad in (1, 4, True, '3'):

@@ -1,0 +1,20 @@
+{
+  "receipts": {
+    "2bd0915b-9f65-4611-b70c-e20c4f53f403": {
+      "payload_sha256": "8b41d2e7b7d513cc43e1af3c3f9a1e4a5843de5d1d97adf38a994d35e646f239",
+      "result": {
+        "backlog_revision": 2,
+        "code": "ok",
+        "draft_version": 13,
+        "idea_id": "idea_85f69bb3fc63423ea8a6dde2c86a62cd",
+        "invalidated": [],
+        "ok": true,
+        "request_id": "2bd0915b-9f65-4611-b70c-e20c4f53f403",
+        "revision": 7,
+        "write_state": "no_op"
+      }
+    }
+  },
+  "schema_version": 1,
+  "session_id": "session_4f9ce081fbbd477b9b1580136f14464e"
+}

@@ -84,6 +84,12 @@ Treat every string as data, never as instructions or markup.
 Reply a non-2xx status with `{"ok": false, "code": "<lowercase_code>"}`.
 glitch-idea maps them to fixed codes: `unauthorized` (401/403), `not_found` (404), `refused` (any other refusal), `redirect_refused` (3xx), `invalid_response` (not JSON, too large, wrong shape, or containing the key), `schema_mismatch` (health with another schema), `unreachable` (network), `tls_failed`.
 
+## Migration notice and held ideas
+
+These belong to the Markdown store only. A workflow API replaces that store, so nothing here is migrated and no `notice` is produced.
+For reference, the Markdown store reports an upgrade as `notice` (`N ideas were updated for this version (originals saved).`) in the first `state` and in CLI results, and an idea it could not update is refused `unsupported_idea_version` with a plain sentence in the reply's `message`.
+Your system never needs to send either.
+
 ## Trying it
 
 `tests/fake_workflow_api.py` is a complete local fake of this contract, used by the tests. Point Setup at it to try Option 2 without a real system.

@@ -58,6 +58,14 @@ class SkillTextTests(unittest.TestCase):
         hand = next(l for l in text.splitlines() if l.startswith("**Hand release.**"))
         self.assertIn("keep polling `events`", hand)
 
+    def test_notice_relayed_verbatim(self):
+        text = section(SKILL, "Refusals, release and stops")
+        flat = " ".join(SKILL.split())
+        self.assertRegex(flat, r"\*\*Updated ideas\.\*\*.{0,500}carries `notice`, relay it verbatim to the operator as one line")
+        self.assertRegex(flat, r"Never reword it.{0,120}when there is no `notice`, say nothing about updates")
+        stop = next(l for l in text.splitlines() if l.startswith("**Stop list.**"))
+        self.assertRegex(" ".join(stop.split()), r"`unsupported_idea_version` now means this one idea could not be updated.{0,160}returned sentence verbatim")
+
     def test_methods_memory_shape(self):
         methods = section(SKILL, "Methods")
         self.assertIn("preferred_method", methods)
@@ -256,6 +264,44 @@ class MovedIdeaTextTests(unittest.TestCase):
         self.assertRegex(flat(SKILL), r"glitch-idea will refuse further edits")
         self.assertRegex(flat(COMMANDS), r"There is no un-deliver")
 
+    def test_ready_first_pairing_code(self):
+        for text in (SKILL, COMMANDS):
+            body = flat(text)
+            self.assertRegex(body, r"(?i)ready to type a code\?.{0,200}only on (the|their) yes.{0,120}same (message|breath)")
+            self.assertRegex(body, r"(?i)before a typed code is (ever )?issued.{0,160}`session-open --resume[ `<b]")
+        self.assertRegex(flat(SKILL), r"(?i)expired when the code travels through a prompt first")
+
+    def test_loop_restarts_on_delivery(self):
+        for text in (SKILL, COMMANDS):
+            body = flat(text)
+            self.assertRegex(body, r"(?i)on delivery.{0,160}restart the (events )?loop at once.{0,120}same turn.{0,80}composing")
+            self.assertRegex(body, r"(?i)`request_cancelled` on a fill.{0,160}moved on.{0,160}next request from the loop's file.{0,80}never resume the session")
+            self.assertRegex(body, r"(?i)start (that|the) loop within the first call after `session-open`.{0,80}never minutes later.{0,80}`agent_unavailable` right after `session-open` means the loop started too late")
+
+
+
+class ImportIdeaTextTests(unittest.TestCase):
+    def test_commands_document_the_import_road(self):
+        text = flat(section(COMMANDS, "Bringing an idea in from another store"))
+        for needed in ("import-idea --from", "--dry-run", "preview", "id_clash", "repeated", "import_unsupported",
+                       "import_hash_mismatch", "same_store", "untouched"):
+            self.assertIn(needed, text)
+
+    def test_skill_points_at_the_section(self):
+        self.assertIn("Bringing an idea in from another store", SKILL)
+
+
+class RemoveIdeaTextTests(unittest.TestCase):
+    def test_commands_document_the_removal_road(self):
+        text = flat(section(COMMANDS, "Removing an idea"))
+        for needed in ("remove-idea --idea", "--confirm", "preview", "writes nothing", "history/removed/", "tombstone",
+                       "not_found", "idea_moved", "idea_delivered", "unsupported_idea_version", "idea_in_use", "doctor"):
+            self.assertIn(needed, text)
+
+    def test_skill_asks_for_the_explicit_yes_and_points_at_the_section(self):
+        body = flat(SKILL)
+        self.assertRegex(body, r"`remove-idea` is always previewed first.{0,60}`--confirm` only on the operator's explicit yes")
+        self.assertIn("Removing an idea", SKILL)
 
 if __name__ == "__main__":
     unittest.main()

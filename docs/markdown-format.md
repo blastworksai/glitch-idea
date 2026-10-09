@@ -92,7 +92,7 @@ are optional. Nonfinite scores and a score inconsistent with the validator are
 refused. An unknown partial score remains null; Kano is categorical. Current
 workflow uses the separately validated v3 schema from `idea_workflow.py` (eight steps: capture, priorities, method, discovery, exploration, visualize, assess, review, in the order that module derives),
 including its draft version, draft fields, accepted receipts and dependencies.
-Legacy ideas omit workflow; reading them invents no acceptance. An idea saved with an older workflow is refused with `unsupported_idea_version` and is captured again, never migrated.
+Legacy ideas omit workflow; reading them invents no acceptance. An idea saved with an older workflow is brought up to the current version when the store is opened (see Migration on upgrade below); one the chain cannot update is held and refused `unsupported_idea_version`.
 
 Revision `snapshot` has exactly the existing `revision`, `shape`, `ratings`,
 `assessments`, `actor`, `action`, `timestamp`. A workflow snapshot additionally
@@ -315,3 +315,18 @@ may have changed or moved, so it is not a reconstruction source. Restore exact
 bytes from a verified backup. Differing existing evidence is never overwritten.
 This supersedes v1 JSON's ability to regenerate frozen plans from duplicate
 embedded content.
+
+## Migration on upgrade
+
+Two versions live in an idea file: the file format `schema_version: 2` (front matter of `idea_<id>.md`, `IDEAS.md` and `history/**`), and the workflow `idea.workflow.schema_version` (currently 3).
+`idea_chain.py` holds the registry of steps, one per workflow version (`IDEA_STEPS`) and an index table that is empty in this release (`INDEX_STEPS`).
+Opening a store runs the chain once, under the store lock, for every idea whose workflow version is below the current one; a second open finds nothing to do and writes nothing.
+
+Each idea is migrated alone, in one publish.
+The original detail file is saved byte for byte as `history/<id>/migrations/w<from>-<sha256>.md`, the idea gains a new current revision, and a link `{from_version, to_version, path, sha256, revision, actor, timestamp}` is appended to `extensions.glitch_idea_migrations`.
+The saved copy, the link and the hash in the file name must all agree with the original bytes on every load; a copy that is altered or unlinked is `corrupt_store`.
+Historical snapshots in `history/<id>/rN.md` stay as written and are read as history; only the current revision and every write use the current version.
+
+An idea the chain cannot update (a step refuses it, a publish conflicts, it is moved, delivered or archived) is held: its files are left exactly as they were, the rest of the store works, `show` of it refuses `unsupported_idea_version` with a plain sentence naming it by its first words, and `doctor` lists it.
+When a run updated ideas it reports one line: `N ideas were updated for this version (originals saved).`, or `1 idea was updated for this version (original saved).` for one.
+The CLI puts that line in the JSON result as `notice` and once on stderr; the page shows it in the save-status line on that load.

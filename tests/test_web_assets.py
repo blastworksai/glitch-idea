@@ -377,6 +377,45 @@ def private_term_violations(path):
     return [t for t in PRIVATE_TERMS if re.search(r"\b" + re.escape(t) if t[0] != "/" else re.escape(t), low)]
 
 
+# SKILLS-59: the owner-private terms (tests/private-terms.txt) are also refused in tests/ and in
+# the published top-level files, not only in the package. Text vs binary is decided by extension,
+# deterministically: a file is scanned if its suffix is in PUBLISHED_TEXT_EXT (or it is a known
+# extensionless text file such as LICENSE); anything else (png, zip, woff2, ...) is skipped.
+# Excluded: the term list itself, __pycache__, STATE.md and the other git-ignored files
+# (kept off GitHub), and the git-ignored evidence/ideas folders (never walked: only the named
+# top-level files, tests/ and docs/ are read). Only LOCAL_TERMS apply here: "/opt/" and "/home/"
+# occur legitimately in tests, and "notice-only:" terms are for the notice and provenance files alone.
+PUBLISHED_TEXT_EXT = PACKAGE_TEXT_EXT | {".mjs", ".cjs", ".ts", ".toml", ".cfg", ".ini", ".sh", ".example", ".csv"}
+PUBLISHED_TOP_LEVEL = ["README.md", "LICENSE", "install.py", "capability.json", "config.example.json"]
+PUBLISHED_TEXT_NAMES = {"LICENSE"}
+
+
+def published_text_files(repo=REPO):
+    """Every published text file outside the package: tests/ (minus the term list and
+    __pycache__), docs/, and the named top-level files that exist."""
+    repo = Path(repo)
+    files = [repo / name for name in PUBLISHED_TOP_LEVEL if (repo / name).is_file()]
+    for sub in ("tests", "docs"):
+        files += [p for p in (repo / sub).rglob("*") if p.is_file() and "__pycache__" not in p.parts]
+    out = []
+    for p in sorted(set(files)):
+        if p.name in ("private-terms.txt", "STATE.md"):
+            continue
+        if p.suffix.lower() in PUBLISHED_TEXT_EXT or p.name in PUBLISHED_TEXT_NAMES:
+            out.append(p)
+    return out
+
+
+def published_private_term_violations(repo=REPO):
+    out = []
+    for p in published_text_files(repo):
+        low = p.read_text(encoding="utf-8", errors="replace").lower()
+        hits = [t for t in LOCAL_TERMS if re.search(r"\b" + re.escape(t), low)]
+        if hits:
+            out.append(f"{p.relative_to(repo).as_posix()}: {len(hits)} private term(s)")
+    return out
+
+
 class WebAssetGuard(unittest.TestCase):
     def test_a_notice_lists_exactly_the_web_files(self):
         self.assertTrue((PACKAGE / "web" / "assets" / "NOTICE.md").is_file())
@@ -412,6 +451,9 @@ class WebAssetGuard(unittest.TestCase):
     def test_g_public_docs_carry_no_private_names(self):
         for path in (PACKAGE / "web" / "assets" / "NOTICE.md", PROVENANCE):
             self.assertEqual(private_term_violations(path), [], str(path))
+
+    def test_i_tests_and_top_level_files_carry_no_private_terms(self):
+        self.assertEqual(published_private_term_violations(), [])
 
 
 

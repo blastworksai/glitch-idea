@@ -7,8 +7,10 @@ files until IDEAS.md is published last. Not qualified on network/synced stores.
 
 Journal is transient recovery state, not domain authority. No rollback over new
 state. No arbitrary delete API: the only removable user data are the migrated
-legacy state.json and one idea detail file moved out of the store, which needs
-its own immutable pointer in the same transaction. _checkpoint is solely an
+legacy state.json, one idea detail file moved out of the store (which needs
+its own immutable pointer in the same transaction), and the files of one idea
+removed for good (which need that idea's immutable removal tombstone and the
+index in the same transaction). _checkpoint is solely an
 injected test callback.
 """
 import os
@@ -18,7 +20,7 @@ import stat
 import uuid
 
 from idea_domain import IdeaError, MAX_INPUT, MAX_STATE, decode, digest, encoded, require
-from idea_platform import (WriteResult, atomic_write, sync_directory,
+from idea_platform import (WriteResult, make_directory, SHARED_DIR_MODE, atomic_write, sync_directory, is_shared_root,
                            FILE_AND_DIRECTORY_SYNCED, FILE_SYNCED_PROCESS_RECOVERY,
                            UNCERTAIN)
 
@@ -31,9 +33,10 @@ FROZEN = 'migration-recovery/v1-state.json'
 RECEIPT = 'migration-recovery/receipt.json'
 _ID = r'idea_[0-9a-f]{32}'
 _IDEA_DETAIL = re.compile(r'(' + _ID + r')\.md')
-_DELETIONS = ('freeze-delete', 'move-out')
+_DELETIONS = ('freeze-delete', 'move-out', 'remove')
+_TOMBSTONE = re.compile(r'history/removed/' + _ID + r'(?:\.[2-9]|\.[1-9][0-9]+)?\.md')
 _TX = re.compile(r'txn_[0-9a-f]{32}')
-_ALLOWED = re.compile(r'(?:IDEAS\.md|' + _ID + r'\.md|history/(?:' + _ID + r'/(?:r[1-9][0-9]*|metadata/[0-9a-f]{64}|moved|delivered)|backlog/r[1-9][0-9]*)\.md|plan-evidence/plan_[0-9a-f]{32}\.md|archive/' + _ID + r'/r[1-9][0-9]*\.json|session-recovery/session_[0-9a-f]{32}\.json|assets/evidence/[0-9a-f]{64}\.md)')
+_ALLOWED = re.compile(r'(?:IDEAS\.md|' + _ID + r'\.md|history/(?:' + _ID + r'/(?:r[1-9][0-9]*|metadata/[0-9a-f]{64}|migrations/w[1-9][0-9]*-[0-9a-f]{64}|moved|delivered)|backlog/r[1-9][0-9]*|removed/' + _ID + r'(?:\.[2-9]|\.[1-9][0-9]+)?)\.md|plan-evidence/plan_[0-9a-f]{32}\.md|archive/' + _ID + r'/r[1-9][0-9]*\.json|session-recovery/session_[0-9a-f]{32}\.json|assets/evidence/[0-9a-f]{64}\.md)')
 
 
 def _conflict(message, **details):
@@ -140,8 +143,28 @@ def _signal(callback, phase):
         callback(phase)
 
 
-def _write(path, raw, *, immutable=False):
-    result = atomic_write(path, raw, immutable=immutable)
+def _heal_directory(path, shared):
+    """Bring a journal folder this process owns to its right mode (2770 shared, 0700 otherwise), through a descriptor that never follows a link.
+
+    A crash can leave a folder at a looser mode; the next publish repairs it. A folder owned by someone else, a symlink or a missing path is left alone.
+    """
+    if os.name != 'posix':
+        return
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+    except OSError:
+        return
+    try:
+        info = os.fstat(descriptor)
+        wanted = SHARED_DIR_MODE if shared else 0o700
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) != wanted:
+            os.fchmod(descriptor, wanted)
+    finally:
+        os.close(descriptor)
+
+
+def _write(path, raw, *, immutable=False, seal=False):
+    result = atomic_write(path, raw, immutable=immutable, seal=True) if seal else atomic_write(path, raw, immutable=immutable)
     if result.error is not None:
         raise result.error
     return result.durability
@@ -161,14 +184,17 @@ def _validate_manifest(value, tx):
     _check(type(entries) is list and 0 < len(entries) <= MAX_ENTRIES, 'Transaction entry count exceeds limit')
     paths = set()
     total = 0
-    moves = []
+    moves, removes = [], []
     for n, entry in enumerate(entries):
         _check(type(entry) is dict and set(entry) == {'path','before','after','before_size','after_size','operation','immutable'}, 'Unexpected transaction entry schema')
         path = entry['path']
         legacy = value['migration'] and path == 'state.json' and entry['operation'] == 'freeze-delete'
         move = not value['migration'] and entry['operation'] == 'move-out' and type(path) is str and _IDEA_DETAIL.fullmatch(path) is not None
-        deletion = legacy or move
+        remove = not value['migration'] and entry['operation'] == 'remove' and type(path) is str and path != 'IDEAS.md' and _allowed(path)
+        deletion = legacy or move or remove
         _check((_allowed(path, value['migration']) and entry['operation'] == 'write') or deletion, 'Unknown transaction target path')
+        if remove:
+            removes.append(path)
         if move:
             moves.append(path)
         _check(path not in paths, 'Duplicate transaction target')
@@ -180,7 +206,7 @@ def _validate_manifest(value, tx):
             total += size
         _check(type(entry['immutable']) is bool and entry['immutable'] == (not _mutable(path) and not deletion), 'Unexpected mutable/immutable policy')
         if deletion:
-            _check(entry['before'] is not None and entry['after'] is None, 'Invalid legacy freeze-delete' if legacy else 'Invalid move-out')
+            _check(entry['before'] is not None and entry['after'] is None, 'Invalid legacy freeze-delete' if legacy else 'Invalid move-out' if move else 'Invalid removal')
         else:
             _check(entry['after'] is not None, 'Missing after-image hash')
             _check(not entry['immutable'] or entry['before'] in (None, entry['after']), 'Immutable evidence cannot be changed')
@@ -191,6 +217,9 @@ def _validate_manifest(value, tx):
         witness = next((e for e in entries if e['path'] == pointer), None)
         _check(witness is not None and witness['operation'] == 'write' and witness['after'] is not None and 'IDEAS.md' in paths,
                'move-out requires the idea pointer and the index in the same transaction: ' + path)
+    if removes:
+        _check(not moves and _tombstone_witness(entries, paths) is not None and 'IDEAS.md' in paths,
+               'removal requires its tombstone and the index in the same transaction')
     if value['migration']:
         lookup = {entry['path']:entry for entry in entries}
         _check({'state.json', FROZEN, RECEIPT, 'IDEAS.md'} <= paths, 'Migration requires frozen source, receipt, index and exact legacy freeze-delete')
@@ -198,6 +227,11 @@ def _validate_manifest(value, tx):
     expected_order = sorted(entries, key=lambda entry: (2 if entry['operation'] in _DELETIONS else 1 if entry['path'] == 'IDEAS.md' else 0, entry['path']))
     _check(entries == expected_order, 'Transaction publication order is invalid')
     return value
+
+
+def _tombstone_witness(entries, paths):
+    found = [e for e in entries if _TOMBSTONE.fullmatch(e['path']) and e['operation'] == 'write' and e['after'] is not None]
+    return found[0] if len(found) == 1 and len([p for p in paths if _TOMBSTONE.fullmatch(p)]) == 1 else None
 
 
 def _check_pointer_publish(raw, path, before):
@@ -294,7 +328,11 @@ def _roll_forward(root, tx, value, callback):
                     # again at the destructive boundary; no guessed rollback.
                     lookup = {e['path']:e for e in value['entries']}
                     move = entry['operation'] == 'move-out'
-                    for key in ((_pointer_path(entry['path']), 'IDEAS.md') if move else (FROZEN, RECEIPT, 'IDEAS.md')):
+                    if entry['operation'] == 'remove':
+                        guards = (_tombstone_witness(value['entries'], set(lookup))['path'], 'IDEAS.md')
+                    else:
+                        guards = (_pointer_path(entry['path']), 'IDEAS.md') if move else (FROZEN, RECEIPT, 'IDEAS.md')
+                    for key in guards:
                         actual = _read(_safe(root, key))
                         _check(actual is not None and digest(actual) == lookup[key]['after'], 'Migration prerequisite changed: ' + key)
                         if move and key != 'IDEAS.md':
@@ -304,7 +342,7 @@ def _roll_forward(root, tx, value, callback):
                 else:
                     staged = _read(_staged_path(root, tx, n, 'after'))
                     _check(staged is not None and digest(staged) == entry['after'], 'After-image changed during publication')
-                    grade = _grade(grade, _write(target, staged, immutable=entry['immutable']))
+                    grade = _grade(grade, _write(target, staged, immutable=entry['immutable'], seal=_TOMBSTONE.fullmatch(entry['path']) is not None))
                 _signal(callback, 'published:' + entry['path'])
         # Verify targets and all recovery bytes before recording completion.
         _check_contents(root, tx, value, require_stages=True)
@@ -386,7 +424,7 @@ def recover(root, *, _checkpoint=None):
         return WriteResult('uncertain' if committed else 'not-published', UNCERTAIN if committed else grade, exc)
 
 
-def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None, move_out=None, _checkpoint=None):
+def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None, move_out=None, removals=None, _checkpoint=None):
     """Stage and publish complete after-images under caller-held store lock.
 
     expected supplies every changed path's prior SHA-256 or None if absent.
@@ -394,7 +432,9 @@ def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None,
     state bytes + receipt + IDEAS.md, and an expected legacy source digest.
     state.json is removable only through migration. move_out names one idea
     detail file to remove after its pointer (a change) and IDEAS.md are
-    published; the pointer must record that file's exact SHA-256.
+    published; the pointer must record that file's exact SHA-256. removals
+    names the files of one removed idea; the same call must write that idea's
+    tombstone and IDEAS.md, which are published first.
     On a prepared I/O error, publication is uncertain: reread/recover, never
     assume no change or retry blindly. Callback exceptions are test-only.
     """
@@ -408,6 +448,11 @@ def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None,
     require(freeze_legacy or legacy_sha256 is None, 'Legacy hash is only accepted for migration')
     require(move_out is None or (not freeze_legacy and type(move_out) is str and _IDEA_DETAIL.fullmatch(move_out) is not None
                                  and move_out not in changes and _pointer_path(move_out) in changes), 'move-out needs an idea detail path and its pointer, never with migration')
+    require(removals is None or (not freeze_legacy and move_out is None and type(removals) in (list, tuple) and 0 < len(removals) < MAX_ENTRIES
+                                 and len(set(removals)) == len(removals) and not set(removals) & set(changes)
+                                 and 'IDEAS.md' in changes and sum(1 for p in changes if _TOMBSTONE.fullmatch(p)) == 1
+                                 and all(type(p) is str and p != 'IDEAS.md' and _allowed(p) for p in removals)),
+            'removals need distinct reserved paths, one tombstone and the index, never with migration or move-out')
     entries, copies = [], {}
     for path, after in changes.items():
         require(_allowed(path, freeze_legacy), 'Unknown transaction target: ' + str(path))
@@ -433,6 +478,11 @@ def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None,
         _check_pointer_publish(changes[_pointer_path(move_out)], move_out, digest(raw))
         entries.append(dict(path=move_out,before=digest(raw),after=None,before_size=len(raw),after_size=0,operation='move-out',immutable=False))
         copies[move_out] = (raw, None)
+    for path in removals or ():
+        raw = _read(_safe(root, path), _limit(path))
+        require(raw is not None, 'removal source is missing: ' + path, 'save_conflict')
+        entries.append(dict(path=path,before=digest(raw),after=None,before_size=len(raw),after_size=0,operation='remove',immutable=False))
+        copies[path] = (raw, None)
     entries.sort(key=lambda entry: (2 if entry['operation'] in _DELETIONS else 1 if entry['path'] == 'IDEAS.md' else 0, entry['path']))
     tx = 'txn_' + uuid.uuid4().hex
     value = dict(schema_version=1,transaction_id=tx,phase='staging',migration=freeze_legacy,entries=entries)
@@ -442,7 +492,11 @@ def publish(root, changes, expected, *, freeze_legacy=False, legacy_sha256=None,
     grade, prepared = None, False
     try:
         folder = _safe(root, JOURNAL + '/' + tx, directory=True)
-        folder.mkdir(parents=True)
+        shared = is_shared_root(root)
+        # Parent first, each new folder created at its final mode (never other-reachable, even for an instant).
+        for directory in (folder.parent, folder):
+            if not make_directory(directory, shared):
+                _heal_directory(directory, shared)
         grade = _grade(grade, sync_directory(root))
         grade = _grade(grade, sync_directory(folder.parent))
         # Use a different local callback name from the helper to avoid shadowing.

@@ -11,6 +11,7 @@ import errno
 import math
 import os
 from pathlib import Path
+import stat
 import tempfile
 import threading
 import time
@@ -42,6 +43,73 @@ def _after_fork():
 
 if hasattr(os, 'register_at_fork'):
     os.register_at_fork(after_in_child=_after_fork)
+
+
+SHARED_FILE_MODE = 0o660
+SHARED_DIR_MODE = 0o2770
+SHARED_SEAL_MODE = 0o440
+
+
+def is_shared_root(root):
+    """A store root that is setgid and group-writable is a shared-group store.
+
+    Measured on each call, so it is deterministic and follows the root's own mode.
+    Every other root stays owner-only.
+    """
+    if _WINDOWS or root is None:
+        return False
+    try:
+        mode = os.stat(root).st_mode
+    except OSError:
+        return False
+    return stat.S_ISDIR(mode) and bool(mode & stat.S_ISGID) and bool(mode & stat.S_IWGRP)
+
+
+def store_root_of(path):
+    """The nearest ancestor holding the store's .lock, or None."""
+    for ancestor in Path(path).absolute().parents:
+        if (ancestor / '.lock').is_file():
+            return ancestor
+    return None
+
+
+def share_file(descriptor, shared):
+    """fchmod a file we own to 0660 on its descriptor when the store is shared."""
+    if shared and not _WINDOWS and os.fstat(descriptor).st_uid == os.geteuid():
+        os.fchmod(descriptor, SHARED_FILE_MODE)
+
+
+def share_directory(path, shared):
+    """fchmod a directory we own to 2770 when the store is shared, through a descriptor that never follows a link.
+
+    A symlink at the path, a path that is gone, or a directory owned by someone else is left exactly as it is.
+    """
+    if not shared or _WINDOWS:
+        return
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0))
+    except OSError:
+        return
+    try:
+        info = os.fstat(descriptor)
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) != SHARED_DIR_MODE:
+            os.fchmod(descriptor, SHARED_DIR_MODE)
+    finally:
+        os.close(descriptor)
+
+
+def make_directory(path, shared):
+    """Create one directory, owner-only (0700), or in a shared store group-only (2770 before the umask); never other-reachable.
+
+    An existing entry is left alone (the caller decides what it is). The final mode is set on a descriptor.
+    """
+    mode = SHARED_DIR_MODE if shared and not _WINDOWS else 0o700
+    try:
+        os.mkdir(path, mode)
+    except FileExistsError:
+        return False
+    share_directory(path, shared)
+    return True
 
 
 @dataclass(frozen=True)
@@ -126,6 +194,7 @@ def store_lock(path, timeout=5.0):
         raise IdeaError('store_busy', 'Timed out waiting for store lock')
     try:
         with path.open('a+b') as stream:
+            share_file(stream.fileno(), is_shared_root(path.parent))
             while True:
                 try:
                     _acquire(stream)
@@ -146,12 +215,14 @@ def store_lock(path, timeout=5.0):
         mutex.release()
 
 
-def atomic_write(path, raw, immutable=False):
+def atomic_write(path, raw, immutable=False, root=None, seal=False):
     """Fsync a complete sibling then replace, or exclusively hard-link it.
 
     Immutable collision/unsupported hard links fail without replacing anything.
     No fallback writes a partially visible final file. Cleanup errors are also
     explicit. The result requires callers to inspect or call raise_for_error().
+    With seal=True the staged file is already read-only (0440 shared, 0400 otherwise) before it is linked,
+    so the published inode is never writable.
     """
     if not isinstance(raw, bytes) or type(immutable) is not bool:
         raise TypeError('atomic_write requires bytes and a boolean immutable flag')
@@ -166,9 +237,16 @@ def atomic_write(path, raw, immutable=False):
         while not ancestor.exists():
             new_directories.append(ancestor)
             ancestor = ancestor.parent
+        shared = is_shared_root(root if root is not None else store_root_of(path))
+        for directory in reversed(new_directories):
+            make_directory(directory, shared)
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
         with os.fdopen(descriptor, 'wb') as stream:
+            if seal and not _WINDOWS:
+                os.fchmod(stream.fileno(), SHARED_SEAL_MODE if shared else 0o400)
+            else:
+                share_file(stream.fileno(), shared)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())

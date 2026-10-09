@@ -15,7 +15,27 @@ from idea_domain import (ASSESS_KEYS, MAX_INPUT, MAX_NUMBER, IdeaError,
 
 WORKFLOW_VERSION = 3
 UNSUPPORTED_VERSION_CODE = 'unsupported_idea_version'
-UNSUPPORTED_VERSION_MESSAGE = 'This idea was made with an older glitch-idea. Capture it again.'
+# The member's sentence when the chain could not bring an idea to this version (design D3, sentence A).
+UNSUPPORTED_VERSION_MESSAGE = '"{words}" could not be updated for this version. It was left exactly as it was.'
+UNNAMED_VERSION_MESSAGE = 'This idea could not be updated for this version. It was left exactly as it was.'
+MAX_WORDS = 60
+
+
+def first_words(text):
+    """The idea's first words for a plain sentence: first non-empty line, cut at 60 characters with an ellipsis."""
+    if type(text) is not str:
+        return None
+    for line in text.splitlines():
+        line = ' '.join(line.split())
+        if line:
+            return line if len(line) <= MAX_WORDS else line[:MAX_WORDS].rstrip() + '\u2026'
+    return None
+
+
+def unsupported_version_message(origin_text=None):
+    words = first_words(origin_text)
+    return UNNAMED_VERSION_MESSAGE if words is None else UNSUPPORTED_VERSION_MESSAGE.format(words=words)
+
 # The one setting for the order of Methods and Discovery. Everything else
 # (STEP_ORDER, DEPENDENCIES) is derived from it; Exploration always follows both.
 DISCOVERY_BEFORE_METHODS = False
@@ -468,7 +488,7 @@ def validate_acceptance(value):
 
 
 def _refuse_old_version(version, message):
-    require(not (type(version) is int and version == 2), UNSUPPORTED_VERSION_MESSAGE, UNSUPPORTED_VERSION_CODE)
+    require(not (type(version) is int and version == 2), unsupported_version_message(), UNSUPPORTED_VERSION_CODE)
     require(type(version) is int and version == WORKFLOW_VERSION, message)
 
 
@@ -512,8 +532,13 @@ def validate_workflow(value):
     return copy.deepcopy(value)
 
 
-def validate_snapshot(value):
-    """Validate a legacy snapshot or explicit v2 extension without rewriting it."""
+def validate_snapshot(value, historical=False):
+    """Validate a legacy snapshot or explicit v2 extension without rewriting it.
+
+    historical=True reads evidence written by an earlier release: a snapshot at workflow
+    version 2 is checked by the frozen v2 validators. It is for reading only; the latest
+    revision and every writer stay current-version only.
+    """
     require(type(value) is dict, 'Snapshot must be an object')
     versioned = 'schema_version' in value or 'workflow' in value
     _object(value, SNAPSHOT_FIELDS | {'schema_version', 'workflow'} if versioned else SNAPSHOT_FIELDS, 'snapshot')
@@ -542,7 +567,13 @@ def validate_snapshot(value):
                 text(item[key], 'assessment '+key, 200)
     for key in ('actor', 'action', 'timestamp'):
         text(value[key], key, 200)
-    if versioned:
+    if versioned and historical and type(value['schema_version']) is int and value['schema_version'] == 2:
+        import idea_workflow_v2
+        workflow = idea_workflow_v2.validate_workflow(value['workflow'])
+        for record in workflow['steps'].values():
+            if record['acceptance'] is not None:
+                require(record['acceptance']['accepted_revision'] <= value['revision'], 'Future acceptance in snapshot')
+    elif versioned:
         _refuse_old_version(value['schema_version'], 'Unsupported snapshot version')
         workflow = validate_workflow(value['workflow'])
         for record in workflow['steps'].values():
@@ -589,16 +620,23 @@ def _idea(value):
     require(type(value) is dict, 'Idea must be an object')
     integer(value.get('revision'), 'revision', 1)
     require(type(value.get('revisions')) is list and len(value['revisions']) == value['revision'], 'Missing revision history')
-    for index, snapshot in enumerate(value['revisions'], 1):
-        validate_snapshot(snapshot)
-        require(snapshot['revision'] == index, 'Nonsequential revision history')
-    for key in ('shape', 'ratings', 'assessments'):
-        require(key in value, 'Missing legacy '+key)
-    if 'workflow' in value:
-        workflow = validate_workflow(value['workflow'])
-        for record in workflow['steps'].values():
-            if record['acceptance'] is not None:
-                require(record['acceptance']['accepted_revision'] <= value['revision'], 'Future acceptance in current workflow')
+    last = len(value['revisions'])
+    try:
+        for index, snapshot in enumerate(value['revisions'], 1):
+            validate_snapshot(snapshot, historical=index < last)  # earlier releases' evidence stays readable
+            require(snapshot['revision'] == index, 'Nonsequential revision history')
+        for key in ('shape', 'ratings', 'assessments'):
+            require(key in value, 'Missing legacy '+key)
+        if 'workflow' in value:
+            workflow = validate_workflow(value['workflow'])
+            for record in workflow['steps'].values():
+                if record['acceptance'] is not None:
+                    require(record['acceptance']['accepted_revision'] <= value['revision'], 'Future acceptance in current workflow')
+    except IdeaError as exc:
+        if exc.code == UNSUPPORTED_VERSION_CODE:
+            origin = value.get('origin')
+            raise IdeaError(exc.code, unsupported_version_message(origin.get('text') if type(origin) is dict else None)) from exc
+        raise
     return copy.deepcopy(value)
 
 

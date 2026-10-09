@@ -512,7 +512,7 @@ class WorkflowV3MarkdownTests(unittest.TestCase):
         with self.assertRaises(IdeaError) as caught:
             md.encode_history(key, old, origin=state['ideas'][key]['origin'])
         self.assertEqual(caught.exception.code, 'unsupported_idea_version')
-        self.assertEqual(str(caught.exception), 'This idea was made with an older glitch-idea. Capture it again.')
+        self.assertEqual(str(caught.exception), 'This idea could not be updated for this version. It was left exactly as it was.')
 
     def test_sketch_item_without_why_next_renders(self):
         for missing in ('absent', None, ''):

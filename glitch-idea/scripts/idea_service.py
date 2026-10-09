@@ -288,6 +288,9 @@ class Service:
         if trusted_context.selected_idea_id is not None: check_id(trusted_context.selected_idea_id)
         require(type(config) is dict, 'Trusted configuration must be an object')
         self.store, self.config, self.context = store, copy.deepcopy(config), trusted_context
+        # The plain migration line: kept from this service's own first open, shown once, then cleared.
+        self._migrated, self._notified = [], False
+        self._note_migration()
         handlers = {} if handlers is None else handlers
         require(type(handlers) is dict and set(handlers) <= ADVANCED_STEPS, 'Unsupported trusted handler registry')
         for step,handler in handlers.items():
@@ -356,7 +359,14 @@ class Service:
         require(path.is_dir(), 'Workspace must be an existing service-host directory', 'workspace_unavailable')
         return dict(result,path=str(path))
 
+    def _note_migration(self):
+        report = getattr(self.store, 'migration_report', None)
+        for key in getattr(report, 'updated', ()):
+            if key not in self._migrated: self._migrated.append(key)
+
     def _idea(self,state,idea_id):
+        refuse = getattr(self.store, 'refuse_held', None)
+        if refuse is not None: refuse(idea_id)  # a held idea answers with its own sentence, never "Unknown idea"
         require(idea_id in state['ideas'], 'Unknown idea', 'not_found')
         return state['ideas'][idea_id]
 
@@ -418,7 +428,9 @@ class Service:
                           resume=dict(required=True,reason='agent_disconnected'),**projection)
             result.update(copy.deepcopy(handoff_view))
             result.update(default_workspace=copy.deepcopy(self.config.get('default_workspace')),
-                          lifecycle=None, home=None, delivered_ref=None)
+                          lifecycle=None, home=None, delivered_ref=None, review_cause=None)
+            if idea is not None and projection['steps']['assess']['status'] == 'review-needed' and idea['revisions'][-1]['action'] == 'import':
+                result['review_cause'] = 'imported'  # the last revision is the import's own: the cause stands until Assess is accepted again
             if idea is not None:
                 result.update(lifecycle_view(self.store.lifecycle(idea['idea_id'])))
             result.update(backlog=None, backlog_status=dict(available=False, code='no_selection'),
@@ -453,6 +465,11 @@ class Service:
                                                      orphans=inventory['orphans'])
                     result['asset_inventory_status'] = dict(available=False,code='asset_projection_capacity')
         self.context.selected_idea_id = selected
+        self._note_migration()
+        if self._migrated and not self._notified:
+            from idea_chain import line
+            result['notice'] = line(len(self._migrated))
+            self._notified = True
         return result
 
     def request_result(self,request_id):
@@ -814,10 +831,15 @@ def _invalidate_placement(state,before_order,actor,reason,*,exclude=(),refresh_d
             idea = _legacy_review(idea,prior,{'assess':fields})
         else:
             idea = invalidate_external(idea,('assess',))['idea']
-        idea['revision'] += 1
-        idea['status'] = 'active'
-        idea['revisions'].append(adapt_snapshot(snapshot(idea,actor,'place'),idea['workflow']))
-        state['ideas'][key] = idea
+        state['ideas'][key] = review_revision(idea,actor,'place')
+
+
+def review_revision(idea,actor,action):
+    """The one revision that follows an Assess marked for review: active again, with its snapshot."""
+    idea['revision'] += 1
+    idea['status'] = 'active'
+    idea['revisions'].append(adapt_snapshot(snapshot(idea,actor,action),idea['workflow']))
+    return idea
 
 
 def _append_capture(state,idea,actor):
@@ -861,12 +883,68 @@ def run_legacy(args,config):
     if command=='shape':
         raise IdeaError('unsupported_command','The shape verb is retired; use exploration to reopen Exploration for the next slice')
     store=Store(args.store or config['store_path'])
+    if command=='import-idea':
+        # Reads the source as bytes only; the target's own lock and journal do the write.
+        text(args.actor,'actor',200)
+        check_id(args.idea_id)
+        try:
+            result=store.import_idea(args.source,args.idea_id,actor=args.actor,dry_run=args.dry_run)
+        except IdeaError as exc:
+            notice=_migration_notice(store)
+            if notice is not None: exc.details.setdefault('notice',notice)
+            raise
+        notice=_migration_notice(store)
+        if notice is not None: result=dict(result,notice=notice)
+        written=result.get('write_result')
+        if written is not None:  # the platform object is not JSON; keep what the operator needs
+            result=dict(result,write_result=dict(publication=written.publication,durability=written.durability))
+        return result
+    if command=='remove-idea':
+        # Without --confirm this is a preview and writes nothing; the Store holds its own lock and journal.
+        text(args.actor,'actor',200)
+        check_id(args.idea_id)
+        try:
+            result=store.remove_idea(args.idea_id,actor=args.actor,confirm=args.confirm)
+        except IdeaError as exc:
+            notice=_migration_notice(store)
+            if notice is not None: exc.details.setdefault('notice',notice)
+            raise
+        notice=_migration_notice(store)
+        if notice is not None: result=dict(result,notice=notice)
+        written=result.get('write_result')
+        if written is not None:
+            result=dict(result,write_result=dict(publication=written.publication,durability=written.durability))
+        return result
+    try:
+        result=_run_legacy(args,config,store)
+    except IdeaError as exc:
+        notice=_migration_notice(store)
+        if notice is not None: exc.details.setdefault('notice',notice)
+        raise
+    notice=_migration_notice(store)
+    return result if notice is None else dict(result,notice=notice)
+
+
+def _migration_notice(store):
+    """The plain line when this run migrated something: also once on stderr, so the operator sees it either way."""
+    from idea_chain import line
+    notice=line(len(store.migration_report.updated))
+    if notice is not None:
+        import sys
+        sys.stderr.write(notice+'\n')
+    return notice
+
+
+def _run_legacy(args,config,store):
+    command=args.command
     write=command not in ('list','show','handoff','doctor')
     if hasattr(args,'actor'):
         text(args.actor,'actor',200)
     if hasattr(args,'idea_id'):
         check_id(args.idea_id)
     with store.transaction(write=write) as state:
+        if command!='doctor' and getattr(args,'idea_id',None) is not None:
+            store.refuse_held(args.idea_id)  # a held idea answers with its own sentence, never not_found
         if command=='list':
             views=store.lifecycles(state)
             return dict(backlog_revision=state['backlog_revision'],order=state['order'],ideas=[state['ideas'][key] for key in state['order']],
@@ -879,6 +957,7 @@ def run_legacy(args,config):
             if issues:
                 raise IdeaError('unhealthy_store','Store health checks failed',issues=issues)
             result=dict(healthy=True,ideas=len(state['ideas']),transaction_revision=state['transaction_revision'])
+            notices=notices+['finished an interrupted removal: '+path for path in store.finished_removals]
             if notices:
                 result['notices']=notices
             return result

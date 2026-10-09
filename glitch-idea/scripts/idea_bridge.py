@@ -751,6 +751,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(response, json_limit=MAX_STATE_RESPONSE if state_read else MAX_JSON)
             except IdeaError as exc:
                 result = dict(ok=False, code=exc.code)
+                if exc.code == 'unsupported_idea_version':
+                    result['message'] = str(exc)  # the owner's sentence names the one idea that could not be updated
                 for name in ('committed', 'revision', 'draft_version', 'backlog_revision', 'idea_id', 'home', 'delivered_ref'):
                     if name in exc.details:
                         result[name] = exc.details[name]

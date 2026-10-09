@@ -67,11 +67,12 @@ class AgentLeaseAfterSupersedeTests(unittest.TestCase):
         self.assertEqual(result['events'][0]['operation'],'discovery')
 
     def test_agent_that_never_polls_a_new_request_still_expires(self):
-        # The lease is restarted for the new request, not removed: no poll for HEARTBEAT -> retired.
+        # A supersede inside the answer grace keeps a composing agent (owner ruling 8 Oct, CP9 item 4);
+        # an agent silent past that grace is still retired.
         self.enqueue('req_first','method');self.events(0)
         self.now=10.
         self.enqueue('req_second','discovery')
-        self.now=10.+HEARTBEAT+1
+        self.now=ANSWER_GRACE+1
         with self.assertRaises(IdeaError) as caught:self.events(1)
         self.assertEqual(caught.exception.code,'agent_unavailable')
         self.assertEqual(self.broker.status(self.bid,self.gen)['reason'],'heartbeat_expired')

@@ -781,6 +781,10 @@ async function main() {
       const open = panelData.link.find(l => l[0] === 'Open Glitch idea in a new tab');
       if (!open || open[1] !== wantHref) throw new Error('replaced panel link wrong (want ' + wantHref + '): ' + JSON.stringify(panelData.link));
       if (panelData.pairing) throw new Error('replaced panel also shows a pairing form');
+      // Nothing editable behind the replaced panel: no step area, no step panel, no APIV strip.
+      const behind = await read(`JSON.stringify({columns: document.getElementById('columns')?.offsetParent !== null, stepPanel: !!document.getElementById('step-panel')?.offsetParent, rail: document.getElementById('step-rail')?.offsetParent !== null, apiv: document.querySelector('.g-apiv')?.offsetParent !== null, fields: [...document.querySelectorAll('#columns textarea, #columns input, #columns button')].filter(n => n.offsetParent !== null).length})`);
+      const behindData = JSON.parse(behind);
+      if (behindData.columns || behindData.stepPanel || behindData.rail || behindData.apiv || behindData.fields) throw new Error('replaced panel still shows the step area behind it: ' + behind);
       await shot('05c-superseded-after-resume');
       // Continue as the person would with the link: a fresh load of the plain page, no fragment.
       const leaving2 = cdp.send('Page.navigate', {url: open[1]}).catch(() => {});
@@ -1224,7 +1228,7 @@ async function main() {
       if (found.length !== 2) throw new Error('saved state does not name both assets (' + found.length + ' of 2): ' + JSON.stringify(saved).slice(0, 300));
       return `agent got visual_brief ${event.request_id}; asset png ${pngUp.asset_id} and zip ${zipUp.asset_id} uploaded under it (a second, different png refused ${conflict.json.error.code}); fill ${seq} {source: prototype, assets: [zip, png]} while open; page showed "${open.ready}" and the screenshot (${open.w}x${open.h}, naturalWidth > 0) with Accept enabled before any reply; then reply prototype_skill "available" (ok ${reply}); a fill after it refused ${late.code}; human accepted; saved disposition ${saved.disposition}, source ${saved.source}, both asset ids present in the saved idea`;
     });
-    await step('old_idea_refused', async () => {
+    await step('unmigratable_idea_held', async () => {
       if (!fillIdea) throw new Error('needs the idea left by discovery_fills_and_challenge');
       const id = fillIdea, store = join(tmp, 'store'), historyDir = join(store, 'history', id);
       const files = [join(store, id + '.md'), ...readdirSync(historyDir).filter(n => n.endsWith('.md')).map(n => join(historyDir, n))];
@@ -1232,25 +1236,30 @@ async function main() {
       const original = new Map(files.map(f => [f, readFileSync(f)]));
       let old = null;
       try {
-        // A v0.2-format idea: the same files with workflow schema_version 2, which is how v0.2 stored them. Only this one idea is touched.
+        // An idea the chain cannot migrate: v3 steps stored under workflow schema_version 2 (the frozen v2 validator rejects them). Only this one idea is touched.
         for (const [f, bytes] of original) writeFileSync(f, bytes.toString('utf8').replace(/schema_version: 3\b/g, 'schema_version: 2'));
         if (files.every(f => sha(f) === createHash('sha256').update(original.get(f)).digest('hex'))) throw new Error('the fixture edit changed no file');
         old = new Map(files.map(f => [f, sha(f)]));
-        const refusals = ['list', 'show'].map(verb => { const r = idea(verb === 'list' ? ['list'] : ['show', id], {expectOk: false}); return {verb, ok: r.json?.ok, code: r.json?.error?.code, message: r.json?.error?.message}; });
-        for (const r of refusals) if (r.ok !== false || r.code !== 'unsupported_idea_version') throw new Error('CLI ' + r.verb + ' did not refuse with unsupported_idea_version: ' + JSON.stringify(r));
-        const MESSAGE = 'This idea was made with an older glitch-idea. Capture it again.';  // idea_workflow.py UNSUPPORTED_VERSION_MESSAGE
-        if (refusals.some(r => r.message !== MESSAGE)) throw new Error('CLI message differs: ' + JSON.stringify(refusals));
+        // The server's sentence (idea_workflow.py UNSUPPORTED_VERSION_MESSAGE): the idea named by its first words, never by id.
+        const SENTENCE = /^".+" could not be updated for this version\. It was left exactly as it was\.$/;
+        const shown = idea(['show', id], {expectOk: false}).json;
+        if (shown?.ok !== false || shown?.error?.code !== 'unsupported_idea_version' || !SENTENCE.test(shown?.error?.message ?? '')) throw new Error('CLI show did not refuse with the server sentence: ' + JSON.stringify(shown));
+        if (shown.error.message.includes(id)) throw new Error('the sentence names the idea by id');
+        const listed = idea(['list']).json;
+        if (listed?.ok !== true || (listed.ideas ?? []).some(i => i.idea_id === id) || 'notice' in listed) throw new Error('CLI list did not succeed without the held idea: ' + redact(JSON.stringify(listed)).slice(0, 300));
+        const MESSAGE = shown.error.message;
         await read(`(window.onbeforeunload=null, true)`);
         await cdp.send('Page.reload');
-        await waitFor(`/^This idea was made with an older glitch-idea/.test(document.getElementById('save-status')?.textContent??'')`, 'page refuses the older store', 20000);
+        await waitFor(`/could not be updated for this version/.test(document.getElementById('save-status')?.textContent??'')`, 'page shows the held-idea sentence', 20000);
         await sleep(500);
         const page = await read(`({status: document.getElementById('save-status').textContent, body: document.body.innerText})`);
         if (/unsupported_idea_version|Traceback|\bat \S+ \(|undefined|\[object|\{"/.test(page.body)) throw new Error('page shows a code or a trace: ' + page.body.slice(0, 300));
-        if (page.status !== MESSAGE) throw new Error('page sentence differs: ' + page.status);
-        await shot('12c-old-idea-refused');
+        if (page.status !== MESSAGE) throw new Error('page sentence differs from the server sentence: ' + page.status);
+        await shot('12c-held-idea-sentence');
         const after = files.filter(f => sha(f) !== old.get(f));
-        if (after.length) throw new Error('refusal changed the bytes of ' + after.length + ' file(s)');
-        return `v0.2-format idea (${files.length} files, workflow schema_version 2): CLI list and show refused with code unsupported_idea_version and "${MESSAGE}"; the page, reloaded on that store, shows "${page.status}" (the same older-idea sentence, plain words, no code, no trace); the idea's ${files.length} files hash identically before and after the refusals (nothing migrated or overwritten)`;
+        if (after.length) throw new Error('the hold changed the bytes of ' + after.length + ' file(s)');
+        if (existsSync(join(historyDir, 'migrations'))) throw new Error('a migrations folder was written for the held idea');
+        return `unmigratable idea (${files.length} files, v3 steps under workflow schema_version 2): CLI show refused unsupported_idea_version with "${MESSAGE}"; CLI list succeeded without it; the page, reloaded on it, shows the same sentence (no code, no trace); its ${files.length} files hash identically before and after and no history/<id>/migrations/ exists`;
       } finally {
         for (const [f, bytes] of original) writeFileSync(f, bytes);
         await read(`(window.onbeforeunload=null, true)`).catch(() => {});
@@ -1561,13 +1570,43 @@ async function main() {
       await shot('14-capture-default-workspace');
     } finally {
       try { cdp.close(); } catch {}
-      cdp = first; await setViewport(1280);
+      // Close the second tab and bring the first back to the front. Left open, it keeps the first tab hidden: a hidden tab
+      // does not poll (so it can never notice its service died) and headless Chrome only draws it when another tab paints.
+      try { await fetch(`http://127.0.0.1:${port}/json/close/${tab.id}`, {signal: AbortSignal.timeout(10000)}); } catch {}
+      cdp = first; await cdp.send('Page.bringToFront'); await setViewport(1280);
       for (const pid of serviceProcesses().filter(pid => spawnSync('ps', ['-p', String(pid), '-o', 'args='], {encoding: 'utf8'}).stdout.includes(second))) { try { process.kill(pid, 'SIGTERM'); } catch {} }
     }
     return 'Capture opened with name and path from the default workspace, confirmation left unticked, and the name stayed editable';
   });
 
   await screenshotPass();
+
+  // SKILLS-36 finding 3: the service dies under a live tab and restarts elsewhere; the old tab says so instead of sitting silent.
+  // Placed after the screenshot pass because it kills the service the page is paired to; a resume at the end gives crash_restart_resume its service back.
+  await step('stranded_tab_panel', async () => {
+    const pids = serviceProcesses();
+    if (!pids.length) throw new Error('service process not found');
+    for (const pid of pids) process.kill(pid, 'SIGKILL');
+    await sleep(500);
+    if (serviceProcesses().length) throw new Error('service survived kill');
+    try {
+      await waitFor(`/This tab lost its Glitch idea service\\./.test(document.getElementById('connection')?.textContent ?? '')`, 'dead-tab panel after the service died', 15000);
+      const panel = JSON.parse(await read(`JSON.stringify({text: document.getElementById('connection')?.textContent ?? '', links: document.querySelectorAll('#connection a').length,
+        warning: !!document.querySelector('.superseded-warning'), pairing: !!document.getElementById('pairing-code'), status: document.getElementById('save-status')?.textContent ?? '',
+        columns: document.getElementById('columns')?.offsetParent !== null, rail: document.getElementById('step-rail')?.offsetParent !== null, apiv: document.querySelector('.g-apiv')?.offsetParent !== null,
+        fields: [...document.querySelectorAll('#columns textarea, #columns input, #columns button')].filter(n => n.offsetParent !== null).length})`));
+      if (!panel.text.includes('Ask your terminal to reconnect (it runs session-open --resume)')) throw new Error('dead-tab panel sentence wrong: ' + panel.text.slice(0, 200));
+      if (panel.links || panel.warning) throw new Error('dead-tab panel offers a link to the dead address: ' + JSON.stringify(panel));
+      if (panel.pairing) throw new Error('dead-tab panel shows a pairing form');
+      if (panel.columns || panel.rail || panel.apiv || panel.fields) throw new Error('step area still shown behind the dead-tab panel: ' + JSON.stringify(panel));
+      if (panel.status !== 'Disconnected') throw new Error('save-status reads "' + panel.status + '"');
+      await shot('12d-stranded-tab');
+      return 'service killed under the open tab; within 15 s the page showed the dead-tab sentence with no link, no warning, no pairing form, the step area hidden and status "Disconnected"';
+    } finally {
+      // Give the following crash_restart_resume a service to kill, as the person's terminal would.
+      try { idea(['session-open', '--resume', bindingId, '--runtime-root', runtimeRoot], {expectOk: false}); } catch {}
+    }
+  });
 
   summary.console_exceptions = cdp.events.filter(e => e.method === 'Runtime.exceptionThrown').length;
   record('no_page_exceptions', summary.console_exceptions === 0, summary.console_exceptions + ' uncaught page exceptions');
