@@ -79,6 +79,7 @@ def parser():
             p.add_argument('--orca-worktree')
             p.add_argument('--orca-terminal')
             p.add_argument('--orca-host')
+            p.add_argument('--reconnect')
     p=commands.add_parser('prototype-serve')
     p.launcher_errors=True
     p.add_argument('--runtime-root')
@@ -272,7 +273,7 @@ def _safe_sessions(rows):
 def run_launcher(args):
     # Separate boundary: fixed redacted errors; legacy result/error path is intact.
     try:
-        from idea_launch import LaunchError, open_browser_session, open_session, serve
+        from idea_launch import LaunchError, open_browser_session, open_session, reconnect_browser_session, serve
         from idea_native import NativeError, OrcaBinding
         from idea_runtime import RuntimeError
         from idea_bridge import BridgeError
@@ -287,6 +288,12 @@ def run_launcher(args):
             require(args.idea_id is None or (type(args.idea_id) is str and re.fullmatch(r'idea_[0-9a-f]{32}',args.idea_id)),
                     'Invalid idea ID','invalid_input')
         orcabinding=None
+        reconnect=getattr(args,'reconnect',None)
+        if reconnect is not None:
+            # Re-pair the recorded Orca page in place; never with a resume, an idea choice or the system browser.
+            require(args.browser=='orca' and args.resume is None and args.idea_id is None,
+                    'Reconnect re-pairs the recorded Orca tab only','usage')
+            require(type(reconnect) is str and re.fullmatch(r'binding_[0-9a-f]{32}',reconnect),'Invalid binding ID','invalid_input')
         if args.command=='browser-open':
             selectors=(args.orca_worktree,args.orca_terminal,args.orca_host)
             require(args.browser=='orca' or not any(value is not None for value in selectors),
@@ -305,6 +312,9 @@ def run_launcher(args):
         # Keep released open_session's five-second mutation timeout; probes remain
         # <=1s within readiness budget. Never retry an ambiguous NEW here.
         if args.command=='session-open': result=open_session(store,runtime,config,**options)
+        elif reconnect is not None:
+            result=reconnect_browser_session(store,runtime,config,binding_id=reconnect,orcabinding=orcabinding,
+                                             runtime_python=executable,readiness_timeout=args.readiness_timeout)
         else: result=open_browser_session(store,runtime,config,mode=args.browser,orcabinding=orcabinding,**options)
         if args.runtime_root_fallback: result=dict(result,runtime_root_fallback=args.runtime_root_fallback)
         return dict(ok=True,**result)

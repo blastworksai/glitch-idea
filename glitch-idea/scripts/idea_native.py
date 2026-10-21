@@ -198,3 +198,34 @@ def close_browser_page(page_id: str, binding: OrcaBinding, *,
     if not _identifier(page_id) or not isinstance(binding, OrcaBinding) or not _identifier(binding.worktree_id):
         raise NativeError("origin_missing", "A recorded page ID and originating worktree are required.")
     _orca(["tab", "close", "--page", page_id, "--worktree", "id:" + binding.worktree_id], runner, timeout)
+
+
+# The page marks its own pairing state on <html data-idea-pairing>; the mark carries no secret.
+_PAIRING_MARK_EXPRESSION = "JSON.stringify(String(document.documentElement.dataset.ideaPairing || ''))"
+PAIRING_MARKS = ("paired", "unpaired", "replaced")
+
+
+def browser_page_pairing(page_id: str, binding: OrcaBinding, *,
+                         runner: Runner = subprocess.run, timeout: float = 8) -> str:
+    """Read one Orca page's pairing mark: 'paired', 'unpaired', 'replaced' or '' (not known yet).
+
+    Read-only: `orca eval` of a fixed expression, scoped to the binding's own worktree.
+    """
+    if not _identifier(page_id) or not isinstance(binding, OrcaBinding) or not _identifier(binding.worktree_id):
+        raise NativeError("origin_missing", "A recorded page ID and originating worktree are required.")
+    result = _orca(["eval", "--page", page_id, "--worktree", "id:" + binding.worktree_id,
+                    "--expression", _PAIRING_MARK_EXPRESSION], runner, timeout)
+    try:
+        mark = json.loads(result.get("result"))
+    except (TypeError, ValueError):
+        raise NativeError("unsupported_payload", "Orca returned an unsupported page reading.") from None
+    return mark if mark in PAIRING_MARKS else ""
+
+
+def navigate_browser_page(url: str, page_id: str, binding: OrcaBinding, *,
+                          runner: Runner = subprocess.run, timeout: float = 8) -> None:
+    """Load the pairing URL into the SAME Orca page (`orca goto --page`), so a rebuilt tab pairs itself."""
+    _safe_url(url)
+    if not _identifier(page_id) or not isinstance(binding, OrcaBinding) or not _identifier(binding.worktree_id):
+        raise NativeError("origin_missing", "A recorded page ID and originating worktree are required.")
+    _orca(["goto", "--page", page_id, "--worktree", "id:" + binding.worktree_id, "--url", url], runner, timeout)

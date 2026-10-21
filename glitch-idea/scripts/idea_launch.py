@@ -23,7 +23,8 @@ import tempfile
 
 from idea_bridge import BridgeError, BridgeServer, Response, check
 from idea_domain import IdeaError, check_id, decode, encoded, require
-from idea_native import open_browser, close_browser_page, NativeError, OrcaBinding
+from idea_native import (open_browser, close_browser_page, browser_page_pairing, navigate_browser_page,
+                         NativeError, OrcaBinding)
 from idea_runtime import Runtime, RuntimeError as OwnerError, MAX_BINDINGS
 from idea_service import Service, TrustedContext
 from idea_sessions import SessionPolicy, AgentBinding
@@ -390,9 +391,10 @@ class OwnerService:
 
     def _open(self,payload):
         mode,binding_id,selected = (payload[key] for key in ('mode','binding_id','selected_idea_id'))
-        check(type(mode) is str and mode in ('new','resume'),'invalid_control')
+        check(type(mode) is str and mode in ('new','resume','repair'),'invalid_control')
         check((mode == 'new' and binding_id is None) or
-              (mode == 'resume' and type(binding_id) is str and re.fullmatch(r'binding_[0-9a-f]{32}',binding_id)), 'invalid_control')
+              (mode in ('resume','repair') and type(binding_id) is str and re.fullmatch(r'binding_[0-9a-f]{32}',binding_id)), 'invalid_control')
+        check(mode != 'repair' or selected is None, 'invalid_control')
         check(selected is None or (type(selected) is str and re.fullmatch(r'idea_[0-9a-f]{32}',selected)), 'invalid_control')
         with self.admission:
             check(not self.stopped.is_set(),'busy',503)
@@ -414,6 +416,14 @@ class OwnerService:
                 sid = self.store.create_session()
                 binding_id = self.policy.open_binding(self.actor,sid,selected)
                 self.members.add(binding_id)
+            elif mode == 'repair':
+                # A rebuilt tab: browser credentials only; the agent generation stays as it is.
+                check(binding_id in records,'binding_not_found',404)
+                prior = records[binding_id]
+                check(prior['actor'] == self.actor,'session_binding_mismatch',403)
+                code = self.policy.repair_browser(binding_id)
+                return dict(binding_id=binding_id,session_id=prior['receipt_session_id'],
+                            selected_idea_id=prior['selected_idea_id'],pairing_code=code)
             else:
                 check(binding_id in records,'binding_not_found',404)
                 prior = records[binding_id]
@@ -570,17 +580,20 @@ def open_session(store_path,runtime_root,config=None,*,binding_id=None,selected_
     return Runtime(store_path,runtime_root).open_binding('new' if binding_id is None else 'resume',binding_id,selected_idea_id,timeout)
 
 
+def _check_orcabinding(orcabinding):
+    def identifier(value):
+        return type(value) is str and 0 < len(value) <= 4096 and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+    if (not isinstance(orcabinding,OrcaBinding) or not identifier(orcabinding.worktree_id)
+            or not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}::.+',orcabinding.worktree_id)
+            or not identifier(orcabinding.terminal_handle)
+            or (orcabinding.execution_host_id is not None and not identifier(orcabinding.execution_host_id))):
+        raise LaunchError('origin_missing')
+
+
 def open_browser_session(store_path,runtime_root,config=None,*,mode,orcabinding=None,runner=subprocess.run,**options):
     # Validate the caller's launch choice before startup or receipt allocation.
     if mode not in ('system','orca'): raise LaunchError('invalid_mode')
-    if mode == 'orca':
-        def identifier(value):
-            return type(value) is str and 0 < len(value) <= 4096 and not any(ord(char) < 32 or ord(char) == 127 for char in value)
-        if (not isinstance(orcabinding,OrcaBinding) or not identifier(orcabinding.worktree_id)
-                or not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}::.+',orcabinding.worktree_id)
-                or not identifier(orcabinding.terminal_handle)
-                or (orcabinding.execution_host_id is not None and not identifier(orcabinding.execution_host_id))):
-            raise LaunchError('origin_missing')
+    if mode == 'orca': _check_orcabinding(orcabinding)
     result = open_session(store_path,runtime_root,config,**options)
     try:
         code = result['pairing_code']
@@ -604,6 +617,40 @@ def open_browser_session(store_path,runtime_root,config=None,*,mode,orcabinding=
                 browser['previous_page_close_error'] = exc.code
     return dict(result,browser=browser,
                 fallback_line=f'Only if the tab did not open paired: type {code} within 60 s.')
+
+
+
+def reconnect_browser_session(store_path,runtime_root,config=None,*,binding_id,orcabinding,runner=subprocess.run,
+                              runtime_python=None,readiness_timeout=5,timeout=5,spawn=subprocess.Popen):
+    """Re-pair the binding's recorded Orca page in place after Orca rebuilt it.
+
+    Orca can destroy a page's webview and reload its saved URL: the cookie survives, the tab
+    secret in sessionStorage does not. Only a page that marks itself 'unpaired' is touched: the
+    service retires the browser credentials and issues a fresh one-time code for the same agent
+    generation, and that code rides the fragment into the SAME page. A paired page, an unreadable
+    page or an unrecorded one changes nothing.
+    """
+    _check_orcabinding(orcabinding)
+    require(type(binding_id) is str and re.fullmatch(r'binding_[0-9a-f]{32}',binding_id) is not None,'Invalid binding ID')
+    page = _recorded_page(runtime_root,binding_id)
+    if page is None: raise LaunchError('tab_not_recorded',binding_id=binding_id)
+    try:
+        mark = browser_page_pairing(page,orcabinding,runner=runner)
+    except NativeError:
+        raise LaunchError('tab_unreadable',binding_id=binding_id) from None
+    browser = dict(mode='orca',browser_page_id=page)
+    if mark != 'unpaired':
+        return dict(binding_id=binding_id,browser=dict(browser,reconnected=False,
+                    reason='tab_still_paired' if mark == 'paired' else 'tab_not_unpaired'))
+    ensure_service(store_path,runtime_root,config,runtime_python=runtime_python,readiness_timeout=readiness_timeout,spawn=spawn)
+    result = Runtime(store_path,runtime_root).open_binding('repair',binding_id,None,timeout)
+    code = result.pop('pairing_code')
+    try:
+        navigate_browser_page(result['origin'].rstrip('/') + '/#pair=' + code,page,orcabinding,runner=runner)
+    except NativeError as exc:
+        raise LaunchError(exc.code,binding_id=binding_id,session_id=result['session_id'],
+                          selected_idea_id=result['selected_idea_id'],resume_required=True) from None
+    return dict(result,browser=dict(browser,url=result['origin'],reconnected=True))
 
 
 _PAGES_FILE = 'orca-pages.json'
