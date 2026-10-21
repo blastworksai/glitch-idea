@@ -145,7 +145,7 @@ test('reopened Capture renders literal immutable originals and archived download
 });
 test('projection absence and unknown status refuse Capture upload without replacing its words',async()=>{
   await fixture(async h=>{
-    h.state.asset_inventory_status={available:false,code:'asset_projection_capacity'};h.flow.load(h.state,true);assert.equal(h.get('file-input').disabled,true);assert.match(h.text(),/reloading cannot reduce retained history/);
+    h.state.asset_inventory_status={available:false,code:'asset_projection_capacity'};h.flow.load(h.state,true);assert.equal(h.get('file-input').disabled,true);assert.match(h.text(),/reloading will not change that/);
     h.state.asset_inventory_status={available:true,code:'ok'};h.state.idea_status=null;h.flow.load(h.state,true);assert.equal(h.get('file-input').disabled,true);
     assert.equal(h.get('idea-text').value,WORDS);assert.equal(uploadWrites(h).length,0);
   },{saved:true});
@@ -164,7 +164,7 @@ test('missing packaged Visualize uploader stays unavailable for saved Capture wi
 test('saved Capture terminal upload refusal keeps exact words and requires remove and reselect',async()=>{
   await fixture(async h=>{
     h.faults.metadataRefusal='stale_revision';h.get('file-input').change({files:[localFile()]});await h.get('upload-action-1').click();
-    assert.equal(h.get('upload-action-1').disabled,true);assert.match(h.text(),/Remove.*reselect/);assert.ok(!h.text().includes('stale_revision'));
+    assert.equal(h.get('upload-action-1').disabled,true);assert.match(h.text(),/Remove it here and choose the file again/);assert.ok(!h.text().includes('stale_revision'));
     await h.get('upload-action-1').click();assert.equal(uploadWrites(h).length,1);assert.equal(h.get('idea-text').value,WORDS);
     const original=copy(uploadWrites(h)[0].payload);await h.get('upload-remove-1').click();h.faults.metadataRefusal=null;
     h.get('file-input').change({files:[localFile()]});await h.get('upload-action-2').click();assert.notEqual(uploadWrites(h)[1].payload.request_id,original.request_id);

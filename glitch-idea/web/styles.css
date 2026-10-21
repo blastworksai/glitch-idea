@@ -159,6 +159,7 @@ legend { max-width: 100%; padding: 0; margin: 0 0 var(--space-2); overflow-wrap:
 .choice-cards { display: grid; grid-template-columns: 1fr; gap: var(--space-3); align-items: start; }
 .choice-card h2 { font-size: 15px; line-height: 22px; font-weight: 600; }
 .choice-card img { max-width: 100%; height: auto; border-radius: var(--radius-sm); }
+.choice-card .design-choice { margin-top: var(--space-3); display: flex; flex-direction: column; gap: var(--space-2); }
 .sketch-card { counter-increment: sketch; line-height: 22px; }
 .sketch-cards { counter-reset: sketch; }
 .sketch-head, .backlog-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); min-width: 0; }

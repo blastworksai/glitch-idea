@@ -176,7 +176,7 @@ test('upload uses actual API metadata/bytes, verifies inventory and never accept
 test('lost metadata ACK stops before bytes; check recovers only identity; next explicit action sends bytes',async()=>{
   const h=harness();h.faults.metadataAck=true;h.choose([file()]);await h.get('upload-action-1').click();
   assert.equal(writes(h).length,1);assert.equal(h.get('upload-action-1').textContent,'Check upload result');
-  h.faults.metadataAck=false;await h.get('upload-action-1').click();assert.equal(writes(h).length,1);assert.equal(h.get('upload-action-1').textContent,'Upload file bytes');
+  h.faults.metadataAck=false;await h.get('upload-action-1').click();assert.equal(writes(h).length,1);assert.equal(h.get('upload-action-1').textContent,'Finish upload');
   await h.get('upload-action-1').click();assert.equal(writes(h).length,2);assert.equal(assetInventory(h.flow).assets.length,1);
 });
 test('missing metadata receipt enables explicit exact-request retry without any automatic write',async()=>{
@@ -207,7 +207,7 @@ test('typed but different byte asset identity refuses local completion',async()=
 test('metadata read loss retains uncertain phase and does not send bytes',async()=>{
   const h=harness();h.faults.read=true;h.choose([file()]);await h.get('upload-action-1').click();assert.equal(writes(h).length,1);
   assert.equal(h.get('upload-action-1').textContent,'Check upload result');h.faults.read=false;await h.get('upload-action-1').click();
-  assert.equal(writes(h).length,1);assert.equal(h.get('upload-action-1').textContent,'Upload file bytes');
+  assert.equal(writes(h).length,1);assert.equal(h.get('upload-action-1').textContent,'Finish upload');
 });
 test('new set requires explicit complete members and public Flow hydrates pointer without mutating request',async()=>{
   const h=harness(),asset=h.addAsset('chosen.md'),other=h.addAsset('not-chosen.md');h.reload();await h.get('visualize-new-set').click();assert.equal(h.get('visualize-accept').disabled,true);
@@ -217,7 +217,7 @@ test('new set requires explicit complete members and public Flow hydrates pointe
 });
 test('incomplete upload intents never become selectable members',()=>{
   const h=harness();h.add({...h.common(),kind:'upload-intent',upload_id:id('upload',8),asset_id:id('asset',8),session_id:SESSION,name:'incomplete.md',declared_type:'text/markdown',size:7});h.reload();
-  assert.equal(h.get('visualize-member-'+id('asset',8)),undefined);assert.match(text(h),/1 retained incomplete/);
+  assert.equal(h.get('visualize-member-'+id('asset',8)),undefined);assert.match(text(h),/1 upload was started and not finished/);
 });
 test('reload permits explicit original-file intent resume without another metadata request',async()=>{
   const h=harness();h.add({...h.common(),kind:'upload-intent',upload_id:id('upload',8),asset_id:id('asset',8),session_id:SESSION,name:'draft.md',declared_type:'text/markdown',size:7});h.reload();
@@ -231,7 +231,7 @@ test('current historical set selection submits opaque equal pointers and asset_i
 });
 test('stale source and changed member snapshots keep history visible but refuse selection',()=>{
   const h=harness(),asset=h.addAsset();h.addSet([asset]);h.state.steps.exploration.accepted_revision=5;h.state.revision=5;h.reload();
-  assert.equal(h.get('visualize-set-'+SET).disabled,true);assert.match(text(h),/historical/);
+  assert.equal(h.get('visualize-set-'+SET).disabled,true);assert.match(text(h),/made from older answers, so it cannot be used again/);
   h.state.steps.exploration.accepted_revision=4;h.state.asset_inventory.records.find(item=>item.record.kind==='design-set').record.members[0].sha256='b'.repeat(64);h.reload();
   assert.equal(h.get('visualize-set-'+SET).disabled,true);assert.equal(eligibleSet(h.flow,assetInventory(h.flow).sets[0]),false);
 });
@@ -248,7 +248,7 @@ test('projection omission, malformed blob and retained-link capacity disable upl
   const h=harness();h.state.asset_inventory_status={available:false,code:'asset_projection_capacity'};h.state.asset_inventory.omitted=10;h.reload();
   assert.equal(h.get('file-input').disabled,true);assert.equal(h.get('visualize-new-set').disabled,true);
   const bad=harness();bad.addAsset();bad.state.asset_inventory.records[0].blob.sha256='b'.repeat(64);bad.reload();assert.equal(assetInventory(bad.flow),null);
-  const full=harness();for(let n=0;n<256;n++)full.addAsset(n+'.md');full.reload();assert.equal(full.get('file-input').disabled,true);assert.match(text(full),/capacity is exhausted/);
+  const full=harness();for(let n=0;n<256;n++)full.addAsset(n+'.md');full.reload();assert.equal(full.get('file-input').disabled,true);assert.match(text(full),/no room for more uploads/);
 });
 test('set total size and member count limits remain explicit and do not truncate membership',async()=>{
   const h=harness(),assets=Array.from({length:21},(_,index)=>h.addAsset(index+'.md',25*1024*1024));h.reload();await h.get('visualize-new-set').click();
@@ -291,7 +291,7 @@ test('busy edit is refused; newer idle answer survives explicit recovery of the 
 });
 test('orphan diagnostic opaque IDs remain readable without blocking complete inventory',()=>{
   const h=harness();h.state.asset_inventory.orphans={count:140,ids:[id('asset',90),'stage_'+id('upload',91).slice('upload_'.length)+'_'+'9'.repeat(32)]};h.reload();
-  assert.ok(assetInventory(h.flow));assert.match(text(h),/140 retained unlinked/);assert.match(text(h),/2 opaque IDs/);assert.equal(h.get('file-input').disabled,false);
+  assert.ok(assetInventory(h.flow));assert.match(text(h),/140 leftover pieces of earlier uploads/);assert.match(text(h),/\(2 listed\)/);assert.equal(h.get('file-input').disabled,false);
 });
 test('noncanonical prefixed, malformed and path-like orphan IDs refuse the inventory',()=>{
   for(const orphan of ['stage_'+id('upload',91)+'_'+'9'.repeat(32),'stage_'+'9'.repeat(31)+'_'+'9'.repeat(32),
@@ -304,7 +304,7 @@ test('pause persists only typed decision draft and navigation; reload restores d
   const h=harness();h.choose([file()]);await h.get('visualize-new-set').click();assert.equal(h.get('visualize-pause'),undefined);await h.flow.pause();
   assert.equal(h.flow.paused,true);assert.deepEqual(writes(h).map(call=>call.route),['/api/v1/draft','/api/v1/navigate']);assert.equal(h.flow.status('visualize'),'current');
   const reloaded=new Flow(h.api,()=> 'reloaded');reloaded.load(h.state);assert.deepEqual(reloaded.buffers.visualize,{...fields(),source:'claude_design'});
-  assert.match(text(h),/not local files/);
+  assert.match(text(h),/does not keep files you have not finished uploading/);
 });
 test('download uses fixed authenticated API and inert Blob; names remain literal; URL revokes after click',async()=>{
   const h=harness(),asset=h.addAsset('../../<script>literal</script>.html',7,'text/html');h.reload();assert.ok(text(h).includes(asset.name));
@@ -331,7 +331,7 @@ test('archived and unknown selected status refuse new uploads; archived attachme
 test('archive transition freezes queued writes but permits read-only recovery of an existing upload receipt',async()=>{
   const h=harness();h.faults.metadataAck=true;h.choose([file()]);await h.get('upload-action-1').click();h.state.idea_status='archived';h.reload();
   assert.equal(h.get('upload-action-1').disabled,false);h.faults.metadataAck=false;await h.get('upload-action-1').click();assert.equal(writes(h).length,1);
-  assert.equal(h.get('upload-action-1').textContent,'Upload file bytes');assert.equal(h.get('upload-action-1').disabled,true);
+  assert.equal(h.get('upload-action-1').textContent,'Finish upload');assert.equal(h.get('upload-action-1').disabled,true);
 });
 
 
@@ -342,14 +342,14 @@ test('archived full renderer disables all set and disposition controls but prese
   for(const control of ['visualize-new-set','visualize-member-'+asset.asset_id,'visualize-set-'+SET,'visualize-skipped','visualize-prototype','visualize-accept']){
     assert.equal(h.get(control).disabled,true,control);await h.get(control).click();
   }
-  assert.match(text(h),/Design-set and disposition changes are unavailable/);assert.equal(writes(h).length,0);
+  assert.match(text(h),/Its design choice cannot change/);assert.equal(writes(h).length,0);
   assert.equal(h.get('download-'+asset.asset_id).disabled,false);await h.get('download-'+asset.asset_id).click();assert.equal(h.anchors[0].clicked,true);
   
 });
 test('typed metadata refusals stop the exact request until explicit removal and reselection',async()=>{
   for(const refusal of [{code:'stale_revision',status:409},{code:'too_large',status:413},{code:'invalid_asset_type',status:415},{code:'receipt_capacity_exhausted',status:503},{code:'idea_archived',status:409}]){
     const h=harness();h.faults.metadataRefusal=refusal;const chosen=file();h.choose([chosen]);await h.get('upload-action-1').click();
-    const original=copy(writes(h)[0].payload);assert.equal(h.get('upload-action-1').disabled,true);assert.match(text(h),/Remove.*reselect/);
+    const original=copy(writes(h)[0].payload);assert.equal(h.get('upload-action-1').disabled,true);assert.match(text(h),/Remove it here and choose the file again/);
     assert.ok(!text(h).includes(refusal.code));if(refusal.code==='idea_archived')assert.match(text(h),/idea is archived/);await h.get('upload-action-1').click();assert.equal(writes(h).length,1);
     h.faults.metadataRefusal=null;await h.get('upload-remove-1').click();h.state.revision++;h.reload();h.choose([chosen]);await h.get('upload-action-2').click();
     assert.notEqual(writes(h)[1].payload.request_id,original.request_id);assert.equal(writes(h)[1].payload.expected_revision,h.state.revision);assert.equal(writes(h).length,3);
@@ -357,14 +357,14 @@ test('typed metadata refusals stop the exact request until explicit removal and 
 });
 test('queued revision drift is an explicit terminal refusal and never rewrites old payload',async()=>{
   const h=harness();h.choose([file()]);h.state.revision++;h.reload();await h.get('upload-action-1').click();
-  assert.equal(writes(h)[0].payload.expected_revision,4);assert.equal(h.get('upload-action-1').disabled,true);assert.match(text(h),/saved idea changed/);
+  assert.equal(writes(h)[0].payload.expected_revision,4);assert.equal(h.get('upload-action-1').disabled,true);assert.match(text(h),/idea changed after you chose this file/);
   await h.get('upload-action-1').click();assert.equal(writes(h).length,1);assert.equal(writes(h)[0].payload.expected_revision,4);
 });
 test('typed byte refusals stop retries while preserving local selection and saved intent',async()=>{
   for(const refusal of [{code:'too_large',status:413},{code:'invalid_asset_type',status:415}]){
     const h=harness();h.faults.bytesRefusal=refusal;h.choose([file()]);await h.get('upload-action-1').click();
     assert.equal(writes(h).length,2);assert.equal(h.get('upload-action-1').disabled,true);assert.equal(assetInventory(h.flow).intents.length,1);
-    assert.equal(assetInventory(h.flow).assets.length,0);assert.match(text(h),/Nothing was applied/);await h.get('upload-action-1').click();assert.equal(writes(h).length,2);
+    assert.equal(assetInventory(h.flow).assets.length,0);assert.match(text(h),/Nothing was saved/);await h.get('upload-action-1').click();assert.equal(writes(h).length,2);
   }
 });
 test('typed download refusal explains recovery without exposing raw codes',async()=>{
@@ -374,7 +374,7 @@ test('typed download refusal explains recovery without exposing raw codes',async
 test('completed queue rows remain bounded and name the rows to remove',async()=>{
   const h=harness();h.choose(Array.from({length:20},(_,i)=>file('completed-'+i+'.md')));
   for(let n=1;n<=20;n++)await h.get('upload-action-'+n).click();
-  h.choose([file('next.md')]);assert.equal(h.get('upload-action-21'),undefined);assert.match(text(h),/Completed rows to remove: completed-0.md/);
+  h.choose([file('next.md')]);assert.equal(h.get('upload-action-21'),undefined);assert.match(text(h),/Uploaded rows you can clear: completed-0.md/);
   assert.match(text(h),/20-file or 100 MiB limits/);await h.get('upload-remove-1').click();h.choose([file('next.md')]);assert.ok(h.get('upload-action-21'));
 });
 test('only explicit matching MIME aliases become canonical declared types',async()=>{
@@ -387,14 +387,14 @@ test('only explicit matching MIME aliases become canonical declared types',async
 });
 test('projection capacity gives a typed non-reload road; other absence remains explicit',()=>{
   const h=harness();h.state.asset_inventory_status={available:false,code:'asset_projection_capacity'};h.reload();
-  assert.match(text(h),/reloading cannot reduce retained history/);assert.equal(h.get('file-input').disabled,true);
+  assert.match(text(h),/reloading will not change that/);assert.equal(h.get('file-input').disabled,true);
   h.state.asset_inventory_status={available:false,code:'not_ready'};h.reload();assert.match(text(h),/not ready/);
-  h.state.asset_inventory_status={available:false,code:'no_selection'};h.reload();assert.match(text(h),/Save or select an idea/);
+  h.state.asset_inventory_status={available:false,code:'no_selection'};h.reload();assert.match(text(h),/Save or open an idea/);
 });
 test('changed request session cannot resume a saved original-file intent',()=>{
   const h=harness();h.add({...h.common(),kind:'upload-intent',upload_id:id('upload',8),asset_id:id('asset',8),session_id:SESSION,name:'draft.md',declared_type:'text/markdown',size:7});
   h.state.session_id='session_'+'9'.repeat(32);h.reload();h.choose([file()]);
-  assert.equal(h.get('upload-resume-1-'+id('upload',8)),undefined);assert.match(text(h),/different session cannot resume/);assert.equal(writes(h).length,0);
+  assert.equal(h.get('upload-resume-1-'+id('upload',8)),undefined);assert.match(text(h),/In a new session, upload it again from the start/);assert.equal(writes(h).length,0);
 });
 test('local brief copying remains available offline and paused without writes',async()=>{
   const copied=[],h=harness({clipboard:{writeText:async value=>copied.push(value)}});h.connect(false);h.flow.paused=true;h.draw();
@@ -412,7 +412,7 @@ test('byte receipt followed by read loss retains check and verifies completion w
 test('completed queue bytes count toward the 100 MiB cap until explicit local row removal',async()=>{
   const h=harness(),selected=Array.from({length:4},(_,i)=>{const blob=file('large-completed-'+i+'.md');Object.defineProperty(blob,'size',{value:25*1024*1024});return blob;});
   h.choose(selected);for(let n=1;n<=4;n++)await h.get('upload-action-'+n).click();h.choose([file('next.md')]);
-  assert.equal(h.get('upload-action-5'),undefined);assert.match(text(h),/Completed rows to remove: large-completed-0.md/);
+  assert.equal(h.get('upload-action-5'),undefined);assert.match(text(h),/Uploaded rows you can clear: large-completed-0.md/);
   await h.get('upload-remove-1').click();h.choose([file('next.md')]);assert.ok(h.get('upload-action-5'));
 });
 
@@ -553,4 +553,22 @@ test('not-applicable is not a step status: no label, no glyph, no progress credi
   assert.equal(folds.statusGlyph('not-applicable'),'?');
   assert.ok(!(await readFile(new URL('folds.js',web),'utf8')).includes('not-applicable'));
   assert.ok(!(await readFile(new URL('steps/review.js',web),'utf8')).includes('not-applicable'));
+});
+test('SKILLS-96: the rendered Visualize page says what each control does, in plain words',async()=>{
+  const words=h=>[...h.body.all(),...(h.get('visualize-accept')?[h.get('visualize-accept')]:[])].flatMap(node=>[node.textContent,node['aria-label'],node.title]).filter(value=>typeof value==='string').join('\n');
+  const BANNED=/membership|intent|disposition|retained|asset/i;
+  const fresh=harness();fresh.addAsset('sketch.png',7,'image/png');fresh.reload();
+  assert.equal(fresh.get('visualize-new-set').textContent,'Choose which files are the design');
+  assert.match(words(fresh),/Uploading keeps a file with this idea; it does not make it the design\./);
+  await fresh.get('visualize-new-set').click();fresh.get('visualize-member-'+id('asset',1)).change({checked:true});
+  assert.match(words(fresh),/1 file ticked as the design\./);assert.doesNotMatch(words(fresh),BANNED);
+  const h=harness(),asset=h.addAsset('draft.md');h.addSet([asset]);
+  h.add({...h.common(),kind:'upload-intent',upload_id:id('upload',9),asset_id:id('asset',9),session_id:SESSION,name:'half.md',declared_type:'text/markdown',size:7});
+  h.state.asset_inventory.orphans={count:3,ids:[id('asset',10)]};h.reload();
+  assert.equal(h.get('visualize-new-set').textContent,'Start another design from other files');
+  assert.equal(h.get('visualize-set-'+SET).textContent,'Use this design');
+  await h.get('visualize-set-'+SET).click();
+  const page=words(h);
+  assert.match(page,/Earlier design: draft\.md/);assert.match(page,/Chosen design: draft\.md/);assert.match(page,/1 upload was started and not finished/);
+  assert.match(page,/3 leftover pieces of earlier uploads/);assert.doesNotMatch(page,BANNED);assert.ok(!page.includes(SET),'the set id is not shown');
 });

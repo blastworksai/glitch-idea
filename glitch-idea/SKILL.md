@@ -162,6 +162,7 @@ Explore through the chosen method's lens, in this order, filling each beat under
 The page offers three choices, labelled exactly: "Visualize in Claude Design and import it back", "Prototype Here" and "Skip visualization".
 The step ends in one of two dispositions: `accepted_set` (with `source` `claude_design` or `prototype`) or `skipped` (the reason is optional and it takes one click).
 Only the operator accepts or skips, in the page.
+In the page the accepted set is called "the design", and a file only becomes part of it when the operator ticks it: uploading keeps a file with the idea and nothing more. The Claude Design card's buttons read "Choose which files are the design" (or "Start another design from other files" once a design exists) and "Use this design" for an earlier one. Speak those words to the operator, never the store's names (design set, membership, disposition, upload intent).
 A skip (or a Claude Design import) sends the terminal no request; you learn the step is done only when the next request (assessment) arrives, so read your events before telling the operator anything about Visualize.
 
 For "Prototype Here" the page sends a `visual_brief` request.
