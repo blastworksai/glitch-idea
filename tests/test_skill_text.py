@@ -168,6 +168,18 @@ class VisualizeTextTests(unittest.TestCase):
         self.assertNotIn("not-applicable", SKILL)
         self.assertNotIn("not-applicable", COMMANDS)
 
+    def test_docs_quote_the_pages_plain_design_words(self):
+        # SKILLS-96: the skill speaks the page's words, and every label it quotes is on the page.
+        page = (ROOT / "glitch-idea" / "web" / "steps" / "visualize.js").read_text()
+        labels = ("Choose which files are the design", "Start another design from other files", "Use this design")
+        for text in (section(SKILL, "Visualize"), COMMANDS):
+            body = " ".join(text.split())
+            for label in labels:
+                self.assertIn('"' + label + '"', body)
+                self.assertIn("'" + label + "'", page)
+            self.assertRegex(body, r"uploading keeps a file with the idea and nothing more")
+            self.assertRegex(body, r"never the store's names \(design set, membership, disposition, upload intent\)")
+
 
 def flat(text):
     return " ".join(text.split())

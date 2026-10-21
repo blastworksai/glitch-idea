@@ -393,16 +393,16 @@ export function startApp(api = new IdeaApi()) {
     body.append(columns);
     const files = element('section', '', 'files-section');
     files.setAttribute('aria-labelledby', 'files-title');
-    const filesHeading = element('h2', 'Original files', 'g-section-title');
+    const filesHeading = element('h2', 'Files for this idea', 'g-section-title');
     filesHeading.id = 'files-title';
     files.append(filesHeading);
     if (!/^idea_[0-9a-f]{32}$/.test(flow.state?.idea_id ?? '')) {
-      const notice = element('p', 'Save your idea words and workspace first. You can then reopen Capture to upload original files.', 'notice');
+      const notice = element('p', 'Save your idea words and workspace first. You can then reopen Capture to upload files.', 'notice');
       notice.id = 'capture-attachments'; files.append(notice);
     } else if (captureUploads) {
       const attachments = element('section'); attachments.id = 'capture-attachments';
-      attachments.setAttribute('aria-label', 'Original Capture attachments');
-      attachments.append(element('p', 'Original files stay separate from accepted design-set membership. Uploading preserves your idea words.', 'help'));
+      attachments.setAttribute('aria-label', 'Files for this idea');
+      attachments.append(element('p', 'Upload anything that helps explain the idea: sketches, notes, screenshots. Your idea words stay exactly as you wrote them. Which files are the design is chosen later, in Visualize.', 'help'));
       captureUploads({body: attachments, flow, api, element, button, connected, handle});
       files.append(attachments);
     } else {

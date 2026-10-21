@@ -129,6 +129,7 @@ rotates the generation; old credentials and outstanding replies cannot cross it.
 
 The Visualize step ends as `accepted_set` (with `source` `claude_design` or `prototype`) or `skipped` (reason optional, one click).
 The page offers "Visualize in Claude Design and import it back", "Prototype Here" and "Skip visualization".
+In the page the accepted set is called "the design", and a file only becomes part of it when the operator ticks it: uploading keeps a file with the idea and nothing more. The Claude Design card's buttons read "Choose which files are the design" (or "Start another design from other files" once a design exists) and "Use this design" for an earlier one. Speak those words to the operator, never the store's names (design set, membership, disposition, upload intent).
 
 `prototype-serve` serves a built prototype folder on its own loopback port, sandboxed by CSP, with no cookies, and runs until the session ends, so start it in the background (a background job or `&`):
 

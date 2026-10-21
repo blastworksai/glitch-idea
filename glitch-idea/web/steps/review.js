@@ -187,8 +187,8 @@ function summaryCards(ctx, accepted) {
       if (isObject(fields.memory)) { row('Memory check', MEMORY_NAMES[fields.memory.status] ?? ''); row('Memory sources', list(fields.memory.sources)); row('Memory rationale', str(fields.memory.rationale)); }
     } else if (key === 'visualize') {
       const reason = str(fields.reason);
-      if (str(fields.design_set_id)) row('Design set', str(fields.design_set_id));
-      decision = fields.disposition === 'accepted_set' ? 'Design set accepted.' + (reason ? ' ' + reason : '') :
+      if (str(fields.design_set_id)) row('Design', str(fields.design_set_id));
+      decision = fields.disposition === 'accepted_set' ? 'Design accepted.' + (reason ? ' ' + reason : '') :
         fields.disposition === 'skipped' ? 'Skipped' + (reason ? ' — ' + reason : '') : 'No decision saved.';
     } else if (key === 'assess') {
       const pos = isObject(fields.position) ? fields.position : {}, a = isObject(fields.assessment) ? fields.assessment : null;
@@ -247,9 +247,9 @@ export function render(ctx) {
       element('p', 'Immutable packet: ' + packet.path, 'bw-meta'), element('p', 'Packet SHA-256: ' + packet.sha256, 'bw-meta'));
     for (const [name, file] of Object.entries(packet.source_files)) facts.append(element('p', name + ': ' + file.path + ' · SHA-256 ' + file.sha256, 'bw-meta'));
     if (packet.design_set) {
-      facts.append(element('p', 'Accepted design set: ' + packet.design_set.set_id, 'bw-meta'));
+      facts.append(element('p', 'Accepted design: ' + packet.design_set.set_id, 'bw-meta'));
       for (const member of packet.design_set.members) facts.append(element('p', member.name + ' · ' + member.path + ' · SHA-256 ' + member.sha256, 'bw-meta'));
-    } else facts.append(element('p', 'No accepted design assets.', 'bw-meta'));
+    } else facts.append(element('p', 'No design files accepted.', 'bw-meta'));
     body.append(facts);
     const label = element('label', 'Full planning prompt'); label.htmlFor = 'review-prompt';
     const prompt = element('textarea', '', 'g-textarea'); prompt.id = 'review-prompt'; prompt.value = packet.prompt; prompt.readOnly = true;

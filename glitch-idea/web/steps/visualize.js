@@ -1,7 +1,9 @@
-// Explicit uploads and immutable membership; Flow owns save/recovery.
+// Uploads, and which of them are the design; Flow owns save/recovery.
 import {METHOD_LABELS as METHOD_NAMES, validVisualize, acceptBlockers} from '../folds.js';
 
 const MAX_FILE = 25 * 1024 * 1024, MAX_SET = 100 * 1024 * 1024;
+// The member-facing word for each local upload stage (task.phase stays the code's own name).
+const PHASES = {metadata:'ready to upload', bytes:'ready to finish', 'check-metadata':'checking', 'check-bytes':'checking', refused:'stopped', complete:'uploaded'};
 const ID = {idea: /^idea_[0-9a-f]{32}$/, upload: /^upload_[0-9a-f]{32}$/, asset: /^asset_[0-9a-f]{32}$/, set: /^set_[0-9a-f]{32}$/};
 const HASH = /^[0-9a-f]{64}$/;
 const TYPES = {'image/png':['png'], 'image/jpeg':['jpg','jpeg'], 'image/webp':['webp'],
@@ -104,10 +106,10 @@ export function visualBrief(flow) {
     if(exploration.investment)methodLines.push('Investment cap: '+exploration.investment.cap+' '+exploration.investment.unit,'Boundary: '+exploration.investment.boundary);
     if(exploration.experiment)for(const [key,label]of [['question','Question'],['evidence','Evidence'],['success_criterion','Success criterion'],['stop_rule','Stop rule']])methodLines.push(label+': '+exploration.experiment[key]);
   }
-  return 'Visual design brief — derived from current accepted answers\n\nCapture\n'+flow.state.accepted.capture.raw_text+
+  return 'Visual design brief — from the answers saved so far\n\nCapture\n'+flow.state.accepted.capture.raw_text+
     '\n\nDiscovery\n'+found.join('\n')+'\n\nExploration\n'+lines.join('\n')+(sketch.length?'\n\nSketch\n'+sketch.join('\n'):'')+
     (methodLines.length?'\n\nMethod\n'+methodLines.join('\n'):'')+
-    '\n\nCreate locally or with your chosen tool. Upload files here, select membership, then accept explicitly.';
+    '\n\nMake the design with your chosen tool, upload its files back to this page, tick the files that are the design, then press Accept.';
 }
 
 // Buttons sit in a row of their own so a card never stretches them full width.
@@ -125,30 +127,30 @@ const blocked = ctx => !ctx.connected || ctx.flow.busy || ctx.flow.pending || ct
 const writeBlocked = ctx => blocked(ctx) || ctx.flow.state?.idea_status !== 'active';
 function failureMessage(code,download=false) {
   const messages = {
-    stale_revision:'The saved idea changed. Remove this local selection and reselect the file using current state.',
-    receipt_capacity_exhausted:'This request session has no capacity for another receipt. Pair a fresh session, then remove and reselect the file.',
-    asset_capacity_exhausted:'Retained asset capacity is exhausted. Existing history remains available; another upload cannot be added.',
-    too_large:'The file or retained storage exceeds its size or capacity limit.',
-    invalid_asset_type:'The file extension, declared type or content signature does not match a supported format.',
-    invalid_upload:'This file selection is invalid. Choose a supported file within the limits.',
-    request_conflict:'This upload identity conflicts with saved evidence. Remove and reselect the file.',
-    idea_archived:'This idea is archived. Existing files remain readable; new uploads are unavailable.',
+    stale_revision:'The idea changed after you chose this file. Remove it here and choose the file again.',
+    receipt_capacity_exhausted:'This session cannot take another upload. Pair a new session, then remove the file here and choose it again.',
+    asset_capacity_exhausted:'This idea has no room for more uploads. Every file already uploaded is still kept.',
+    too_large:'The file is too big, or this idea has no room left for it.',
+    invalid_asset_type:'The file name ending or its contents do not match a supported file type.',
+    invalid_upload:'This file cannot be uploaded. Choose a supported file within the limits.',
+    request_conflict:'This upload clashes with one already saved. Remove it here and choose the file again.',
+    idea_archived:'This idea is archived. Its files can still be downloaded; new uploads are off.',
     browser_unauthorized:'This browser needs pairing again before accessing files.',
-    asset_not_found:'This saved file is unavailable. Reload current state before downloading.',
-    not_found:'This saved file is unavailable. Reload current state before downloading.',
-    corrupt_store:'Saved file integrity could not be verified. Stop and have the Store checked.',
-    durability_uncertain:'The upload may have committed. Check its result before retrying.',
-    connection_lost:download?'The connection was lost. Download again when connected.':'The connection was lost. Check the upload result before retrying.',
-    invalid_response:download?'The downloaded file response could not be verified. Reload current state before downloading again.':'The response could not be verified. Check the upload result before retrying.',
+    asset_not_found:'This saved file is unavailable. Reload the page before downloading.',
+    not_found:'This saved file is unavailable. Reload the page before downloading.',
+    corrupt_store:'A saved file failed its integrity check. Stop here and have the ideas store checked.',
+    durability_uncertain:'The upload may have gone through. Check its result before trying again.',
+    connection_lost:download?'The connection was lost. Download again when connected.':'The connection was lost. Check the upload result before trying again.',
+    invalid_response:download?'The download could not be checked. Reload the page before downloading again.':'The reply could not be checked. Check the upload result before trying again.',
   };
-  return messages[code] ?? (download?'The file could not be downloaded. Check the connection and current saved state.':'The upload could not be completed. Your local file selection is kept.');
+  return messages[code] ?? (download?'The file could not be downloaded. Check the connection and reload the page.':'The upload could not be completed. The file stays in the list here.');
 }
 function inventoryMessage(flow) {
   const code=flow.state?.asset_inventory_status?.code;
-  if(code==='asset_projection_capacity')return 'Verified asset inventory exceeds projection capacity. Upload and set selection are unavailable; reloading cannot reduce retained history. Existing history is preserved.';
-  if(code==='no_selection')return 'Save or select an idea before uploading files or selecting a design set.';
-  if(code==='not_ready')return 'Verified asset inventory is not ready. Reload current state before uploading or selecting a set.';
-  return 'Verified asset inventory is unavailable or invalid. Reload current state; upload and set selection are unavailable.';
+  if(code==='asset_projection_capacity')return 'This idea holds more files than the page can list. Uploading and choosing the design are off here, and reloading will not change that. Every file is still kept.';
+  if(code==='no_selection')return 'Save or open an idea before uploading files or choosing the design.';
+  if(code==='not_ready')return 'The file list is not ready yet. Reload the page before uploading or choosing the design.';
+  return 'The file list could not be loaded. Reload the page; until then uploading and choosing the design are off.';
 }
 function receipt(value,task,bytes) {
   return value?.ok === true && value.code === 'ok' && ['applied','no_op'].includes(value.write_state) &&
@@ -163,7 +165,7 @@ async function uploadAction(ctx,task,action) {
   if (blocked(ctx) || task.phase === 'refused') return false;
   const {flow} = ctx, local = session(flow), idea = flow.state.idea_id;
   if (!action.startsWith('check-') && flow.state.idea_status !== 'active') {
-    task.error='New uploads require an active idea. Existing upload results and files remain readable.';flow.onChange();return false;
+    task.error='New uploads need an active idea. Files already uploaded can still be downloaded.';flow.onChange();return false;
   }
   flow.busy = true; flow.mutationEpoch++; task.error = null; flow.onChange();
   try {
@@ -174,7 +176,7 @@ async function uploadAction(ctx,task,action) {
       result = resolved.result; state = resolved.state;
       if (!state || state.idea_id !== idea) throw invalid();
       flow.load(state,true);
-      if (result === null) { task.phase = bytes ? 'bytes' : 'metadata'; task.error = 'No receipt found. Retry explicitly with the same file/request.'; return false; }
+      if (result === null) { task.phase = bytes ? 'bytes' : 'metadata'; task.error = 'The upload did not arrive. Try again with the same file.'; return false; }
     } else {
       result = bytes ? await flow.api.uploadBytes(task.upload_id,task.file) : await flow.api.uploadMetadata(task.payload);
     }
@@ -187,7 +189,7 @@ async function uploadAction(ctx,task,action) {
       const intent = assetInventory(flow)?.intents.find(value => value.upload_id === task.upload_id && value.asset_id === task.asset_id &&
         value.session_id === flow.state.session_id && value.name === task.payload.name && value.size === task.payload.size &&
         value.declared_type === task.payload.declared_type);
-      if (!intent) {task.error = 'Receipt exists; verified upload intent is unavailable. Check/reload before sending bytes.';return false;}
+      if (!intent) {task.error = 'The upload started, but the page cannot see it yet. Check its result or reload before finishing it.';return false;}
       task.phase = 'bytes';
     } else {
       // Byte receipt alone never marks completion: current verified inventory
@@ -198,7 +200,7 @@ async function uploadAction(ctx,task,action) {
       flow.load(state,true);
       const asset = assetInventory(flow)?.assets.find(value => value.asset_id === task.asset_id && value.upload_id === task.upload_id &&
         value.name === task.file.name && value.size === task.file.size && value.validated_type === task.type);
-      if (!asset) { task.error = 'Receipt exists; complete asset is unavailable in this projection. Reload/check before continuing.'; return false; }
+      if (!asset) { task.error = 'The file arrived, but the page cannot see it yet. Check its result or reload before continuing.'; return false; }
       task.phase = 'complete';
     }
     return true;
@@ -210,8 +212,8 @@ async function uploadAction(ctx,task,action) {
       task.phase = action.includes('bytes') ? 'check-bytes' : 'check-metadata';
     else if (error.data?.write_state === 'not_applied') {
       task.phase = 'refused';
-      task.error += ' Nothing was applied. Remove this local selection and reselect explicitly; this request will not be retried.';
-    } else {task.phase='refused';task.error += ' Remove and reselect the file before another upload.';}
+      task.error += ' Nothing was saved. Remove it here and choose the file again; this upload will not be retried.';
+    } else {task.phase='refused';task.error += ' Remove it here and choose the file again before another upload.';}
     return false;
   } finally {
     flow.busy = false;
@@ -220,13 +222,13 @@ async function uploadAction(ctx,task,action) {
 }
 
 // Shared by Visualize and saved Capture. File bytes live only in this tab;
-// immutable intents/completions, rather than local queue labels, survive reload.
+// the store's saved upload records, rather than local queue labels, survive reload.
 export function renderUploads(ctx) {
   const {body,flow,element,button,handle} = ctx, local = session(flow), inventory = assetInventory(flow);
-  const group = element('section'); group.setAttribute('aria-label','Local file uploads');
-  group.append(element('p','Choose up to 20 files, 25 MiB each and 100 MiB total. Files stay separate from accepted design-set membership.'));
-  group.append(element('p','Unfinished file selections live only in this tab. After reload, reselect the original file to resume a saved intent in the same request session. A different session cannot resume that intent.'));
-  const label = element('label','Choose local files'); label.htmlFor = 'file-input';
+  const group = element('section'); group.setAttribute('aria-label','Upload files');
+  group.append(element('p','Upload up to 20 files at a time, 25 MiB each and 100 MiB in all. Every file you upload stays with this idea; an upload cannot be taken back.'));
+  group.append(element('p','Files you have chosen but not finished uploading live only in this tab. After a reload, choose the same file again to finish its upload. In a new session, upload it again from the start.'));
+  const label = element('label','Choose files to upload'); label.htmlFor = 'file-input';
   const input = element('input'); input.id = 'file-input'; input.type = 'file'; input.multiple = true;
   input.accept = Object.keys(INFER).map(extension => '.'+extension).join(',');
   input.disabled = Boolean(blocked(ctx) || flow.state?.idea_status !== 'active' || !typed(flow.state?.idea_id,'idea') || !inventory || inventory.total >= 256 || flow.state?.capabilities?.uploads !== true);
@@ -237,8 +239,8 @@ export function renderUploads(ctx) {
     if (!files.length) return;
     if (files.length+active.length > 20 || files.reduce((total,file) => total+file.size,active.reduce((total,task) => total+task.file.size,0)) > MAX_SET) {
       const completed=active.filter(task=>task.phase==='complete').map(task=>task.file.name);
-      local.error='The local queue exceeds the 20-file or 100 MiB limits. Remove local rows before choosing more files.'+
-        (completed.length?' Completed rows to remove: '+completed.join(', '):'');
+      local.error='That is more than the 20-file or 100 MiB limits allow at once. Clear rows from this list before choosing more files.'+
+        (completed.length?' Uploaded rows you can clear: '+completed.join(', '):'');
       flow.onChange();return;
     }
     if (files.some(file => !(file instanceof Blob) || !name(file.name) || !size(file.size) || !fileType(file))) {
@@ -252,17 +254,17 @@ export function renderUploads(ctx) {
   group.append(label,input);
   if (!typed(flow.state?.idea_id,'idea')) group.append(element('p','Save Capture before uploading files.'));
   else if (flow.state.idea_status !== 'active') group.append(element('p',flow.state.idea_status==='archived'?
-    'This idea is archived. Existing files remain readable; new uploads are unavailable.':'Idea status is unavailable. Reload before starting an upload.','notice'));
+    'This idea is archived. Its files can still be downloaded; new uploads are off.':'Idea status is unavailable. Reload before starting an upload.','notice'));
   if (!inventory) group.append(element('p',inventoryMessage(flow),'notice'));
-  else if (inventory.total >= 256) group.append(element('p','Retained asset capacity is exhausted. Existing history remains available.','notice'));
+  else if (inventory.total >= 256) group.append(element('p','This idea has no room for more uploads. Every file already uploaded is still kept.','notice'));
   if (local.error) { const error=element('p',local.error,'notice'); error.setAttribute('role','alert'); group.append(error); }
   for (const task of local.queue) {
-    const row=element('div','','g-card'); row.append(element('p',task.file.name+' · '+task.file.size+' bytes · '+task.phase));
+    const row=element('div','','g-card'); row.append(element('p',task.file.name+' · '+task.file.size+' bytes · '+(PHASES[task.phase]??task.phase)));
     if (task.error) { const error=element('p',task.error,'notice'); error.setAttribute('role','status'); row.append(error); }
     const rowActions=element('div','','setup-actions');
     if (task.phase !== 'complete') {
       const checking=task.phase.startsWith('check-');
-      const action=button(task.phase==='refused'?'Remove and reselect file':checking?'Check upload result':task.phase==='bytes'?'Upload file bytes':'Upload file',handle(async()=>{
+      const action=button(task.phase==='refused'?'Remove and choose again':checking?'Check upload result':task.phase==='bytes'?'Finish upload':'Upload file',handle(async()=>{
         if (task.phase === 'metadata') {
           if (await uploadAction(ctx,task,'metadata')) await uploadAction(ctx,task,'bytes');
         } else await uploadAction(ctx,task,task.phase);
@@ -271,26 +273,28 @@ export function renderUploads(ctx) {
       if (task.phase === 'metadata' && !task.error) {
         for (const intent of inventory?.intents ?? []) if (intent.session_id === flow.state.session_id && intent.name === task.file.name &&
           intent.size === task.file.size && intent.declared_type === task.type && !inventory.assets.some(asset => asset.upload_id === intent.upload_id)) {
-          const resume=button('Resume saved upload '+intent.upload_id,handle(()=>{
+          const resume=button('Finish the earlier upload of this file',handle(()=>{
             task.upload_id=intent.upload_id; task.asset_id=intent.asset_id; task.phase='bytes'; flow.onChange();
           })); resume.id='upload-resume-'+task.id+'-'+intent.upload_id; resume.disabled=Boolean(blocked(ctx)||flow.state.idea_status!=='active'); rowActions.append(resume);
         }
       }
       if (!checking) {
-        const remove=button('Remove local selection',handle(()=>{local.queue=local.queue.filter(value=>value!==task);flow.onChange();}));
+        const remove=button('Remove from this list',handle(()=>{local.queue=local.queue.filter(value=>value!==task);flow.onChange();}));
         remove.id='upload-remove-'+task.id; remove.disabled=Boolean(blocked(ctx)); rowActions.append(remove);
       }
     } else {
-      const remove=button('Remove completed local selection',handle(()=>{local.queue=local.queue.filter(value=>value!==task);flow.onChange();}));
+      const remove=button('Clear from this list (it stays uploaded)',handle(()=>{local.queue=local.queue.filter(value=>value!==task);flow.onChange();}));
       remove.id='upload-remove-'+task.id;remove.disabled=Boolean(blocked(ctx));rowActions.append(remove);
     }
     row.append(rowActions);group.append(row);
   }
   if (inventory) {
-    group.append(element('p',inventory.intents.filter(intent=>!inventory.assets.some(asset=>asset.upload_id===intent.upload_id)).length+' retained incomplete upload intents.'));
-    if (inventory.orphans.count) group.append(element('p',inventory.orphans.count+' retained unlinked stages/blobs; '+inventory.orphans.ids.length+' opaque IDs reported. No automatic cleanup.'));
+    const unfinished=inventory.intents.filter(intent=>!inventory.assets.some(asset=>asset.upload_id===intent.upload_id)).length;
+    if (unfinished) group.append(element('p',unfinished===1?'1 upload was started and not finished. Choose the same file again to finish it.':
+      unfinished+' uploads were started and not finished. Choose the same files again to finish them.'));
+    if (inventory.orphans.count) group.append(element('p',inventory.orphans.count+' leftover pieces of earlier uploads are kept in the store ('+inventory.orphans.ids.length+' listed); nothing is cleaned up automatically.'));
     for (const asset of inventory.assets) {
-      const row=element('p',asset.name+' · '+asset.validated_type+' · '+asset.size+' bytes · complete');
+      const row=element('p',asset.name+' · '+asset.validated_type+' · '+asset.size+' bytes · uploaded');
       row.id='uploaded-'+asset.asset_id;
       const download=button('Download '+asset.name,handle(async()=>{
         if(blocked(ctx))return;
@@ -360,27 +364,29 @@ export function render(ctx) {
   const edited=fields=>ctx.edited('visualize',fields);
   const make=(disposition,design_set_id,source)=>({disposition,reason:null,design_set_id,brief_evidence_id:null,...(source?{source}:{})});
   if(flow.state?.idea_status!=='active')body.append(element('p',flow.state?.idea_status==='archived'?
-    'This idea is archived. Design-set and disposition changes are unavailable; existing files remain downloadable.':
+    'This idea is archived. Its design choice cannot change; its files can still be downloaded.':
     'Idea status is unavailable. Reload before changing a Visualize decision.','notice'));
   const card=(title,id,hint='')=>{const box=element('section','','g-card choice-card');box.id=id;box.setAttribute('aria-label',title);box.append(element('h2',title));if(hint)box.append(element('p',hint,'g-sub'));return box;};
   const cards=element('div','','choice-cards'),claude=card(CARD_CLAUDE,'visualize-card-claude'),proto=card(CARD_PROTOTYPE,'visualize-card-prototype','Your terminal builds a clickable prototype and opens it in a second tab.'),skip=card(CARD_SKIP,'visualize-card-skip','Move on without a visual design. No reason is needed.');
   cards.append(claude,proto,skip);body.append(cards);
 
   // Card 1: Claude Design. The brief, copy and upload road, unchanged in behaviour.
-  const brief=visualBrief(flow), briefBox=element('section'); briefBox.setAttribute('aria-label','Derived visual brief');
+  const brief=visualBrief(flow), briefBox=element('section'); briefBox.setAttribute('aria-label','Design brief');
   if (brief) {
-    const label=element('label','Brief from current accepted answers'); label.htmlFor='visualize-brief';
+    const label=element('label','Design brief from your saved answers'); label.htmlFor='visualize-brief';
     const text=element('textarea','','g-locked'); text.id='visualize-brief';text.value=brief;text.readOnly=true;briefBox.append(label,text);
     const copyButton=button('Copy brief',handle(async()=>{
       try {const clipboard=ctx.clipboard??globalThis.navigator?.clipboard;if(!clipboard?.writeText)throw new Error('unavailable');await clipboard.writeText(brief);local.copyMessage='Brief copied.';}
       catch {local.copyMessage='Clipboard unavailable. Select and copy the brief manually.';}flow.onChange();
     }),'bw-btn bw-btn--secondary'); copyButton.id='visualize-copy';copyButton.disabled=false;briefBox.append(actions(element,copyButton));
-  } else briefBox.append(element('p','Current saved Capture, Discovery and Exploration are required for a derived brief and set acceptance.','notice'));
-  briefBox.append(element('p','The brief uses your accepted answers. Create designs with your chosen tool, then upload the files here.','help'));
+  } else briefBox.append(element('p','Save Capture, Discovery and Exploration first; the brief and the design choice need them.','notice'));
+  briefBox.append(element('p','The brief uses your saved answers. Make the design with your chosen tool, then upload its files here.','help'));
   if(local.copyMessage){const message=element('p',local.copyMessage,'notice');message.id='visualize-copy-status';message.setAttribute('role','status');briefBox.append(message);}claude.append(briefBox);
   const {inventory}=renderUploads({...ctx,body:claude});
-  const choices=element('section');choices.setAttribute('aria-label','Explicit design-set membership');
-  const newSet=button('Create a new set from selected files',handle(()=>{local.members=[];change(make('accepted_set',null,'claude_design'));}));
+  const choices=element('section','','design-choice');choices.setAttribute('aria-label','Which files are the design');
+  choices.append(element('h3','Which files are the design'));
+  choices.append(element('p','Uploading keeps a file with this idea; it does not make it the design. Press the button, tick each file that is part of the design, then press Accept.','help'));
+  const newSet=button(inventory?.sets.length?'Start another design from other files':'Choose which files are the design',handle(()=>{local.members=[];change(make('accepted_set',null,'claude_design'));}));
   newSet.id='visualize-new-set';newSet.disabled=Boolean(writeBlocked(ctx)||!brief||!inventory);choices.append(actions(element,newSet));
   for (const asset of inventory?.assets??[]) {
     const label=element('label',asset.name),check=element('input');check.type='checkbox';check.id='visualize-member-'+asset.asset_id;label.htmlFor=check.id;
@@ -394,12 +400,12 @@ export function render(ctx) {
   }
   for(const set of inventory?.sets??[]) {
     const eligible=eligibleSet(flow,set,inventory);
-    const setRow=element('div','','g-card');setRow.append(element('p',set.set_id+' · '+set.members.map(member=>member.name).join(', ')+' · '+(eligible?'current saved source':'historical / stale source')));
-    const use=button('Select existing set '+set.set_id,handle(()=>{local.members=[];change(make('accepted_set',set.set_id,'claude_design'));}));
+    const setRow=element('div','','g-card');setRow.append(element('p','Earlier design: '+set.members.map(member=>member.name).join(', ')+' · '+(eligible?'made from your saved answers':'made from older answers, so it cannot be used again')));
+    const use=button('Use this design',handle(()=>{local.members=[];change(make('accepted_set',set.set_id,'claude_design'));}));
     use.id='visualize-set-'+set.set_id;use.disabled=Boolean(writeBlocked(ctx)||!eligible);use.setAttribute('aria-pressed',String(current().design_set_id===set.set_id));setRow.append(actions(element,use));choices.append(setRow);
   }
-  if(current().design_set_id)choices.append(element('p','Selected set: '+current().design_set_id,'help'));
-  if(local.members.length)choices.append(element('p',local.members.length+' explicitly selected files.','help'));
+  if(current().design_set_id){const chosen=inventory?.sets.find(set=>set.set_id===current().design_set_id);choices.append(element('p','Chosen design: '+(chosen?chosen.members.map(member=>member.name).join(', '):'an earlier design'),'help'));}
+  if(local.members.length)choices.append(element('p',local.members.length===1?'1 file ticked as the design.':local.members.length+' files ticked as the design.','help'));
   claude.append(choices);
 
   // Card 2: Prototype Here. The terminal builds it; the page only asks and shows the result.
@@ -459,15 +465,15 @@ export function render(ctx) {
     else if(f.state?.idea_status!=='active')add('The idea status is unavailable. Reload before accepting.');
     if(current().disposition==='accepted_set'){
       if(!brief)add('Save Capture, Discovery and Exploration first so the design brief exists.');
-      if(!inventory)add('The file inventory is unavailable. Reload before accepting a design set.');
+      if(!inventory)add('The file list is unavailable. Reload before accepting the design.');
       if(current().design_set_id===null){
         if(current().source==='prototype'&&!ready)add('The prototype is not ready yet. Wait for your terminal to finish building it, or choose another road.');
-        else if(!selected.length)add('Choose a design set to accept, or upload files and select them, or skip this step.');
-        else if(selected.length>20)add('Select at most 20 files.');
-        else if(!selected.every(Boolean))add('A selected file is no longer available. Reselect your files.');
-        else if(selected.reduce((total,asset)=>total+asset.size,0)>MAX_SET)add('The selected files exceed the 100 MiB set limit.');
+        else if(!selected.length)add('Tick the files that are the design, use an earlier design, or skip this step.');
+        else if(selected.length>20)add('Tick at most 20 files.');
+        else if(!selected.every(Boolean))add('A ticked file is no longer available. Tick your files again.');
+        else if(selected.reduce((total,asset)=>total+asset.size,0)>MAX_SET)add('The ticked files add up to more than 100 MiB, the most one design can hold.');
       } else if(inventory&&!inventory.sets.some(set=>set.set_id===current().design_set_id&&eligibleSet(flow,set,inventory)))
-        add('The selected design set is out of date. Choose a current set or create a new one.');
+        add('That earlier design was made from older answers. Choose files for a new design, or skip this step.');
     } else if(phase==='building')add('Your terminal is still building the prototype. Wait for it, or choose another road.');
     else if(phase==='missed')add(MISSED);
     if(!list.length)add('Finish the design choice.');
@@ -475,5 +481,5 @@ export function render(ctx) {
     {const reason=element('p',why,'foot-message accept-reason');reason.id='visualize-accept-reason';foot.append(reason);accept.setAttribute('aria-describedby','visualize-accept-reason');accept.title=why;}
   }
   foot.append(accept);
-  body.append(element('p','Pause saves your decision draft, not local files or new-set checkbox choices. Uploads and accepted sets remain in verified history.','g-sub'));
+  body.append(element('p','Pause keeps the road you chose. It does not keep files you have not finished uploading, or which files you ticked. Uploaded files and accepted designs are always kept.','g-sub'));
 }
