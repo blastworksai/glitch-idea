@@ -772,15 +772,16 @@ class Runtime:
         Reusable owner/agent credentials never leave this module. A NEW ambiguous
         result must not be retried automatically: source launcher reconciles it.
         """
-        _check(mode in ('new', 'resume'), 'invalid_control')
+        _check(mode in ('new', 'resume', 'repair'), 'invalid_control')
         _check((mode == 'new' and binding_id is None) or
-               (mode == 'resume' and type(binding_id) is str and BINDING.fullmatch(binding_id) is not None), 'invalid_control')
+               (mode in ('resume', 'repair') and type(binding_id) is str and BINDING.fullmatch(binding_id) is not None), 'invalid_control')
+        _check(mode != 'repair' or selected_idea_id is None, 'invalid_control')
         _check(selected_idea_id is None or (type(selected_idea_id) is str and IDEA.fullmatch(selected_idea_id) is not None), 'invalid_control')
         # One overall deadline: binding reads settle within its first half, so a settle never
         # leaves the control call no time (which would read owner_unavailable).
         deadline = self._timeout(timeout)
         reads = deadline - timeout / 2  # half for settling reads; the call keeps at least the other half
-        prior = self.load_binding(binding_id, reads) if mode == 'resume' else None
+        prior = self.load_binding(binding_id, reads) if mode != 'new' else None
         # No client-side capacity precheck: at eight bindings the owner decides, because it may free a finished one.
         discovery, credential = self._client_pair(deadline)
         self._call('probe', discovery, credential, deadline)

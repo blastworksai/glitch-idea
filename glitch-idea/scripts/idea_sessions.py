@@ -228,6 +228,29 @@ class SessionPolicy(TrustedSessionPolicy):
         finally:
             lock.release()
 
+    def repair_browser(self, binding_id):
+        """Trusted pane-only: re-pair a tab whose page was rebuilt (cookie kept, tab secret lost).
+
+        Retires the browser credentials as a resume does and issues a fresh one-time code for the
+        SAME agent generation, so the agent keeps its token, its lease and any work in flight.
+        """
+        entry = self._entry(binding_id); lock = self._locked(entry)
+        try:
+            with self._registry:
+                check(entry.agent_token is not None, 'browser_unauthorized', 401)
+                if entry.cookie is not None and entry.tab_secret is not None:
+                    entry.retired.append((self._digest(entry.cookie), self._digest(entry.tab_secret)))
+                entry.active = False
+                entry.cookie = entry.csrf = entry.tab_secret = None
+                entry.transport = None
+                code = self._secret(16)
+                check(all(other.pairing_code != code for other in self._entries.values()), 'invalid_entropy', 500)
+                entry.pairing_code, entry.expires = code, self.clock()+self.ttl
+                entry.redeemed, entry.attempts = False, 0
+                return code
+        finally:
+            lock.release()
+
     def agent_credentials(self, binding_id):
         entry = self._entry(binding_id); lock = self._locked(entry)
         try:

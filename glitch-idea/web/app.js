@@ -46,6 +46,23 @@ export function rememberSelection(binding, ideaId, location = globalThis.locatio
   history.replaceState(null, '', url.pathname + url.search);
 }
 
+// Orca can rebuild a tab's page and reload its saved address: the cookie survives, the tab
+// secret does not. A tab that was paired before (its address carries the binding) is re-paired
+// in place by the terminal, so it says so instead of asking for a code first.
+export function lostPairingLine(location, code, fromLink = false) {
+  let binding = null;
+  try { binding = browserSelection(location).binding; } catch { return null; }
+  if (binding === null || fromLink || code !== 'browser_unauthorized') return null;
+  return 'This tab lost its pairing when Orca rebuilt it. Your answers are kept. Your terminal reconnects this tab by itself; if nothing happens within a minute, say "reconnect" in your terminal.';
+}
+
+// The page's pairing state, for the terminal's reconnect check (orca eval); never a secret.
+// A missing root never stops a load: the mark only informs the check.
+function markPairing(state) {
+  const root = globalThis.document?.documentElement;
+  if (root?.dataset) root.dataset.ideaPairing = state;
+}
+
 const components = new Map();
 let captureUploads = null;
 let ideasRenderer = null;
@@ -735,6 +752,7 @@ export function startApp(api = new IdeaApi()) {
 
   // One dead-tab panel for both cases: a sentence, no pairing form, no polling, nothing editable behind it.
   function showDeadTab(text, {link: withLink}) {
+    markPairing('replaced');
     superseded = true;
     connected = false;
     flow.stopAgentRefresh();
@@ -758,6 +776,7 @@ export function startApp(api = new IdeaApi()) {
   }
 
   function showPairing(code = '', {fromLink = false} = {}) {
+    markPairing('unpaired');
     connected = false;
     flow.stopAgentRefresh();
     api.csrf = null;
@@ -768,6 +787,12 @@ export function startApp(api = new IdeaApi()) {
     const message = code === 'pairing_replay_session_invalidated' ?
       'That code was already redeemed and the browser session was invalidated. Resume the initiating agent explicitly for a new code.' :
       'Get a fresh one-time pairing code from the initiating agent pane. Enter it here; codes expire after 60 seconds.';
+    const lost = lostPairingLine(location, code, fromLink);
+    if (lost) {
+      const line = element('p', lost, 'notice');
+      line.setAttribute('role', 'status');
+      box.append(line);
+    }
     box.append(element('p', message, 'g-sub'));
     if (fromLink && code !== 'pairing_replay_session_invalidated') {
       box.append(element('p', "This link's pairing code has expired. Ask your terminal for a new code (it runs session-open --resume).", 'notice'));
@@ -836,6 +861,7 @@ export function startApp(api = new IdeaApi()) {
     await api.write('transport', {host: location.host, origin: location.origin, secure_context: globalThis.isSecureContext === true});
     if (flow.disposed || epoch !== flow.mutationEpoch) return false;
     connected = true; flow.refreshUnauthorized = false;
+    markPairing('paired');
     byId('connection').hidden = true;
     if (flow.selectionUncertain && flow.state !== null) {
       render(); return false;
